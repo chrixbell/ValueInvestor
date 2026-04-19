@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard — ValueInvestor{% endblock %}
+
+{% block content %}
+<h1>Dashboard</h1>
+
+{% if has_data %}
+<div class="grid">
+    <div class="card">
+        <div class="label">Last Scan</div>
+        <div class="value" style="font-size:1.15rem">{{ last_scan }}</div>
+    </div>
+    <div class="card">
+        <div class="label">Screening Pool</div>
+        <div class="value">{{ total_screened }}</div>
+    </div>
+    <div class="card">
+        <div class="label">Candidates Found</div>
+        <div class="value">{{ num_candidates }}</div>
+    </div>
+</div>
+
+<h2 class="mt-2">Top 5 Value Picks</h2>
+
+<div class="table-wrap">
+    <table>
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>Ticker</th>
+                <th>Company</th>
+                <th>Sector</th>
+                <th>Score</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for c in top_candidates %}
+            <tr>
+                <td>{{ c.rank }}</td>
+                <td><a href="/candidates/{{ c.company.ticker }}">{{ c.company.ticker }}</a></td>
+                <td>{{ c.company.name }}</td>
+                <td>{{ c.company.sector or "—" }}</td>
+                <td>
+                    <span class="score {% if c.composite_score >= 85 %}score-high{% elif c.composite_score >= 70 %}score-mid{% else %}score-low{% endif %}">
+                        {{ "%.1f"|format(c.composite_score) }}
+                    </span>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<div class="card" style="text-align:center; padding:2rem">
+    <p style="font-size:1.2rem">No data yet.</p>
+    <p>Run a scan first to populate the dashboard with screening results.</p>
+    <code style="display:inline-block; margin-top:0.5rem">valueinvestor scan</code>
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,55 @@
+# ========================
+# Python
+# ========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+
+# ========================
+# Virtual environments
+# ========================
+.venv/
+venv/
+env/
+
+# ========================
+# Testing / Linting
+# ========================
+.pytest_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# ========================
+# IDE / Editor
+# ========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ========================
+# Project-specific
+# ========================
+
+# Runtime data cache
+data/cache.db
+
+# Generated reports (regenerate with `valueinvestor report`)
+reports/*.md
+reports/*.pdf
+
+# Config may contain API keys — keep out of version control
+# (use `valueinvestor config init` to regenerate)
+config.yaml
+
+# Environment variables file
+.env

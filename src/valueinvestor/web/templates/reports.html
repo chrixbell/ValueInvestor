@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+
+{% block title %}Reports — ValueInvestor{% endblock %}
+
+{% block content %}
+<h1>Reports</h1>
+
+{% if reports %}
+    {% for r in reports %}
+    <div class="report-item">
+        <div>
+            <div class="report-title">{{ r.title }}</div>
+            <div class="report-date">{{ r.modified }} · {{ r.ext | upper }} · {{ r.size_kb }} KB</div>
+        </div>
+        <div class="links">
+            <a href="/api/reports/download/{{ r.filename }}">Download</a>
+        </div>
+    </div>
+    {% endfor %}
+{% else %}
+    <p>No reports have been generated yet. Run a scan to create your first report.</p>
+    <code style="display:inline-block; margin-top:0.5rem">valueinvestor scan</code>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+
+{% block title %}{{ analysis.company_name if analysis else ticker }} ({{ ticker }}) — ValueInvestor{% endblock %}
+
+{% block content %}
+{% if analysis %}
+<div class="detail-header">
+    <h1>{{ analysis.company_name }}</h1>
+    <span class="ticker-badge">{{ analysis.ticker }}</span>
+</div>
+
+<!-- Screening Scores -->
+<h2>Screening Scores</h2>
+<div class="grid">
+    <div class="card">
+        <div class="label">Composite</div>
+        <div class="value">{{ "%.1f"|format(analysis.screening_result.composite_score) }}</div>
+    </div>
+    <div class="card">
+        <div class="label">Value</div>
+        <div class="value">{{ "%.1f"|format(analysis.screening_result.value_score) }}</div>
+    </div>
+    <div class="card">
+        <div class="label">Quality</div>
+        <div class="value">{{ "%.1f"|format(analysis.screening_result.quality_score) }}</div>
+    </div>
+    <div class="card">
+        <div class="label">Growth</div>
+        <div class="value">{{ "%.1f"|format(analysis.screening_result.growth_score) }}</div>
+    </div>
+</div>
+
+<!-- Financial Summary -->
+<h2 class="mt-2">Financial Summary</h2>
+<div class="table-wrap">
+    <table>
+        <thead>
+            <tr>
+                <th>Metric</th>
+                <th>Value</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr><td>Revenue</td><td>{{ analysis.screening_result.financials.revenue | fmt_market_cap if analysis.screening_result.financials.revenue is not none else "—" }}</td></tr>
+            <tr><td>Net Income</td><td>{{ analysis.screening_result.financials.net_income | fmt_market_cap if analysis.screening_result.financials.net_income is not none else "—" }}</td></tr>
+            <tr><td>ROE</td><td>{{ "%.1f%%"|format(analysis.screening_result.financials.roe * 100) if analysis.screening_result.financials.roe is not none else "—" }}</td></tr>
+            <tr><td>Gross Margin</td><td>{{ "%.1f%%"|format(analysis.screening_result.financials.gross_margin * 100) if analysis.screening_result.financials.gross_margin is not none else "—" }}</td></tr>
+            <tr><td>Net Margin</td><td>{{ "%.1f%%"|format(analysis.screening_result.financials.net_margin * 100) if analysis.screening_result.financials.net_margin is not none else "—" }}</td></tr>
+            <tr><td>Debt/Equity</td><td>{{ "%.2f"|format(analysis.screening_result.financials.debt_to_equity) if analysis.screening_result.financials.debt_to_equity is not none else "—" }}</td></tr>
+            <tr><td>P/E</td><td>{{ "%.1f"|format(analysis.screening_result.valuation.pe_ratio) if analysis.screening_result.valuation.pe_ratio is not none else "—" }}</td></tr>
+            <tr><td>P/B</td><td>{{ "%.1f"|format(analysis.screening_result.valuation.pb_ratio) if analysis.screening_result.valuation.pb_ratio is not none else "—" }}</td></tr>
+            <tr><td>Dividend Yield</td><td>{{ "%.2f%%"|format(analysis.screening_result.valuation.dividend_yield * 100) if analysis.screening_result.valuation.dividend_yield is not none else "—" }}</td></tr>
+        </tbody>
+    </table>
+</div>
+
+{% if analysis.portfolio_weight is not none %}
+<h2 class="mt-2">Portfolio Weight</h2>
+<p>Recommended allocation: <strong>{{ "%.1f%%"|format(analysis.portfolio_weight * 100) }}</strong></p>
+{% endif %}
+
+<!-- Analysis Dimensions -->
+<h2 class="mt-2">Analysis Dimensions</h2>
+{% for dim in analysis.analyses %}
+<div class="dimension">
+    <h3>{{ dim.title }}</h3>
+    {% if dim.confidence is not none %}
+    <span class="label" style="font-size:0.85rem">Confidence: {{ "%.0f%%"|format(dim.confidence * 100) }}</span>
+    {% endif %}
+    <p>{{ dim.content }}</p>
+</div>
+{% endfor %}
+
+<!-- Key Milestones -->
+{% if analysis.key_milestones %}
+<h2 class="mt-2">Key Milestones</h2>
+<ul class="milestones">
+    {% for m in analysis.key_milestones %}
+    <li>{{ m }}</li>
+    {% endfor %}
+</ul>
+{% endif %}
+
+<p style="margin-top:2rem; font-size:0.85rem; color:#888">Analysis generated at {{ analysis.generated_at }}</p>
+
+{% else %}
+<div class="detail-header">
+    <h1>{{ ticker }}</h1>
+    <span class="ticker-badge">{{ ticker }}</span>
+</div>
+<p>No analysis data found for <strong>{{ ticker }}</strong>. Run a scan to generate analysis.</p>
+<code style="display:inline-block; margin-top:0.5rem">valueinvestor scan</code>
+{% endif %}
+{% endblock %}

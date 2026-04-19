@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+
+{% block title %}Candidates — ValueInvestor{% endblock %}
+
+{% block content %}
+<h1>Candidate Companies</h1>
+
+{% if candidates %}
+<div class="table-wrap">
+    <table id="candidates-table">
+        <thead>
+            <tr>
+                <th data-col="rank">Rank</th>
+                <th data-col="ticker">Ticker</th>
+                <th data-col="name">Name</th>
+                <th data-col="sector">Sector</th>
+                <th data-col="market_cap">Market Cap</th>
+                <th data-col="pe">P/E</th>
+                <th data-col="pb">P/B</th>
+                <th data-col="roe">ROE %</th>
+                <th data-col="composite_score">Score</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for c in candidates %}
+            <tr>
+                <td>{{ c.rank }}</td>
+                <td><a href="/candidates/{{ c.company.ticker }}">{{ c.company.ticker }}</a></td>
+                <td>{{ c.company.name }}</td>
+                <td>{{ c.company.sector or "—" }}</td>
+                <td>{{ c.valuation.market_cap_rmb | fmt_market_cap }}</td>
+                <td>{{ "%.1f"|format(c.valuation.pe_ratio) if c.valuation.pe_ratio is not none else "—" }}</td>
+                <td>{{ "%.1f"|format(c.valuation.pb_ratio) if c.valuation.pb_ratio is not none else "—" }}</td>
+                <td>{{ "%.1f"|format(c.financials.roe * 100) if c.financials.roe is not none else "—" }}</td>
+                <td>
+                    <span class="score {% if c.composite_score >= 85 %}score-high{% elif c.composite_score >= 70 %}score-mid{% else %}score-low{% endif %}">
+                        {{ "%.1f"|format(c.composite_score) }}
+                    </span>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<script>
+/* Minimal client-side column sorting */
+(function () {
+    const table = document.getElementById("candidates-table");
+    if (!table) return;
+    const headers = table.querySelectorAll("th[data-col]");
+    let sortCol = null;
+    let sortAsc = true;
+
+    headers.forEach(function (th) {
+        th.addEventListener("click", function () {
+            const col = th.getAttribute("data-col");
+            if (sortCol === col) {
+                sortAsc = !sortAsc;
+            } else {
+                sortCol = col;
+                sortAsc = true;
+            }
+            const tbody = table.querySelector("tbody");
+            const rows = Array.from(tbody.querySelectorAll("tr"));
+            const idx = Array.from(th.parentNode.children).indexOf(th);
+            rows.sort(function (a, b) {
+                let va = a.children[idx].textContent.trim();
+                let vb = b.children[idx].textContent.trim();
+                const na = parseFloat(va);
+                const nb = parseFloat(vb);
+                if (!isNaN(na) && !isNaN(nb)) {
+                    return sortAsc ? na - nb : nb - na;
+                }
+                return sortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+            });
+            rows.forEach(function (r) { tbody.appendChild(r); });
+        });
+    });
+})();
+</script>
+{% else %}
+<p>No candidates yet. Run a scan first to populate the list.</p>
+<code style="display:inline-block; margin-top:0.5rem">valueinvestor scan</code>
+{% endif %}
+{% endblock %}
