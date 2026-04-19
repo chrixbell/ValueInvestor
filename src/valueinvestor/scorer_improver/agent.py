@@ -54,53 +54,47 @@ After the code, briefly explain what you changed and why (1-2 sentences).
 
 
 def _get_llm_client():
-    """Create an LLM client for the agent, using current Copilot model."""
+    """Create an LLM client using load_config() — same resolution as the main pipeline."""
     import os
 
-    from dotenv import load_dotenv
+    from valueinvestor.analysis.llm_client import LLMClient
+    from valueinvestor.config import load_config
 
-    from valueinvestor.config import LLMConfig
+    cfg = load_config()
+    cfg.llm.temperature = 0.7  # Higher creativity for exploration
 
-    load_dotenv()
-
-    # Prefer GitHub Copilot; fall back to Gemini
-    provider = os.environ.get("LLM_PROVIDER", "github")
-    model = os.environ.get("LLM_MODEL", "claude-sonnet-4.6")
-    base_url = os.environ.get("LLM_BASE_URL", "https://api.githubcopilot.com")
-
-    # Resolve API key
-    api_key = None
-    if provider == "github":
-        api_key = os.environ.get("GITHUB_TOKEN") or os.environ.get("GITHUB_API_KEY")
-        # Check if it's a real token
-        if not api_key or len(api_key) < 36 or not any(
-            api_key.startswith(p) for p in ("ghp_", "ghu_", "ghs_", "github_pat_")
-        ):
-            # Fall back to Gemini
-            gemini_key = os.environ.get("GEMINI_API_KEY")
-            if gemini_key:
-                provider = "gemini"
-                model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
-                api_key = gemini_key
-                base_url = None
-                logger.info("Agent using Gemini fallback (no valid GitHub token)")
+    provider = cfg.llm.provider
+    api_key = cfg.llm.api_key
 
     if not api_key:
         raise RuntimeError(
             "No LLM API key available. Set GITHUB_TOKEN or GEMINI_API_KEY in .env"
         )
 
-    config = LLMConfig(
-        provider=provider,
-        model=model,
-        api_key=api_key,
-        base_url=base_url if provider != "gemini" else None,
-        max_retries=3,
-        temperature=0.7,  # Higher creativity for exploration
-    )
+    logger.info("Agent using provider=%s model=%s", provider, cfg.llm.model)
+    return LLMClient(config=cfg.llm)
+
+
+def _make_gemini_fallback_client():
+    """Create a Gemini client as runtime fallback when primary provider fails."""
+    import os
 
     from valueinvestor.analysis.llm_client import LLMClient
+    from valueinvestor.config import LLMConfig
 
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    gemini_model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+    if not gemini_key:
+        return None
+    config = LLMConfig(
+        provider="gemini",
+        model=gemini_model,
+        api_key=gemini_key,
+        base_url=None,
+        max_retries=3,
+        temperature=0.7,
+    )
+    logger.info("Falling back to Gemini (%s)", gemini_model)
     return LLMClient(config=config)
 
 
@@ -275,6 +269,7 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
 
     # Create LLM client
     llm = _get_llm_client()
+    _fallback_llm = None  # Gemini fallback, created on first 401
 
     iteration = exp_log.total_experiments()
     while not _stop:
@@ -321,16 +316,52 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
                 user_prompt=user_prompt,
             )
         except Exception as e:
-            logger.error("LLM call failed: %s", e)
-            exp_log.log(
-                iteration=iteration,
-                spearman_rho=baseline_rho,
-                baseline_rho=baseline_rho,
-                kept=False,
-                description=f"LLM call failed: {e}",
-            )
-            time.sleep(5)
-            continue
+            err_str = str(e).lower()
+            # On auth failure, try Gemini fallback once
+            if any(k in err_str for k in ("401", "unauthorized", "authentication", "invalid api key")):
+                if _fallback_llm is None:
+                    _fallback_llm = _make_gemini_fallback_client()
+                if _fallback_llm is not None and _fallback_llm is not llm:
+                    logger.warning("Primary LLM auth failed, switching to Gemini fallback")
+                    llm = _fallback_llm
+                    try:
+                        response = llm.complete(
+                            system_prompt=_AGENT_SYSTEM_PROMPT,
+                            user_prompt=user_prompt,
+                        )
+                    except Exception as e2:
+                        logger.error("Gemini fallback also failed: %s", e2)
+                        exp_log.log(
+                            iteration=iteration,
+                            spearman_rho=baseline_rho,
+                            baseline_rho=baseline_rho,
+                            kept=False,
+                            description=f"LLM call failed (both providers): {e2}",
+                        )
+                        time.sleep(5)
+                        continue
+                else:
+                    logger.error("LLM call failed (auth): %s", e)
+                    exp_log.log(
+                        iteration=iteration,
+                        spearman_rho=baseline_rho,
+                        baseline_rho=baseline_rho,
+                        kept=False,
+                        description=f"LLM call failed: {e}",
+                    )
+                    time.sleep(5)
+                    continue
+            else:
+                logger.error("LLM call failed: %s", e)
+                exp_log.log(
+                    iteration=iteration,
+                    spearman_rho=baseline_rho,
+                    baseline_rho=baseline_rho,
+                    kept=False,
+                    description=f"LLM call failed: {e}",
+                )
+                time.sleep(5)
+                continue
 
         # 5. Extract code from response
         new_code = _extract_code(response)

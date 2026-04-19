@@ -10,8 +10,10 @@ Designed to be run once; re-running refreshes only stale data.
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import sqlite3
+import threading
 import time
 from datetime import date, timedelta
 from pathlib import Path
@@ -31,12 +33,16 @@ _HKSHARE_PRICES_FILE = TRAINER_DIR / "hkshare_prices.parquet"
 _VALUATIONS_FILE = TRAINER_DIR / "valuations.parquet"
 _FINANCIALS_FILE = TRAINER_DIR / "financials.parquet"
 
-# Tencent history fetch rate limit (seconds between requests)
-_TENCENT_DELAY = 0.15
-# yfinance HK rate limit
-_YF_DELAY = 0.3
+# Tencent history parallel workers (balance speed vs rate limiting)
+_TENCENT_WORKERS = 8
+# yfinance HK parallel workers
+_YF_WORKERS = 10
 # Max stocks to fetch (0 = all)
 _MAX_STOCKS = 0
+# Incremental save interval: save partial results every N stocks
+_SAVE_INTERVAL = 200
+# Brief sleep between requests to avoid rate limiting
+_TENCENT_DELAY = 0.05
 
 _CREATE_TRAINER_TABLES = """
 CREATE TABLE IF NOT EXISTS stock_meta (
@@ -120,47 +126,96 @@ def _fetch_ashare_prices(
 ) -> pd.DataFrame:
     """Fetch daily close prices for A-share stocks via Tencent (akshare).
 
+    Uses a thread pool to fetch in parallel.  Saves incrementally every
+    _SAVE_INTERVAL stocks so progress is not lost on interruption.
+
     Returns a DataFrame with columns: ticker, date, open, close, high, low, volume.
     """
     import akshare as ak
 
-    all_frames: list[pd.DataFrame] = []
     total = len(companies) if _MAX_STOCKS == 0 else min(_MAX_STOCKS, len(companies))
     companies = companies[:total]
+    logger.info("Fetching A-share prices for %d stocks (workers=%d) …", total, _TENCENT_WORKERS)
 
-    logger.info("Fetching A-share prices for %d stocks …", total)
+    # Resume support: if partial file exists, skip already-fetched tickers
+    partial_frames: list[pd.DataFrame] = []
+    done_tickers: set[str] = set()
+    if _ASHARE_PRICES_FILE.exists():
+        try:
+            existing = pd.read_parquet(str(_ASHARE_PRICES_FILE))
+            done_tickers = set(existing["ticker"].unique())
+            partial_frames.append(existing)
+            logger.info("  Resuming: %d tickers already cached", len(done_tickers))
+        except Exception:
+            pass
 
-    for idx, company in enumerate(companies):
+    pending = [c for c in companies if c.ticker not in done_tickers]
+    if not pending:
+        logger.info("All A-share tickers already fetched.")
+        return pd.concat(partial_frames, ignore_index=True) if partial_frames else pd.DataFrame()
+
+    counter = {"done": 0, "ok": 0, "fail": 0}
+    counter_lock = threading.Lock()
+    new_frames: list[pd.DataFrame] = []
+    frames_lock = threading.Lock()
+
+    def _fetch_one(company: Company) -> Optional[pd.DataFrame]:
         ticker = company.ticker
         prefix = "sh" if ticker.startswith("6") else "sz"
         symbol = f"{prefix}{ticker}"
-
         try:
-            df = ak.stock_zh_a_hist_tx(
-                symbol=symbol,
-                start_date=start_date,
-                end_date=end_date,
-            )
+            time.sleep(_TENCENT_DELAY)
+            df = ak.stock_zh_a_hist_tx(symbol=symbol, start_date=start_date, end_date=end_date)
             if df is not None and not df.empty:
-                df = df.rename(columns={
-                    "date": "date", "open": "open", "close": "close",
-                    "high": "high", "low": "low", "amount": "volume",
-                })
+                df = df.rename(columns={"amount": "volume"})
                 df["ticker"] = ticker
-                all_frames.append(df[["ticker", "date", "open", "close", "high", "low", "volume"]])
+                cols = [c for c in ["ticker", "date", "open", "close", "high", "low", "volume"] if c in df.columns]
+                return df[cols]
         except Exception:
-            logger.debug("Failed to fetch A-share history for %s", ticker, exc_info=True)
+            logger.debug("Failed A-share hist for %s", ticker, exc_info=True)
+        return None
 
-        if (idx + 1) % 100 == 0:
-            logger.info("  A-share prices: %d/%d fetched", idx + 1, total)
-        time.sleep(_TENCENT_DELAY)
+    def _worker(company: Company) -> None:
+        result = _fetch_one(company)
+        with frames_lock:
+            if result is not None:
+                new_frames.append(result)
+                counter["ok"] += 1
+            else:
+                counter["fail"] += 1
+            counter["done"] += 1
+            done = counter["done"]
 
+        if done % 100 == 0:
+            logger.info("  A-share prices: %d/%d (ok=%d, fail=%d)", done, len(pending), counter["ok"], counter["fail"])
+
+        # Incremental save every _SAVE_INTERVAL
+        if done % _SAVE_INTERVAL == 0 and new_frames:
+            with frames_lock:
+                all_so_far = partial_frames + new_frames
+                if all_so_far:
+                    try:
+                        combined = pd.concat(all_so_far, ignore_index=True)
+                        combined.to_parquet(str(_ASHARE_PRICES_FILE), index=False)
+                        logger.info("  ↳ Incremental save: %d rows", len(combined))
+                    except Exception as exc:
+                        logger.warning("Incremental save failed: %s", exc)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=_TENCENT_WORKERS) as executor:
+        list(executor.map(_worker, pending))
+
+    logger.info(
+        "A-share prices complete: %d ok, %d fail out of %d total",
+        counter["ok"], counter["fail"], len(pending),
+    )
+
+    all_frames = partial_frames + new_frames
     if not all_frames:
         logger.warning("No A-share price data fetched")
         return pd.DataFrame()
 
     result = pd.concat(all_frames, ignore_index=True)
-    logger.info("A-share prices: %d rows for %d stocks", len(result), len(all_frames))
+    logger.info("A-share prices: %d rows for %d stocks", len(result), result["ticker"].nunique())
     return result
 
 
@@ -172,19 +227,20 @@ def _fetch_hkshare_prices(
     companies: List[Company],
     period: str = "3y",
 ) -> pd.DataFrame:
-    """Fetch daily close prices for HK stocks via yfinance.
+    """Fetch daily close prices for HK stocks via yfinance (parallel).
 
     Returns a DataFrame with columns: ticker, date, open, close, high, low, volume.
     """
     import yfinance as yf
 
-    all_frames: list[pd.DataFrame] = []
     total = len(companies) if _MAX_STOCKS == 0 else min(_MAX_STOCKS, len(companies))
     companies = companies[:total]
+    logger.info("Fetching HK-share prices for %d stocks (workers=%d) …", total, _YF_WORKERS)
 
-    logger.info("Fetching HK-share prices for %d stocks …", total)
+    frames: list[pd.DataFrame] = []
+    frames_lock = threading.Lock()
 
-    for idx, company in enumerate(companies):
+    def _fetch_one(company: Company) -> None:
         ticker = company.ticker
         try:
             t = yf.Ticker(ticker)
@@ -196,22 +252,22 @@ def _fetch_hkshare_prices(
                     "High": "high", "Low": "low", "Volume": "volume",
                 })
                 df["ticker"] = ticker
-                # Remove timezone from date
                 df["date"] = pd.to_datetime(df["date"]).dt.date
-                all_frames.append(df[["ticker", "date", "open", "close", "high", "low", "volume"]])
+                cols = [c for c in ["ticker", "date", "open", "close", "high", "low", "volume"] if c in df.columns]
+                with frames_lock:
+                    frames.append(df[cols])
         except Exception:
-            logger.debug("Failed to fetch HK history for %s", ticker, exc_info=True)
+            logger.debug("Failed HK history for %s", ticker, exc_info=True)
 
-        if (idx + 1) % 50 == 0:
-            logger.info("  HK-share prices: %d/%d fetched", idx + 1, total)
-        time.sleep(_YF_DELAY)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=_YF_WORKERS) as executor:
+        list(executor.map(_fetch_one, companies))
 
-    if not all_frames:
+    if not frames:
         logger.warning("No HK-share price data fetched")
         return pd.DataFrame()
 
-    result = pd.concat(all_frames, ignore_index=True)
-    logger.info("HK-share prices: %d rows for %d stocks", len(result), len(all_frames))
+    result = pd.concat(frames, ignore_index=True)
+    logger.info("HK-share prices: %d rows for %d stocks", len(result), result["ticker"].nunique())
     return result
 
 
