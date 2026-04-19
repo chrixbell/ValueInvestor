@@ -260,8 +260,8 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
     # Get baseline evaluation
     logger.info("Computing baseline evaluation …")
     baseline_metrics = evaluate_scorer(use_original_scores=False)
-    baseline_rho = baseline_metrics["spearman_rho"]
-    best_rho = exp_log.best_rho() or baseline_rho
+    baseline_rho = float(baseline_metrics["spearman_rho"])
+    best_rho = float(exp_log.best_rho() or baseline_rho)
 
     print(f"\n🎯 Baseline Spearman ρ = {baseline_rho:.4f}")
     print(f"📊 Best achieved ρ = {best_rho:.4f}")
@@ -272,11 +272,13 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
     _fallback_llm = None  # Gemini fallback, created on first 401
 
     iteration = exp_log.total_experiments()
+    new_iterations = 0  # Count only iterations in THIS run (not historical)
     while not _stop:
-        iteration += 1
-        if max_iterations > 0 and iteration > max_iterations:
+        if max_iterations > 0 and new_iterations >= max_iterations:
             print(f"\n🏁 Reached max iterations ({max_iterations}). Stopping.")
             break
+        iteration += 1
+        new_iterations += 1
 
         logger.info("=== Iteration #%d ===", iteration)
 
@@ -416,11 +418,11 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
             continue
 
         # 9. Keep or revert
-        improved = new_rho > baseline_rho
+        improved = bool(new_rho > baseline_rho)
         if improved:
-            baseline_rho = new_rho
+            baseline_rho = float(new_rho)
             if new_rho > best_rho:
-                best_rho = new_rho
+                best_rho = float(new_rho)
             logger.info("✅ Improvement! ρ: %.4f → %.4f", baseline_rho, new_rho)
         else:
             _write_scorer(original_code)
@@ -428,14 +430,14 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
 
         exp_log.log(
             iteration=iteration,
-            spearman_rho=new_rho,
-            baseline_rho=baseline_rho if not improved else baseline_rho,
+            spearman_rho=float(new_rho),
+            baseline_rho=float(baseline_rho),
             kept=improved,
             description=explanation,
             diff_summary=diff_summary,
             extra={
-                "hit_rate_top20": new_metrics.get("hit_rate_top20", 0),
-                "mean_excess_return": new_metrics.get("mean_excess_return", 0),
+                "hit_rate_top20": float(new_metrics.get("hit_rate_top20", 0)),
+                "mean_excess_return": float(new_metrics.get("mean_excess_return", 0)),
             },
         )
 
@@ -446,7 +448,7 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
 
     # Summary
     print(f"\n{'='*60}")
-    print(f"  🏁 Improvement loop finished after {iteration} iterations")
+    print(f"  🏁 Improvement loop finished after {new_iterations} new iterations")
     print(f"  📊 Final Spearman ρ = {baseline_rho:.4f}")
     print(f"  🏆 Best ρ = {best_rho:.4f}")
     print(f"  📝 Experiment log: {exp_log.path}")
