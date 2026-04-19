@@ -521,6 +521,92 @@ def serve(
 
 
 # ---------------------------------------------------------------------------
+# improve-scorer
+# ---------------------------------------------------------------------------
+
+@app.command("improve-scorer")
+def improve_scorer(
+    config: str = typer.Option("config.yaml", "--config", "-c", help="Path to config YAML."),
+    fetch_only: bool = typer.Option(False, "--fetch-only", help="Only fetch/rebuild training data."),
+    resume: bool = typer.Option(False, "--resume", help="Skip data fetch, resume improvement loop."),
+    status: bool = typer.Option(False, "--status", help="Show experiment history summary."),
+    force: bool = typer.Option(False, "--force", help="Force re-fetch of training data."),
+    max_iterations: int = typer.Option(0, "--max-iter", "-n", help="Max iterations (0 = unlimited)."),
+) -> None:
+    """Autonomous scorer improvement loop (autoresearch-inspired).
+
+    Fetches 3-year historical data, builds ground truth with 6-month forward
+    returns, then iteratively uses an LLM to improve scorer.py code.
+    """
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-8s %(name)s — %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    if status:
+        from valueinvestor.scorer_improver.agent import show_status
+        show_status()
+        return
+
+    if not resume:
+        # Phase 1: Fetch training data
+        console.print("\n[bold cyan]Phase 1:[/bold cyan] Fetching training data …")
+        try:
+            from valueinvestor.scorer_improver.data_prep import fetch_training_data
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+                transient=True,
+            ) as progress:
+                progress.add_task("Fetching 3-year historical data …", total=None)
+                files = fetch_training_data(force=force)
+
+            console.print(f"[green]✓[/green] Training data ready — {len(files)} files")
+            for name, path in files.items():
+                console.print(f"  • {name}: {path}")
+        except Exception as exc:
+            err_console.print(f"[red]Data fetch failed:[/red] {exc}")
+            raise typer.Exit(code=1) from exc
+
+        # Phase 2: Build ground truth
+        console.print("\n[bold cyan]Phase 2:[/bold cyan] Building ground truth …")
+        try:
+            from valueinvestor.scorer_improver.ground_truth import build_ground_truth
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+                transient=True,
+            ) as progress:
+                progress.add_task("Computing forward returns & scoring snapshots …", total=None)
+                gt_path = build_ground_truth(force=force)
+
+            console.print(f"[green]✓[/green] Ground truth ready → {gt_path}")
+        except Exception as exc:
+            err_console.print(f"[red]Ground truth build failed:[/red] {exc}")
+            raise typer.Exit(code=1) from exc
+
+        if fetch_only:
+            console.print("\n[yellow]--fetch-only mode: stopping after data prep.[/yellow]")
+            return
+
+    # Phase 3: Improvement loop
+    console.print("\n[bold cyan]Phase 3:[/bold cyan] Starting improvement loop …")
+    console.print("[dim]Press Ctrl-C to stop gracefully[/dim]\n")
+
+    try:
+        from valueinvestor.scorer_improver.agent import run_improvement_loop
+        run_improvement_loop(max_iterations=max_iterations)
+    except Exception as exc:
+        err_console.print(f"[red]Improvement loop error:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+
+# ---------------------------------------------------------------------------
 # Entry point (for direct execution)
 # ---------------------------------------------------------------------------
 
