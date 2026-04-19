@@ -32,19 +32,23 @@ def test_load_config_openrouter_env(tmp_path, monkeypatch):
     assert cfg.llm.api_key == "or_val"
 
 def test_load_config_env_selection(tmp_path, monkeypatch):
+    # Use a realistic-length mock token (real GitHub PATs are >= 40 chars and start with ghp_)
+    mock_token = "ghp_" + "A" * 36  # 40 chars, starts with ghp_
     monkeypatch.setenv("LLM_PROVIDER", "github")
     monkeypatch.setenv("LLM_MODEL", "Copilot/Claude Sonnet 4.6")
     monkeypatch.setenv("LLM_BASE_URL", "https://api.github.com/")
-    monkeypatch.setenv("GITHUB_API_KEY", "ghp_test")
-    
+    monkeypatch.setenv("GITHUB_API_KEY", mock_token)
+    # Ensure GEMINI_API_KEY is unset so the fallback doesn't trigger
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text("llm:\n  provider: openai\n  model: gpt-4o", encoding="utf-8")
-    
+
     cfg = load_config(str(cfg_path))
     assert cfg.llm.provider == "github"
     assert cfg.llm.model == "Copilot/Claude Sonnet 4.6"
     assert cfg.llm.base_url == "https://api.github.com/"
-    assert cfg.llm.api_key == "ghp_test"
+    assert cfg.llm.api_key == mock_token
 
 def test_llm_client_uses_base_url():
     cfg = AppConfig()

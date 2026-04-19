@@ -95,6 +95,15 @@ class AnalysisPipeline:
                     )
                     parsed = {"title": dim_name, "content": raw}
 
+                # Normalise: some models return a JSON array instead of an object.
+                # Take the first element if it's a dict, otherwise treat as raw text.
+                if isinstance(parsed, list):
+                    parsed = parsed[0] if parsed and isinstance(parsed[0], dict) else {"title": dim_name, "content": raw}
+
+                # Ensure we have a dict before calling .get()
+                if not isinstance(parsed, dict):
+                    parsed = {"title": dim_name, "content": str(parsed)}
+
                 dim = AnalysisDimension(
                     dimension=dim_name,
                     title=parsed.get("title", dim_name),

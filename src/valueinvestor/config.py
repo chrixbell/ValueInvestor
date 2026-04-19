@@ -70,8 +70,19 @@ class AppConfig(BaseModel):
 # Helpers
 # ---------------------------------------------------------------------------
 
+import logging as _logging
+_cfg_logger = _logging.getLogger(__name__)
+
+
 def _apply_env_overrides(cfg: AppConfig) -> AppConfig:
-    """Merge selected environment variables over file/default values."""
+    """Merge selected environment variables over file/default values.
+
+    Auto-fallback: if provider is ``github`` but ``GITHUB_TOKEN`` is not set
+    (or is a placeholder), the function automatically switches to ``gemini``
+    when ``GEMINI_API_KEY`` is available.  This lets the app run out-of-the-box
+    without a Copilot subscription while keeping GitHub Copilot as the
+    preferred default when a real token is provided.
+    """
     # Override LLM selection via environment variables
     if env_provider := os.environ.get("LLM_PROVIDER"):
         cfg.llm.provider = env_provider
@@ -98,6 +109,27 @@ def _apply_env_overrides(cfg: AppConfig) -> AppConfig:
             cfg.llm.api_key = api_key
             break
 
+    # Auto-fallback: GitHub provider without any usable key → try Gemini.
+    # We check whether cfg.llm.api_key looks like a real GitHub token
+    # (starts with a known prefix and is ≥ 36 characters long).  If it's
+    # empty or a placeholder, switch to Gemini when GEMINI_API_KEY is set.
+    if cfg.llm.provider == "github":
+        current_key = cfg.llm.api_key or ""
+        _is_real_token = (
+            len(current_key) >= 36
+            and any(current_key.startswith(pfx) for pfx in ("ghp_", "ghu_", "ghs_", "github_pat_"))
+        )
+        if not _is_real_token:
+            gemini_key = os.environ.get("GEMINI_API_KEY", "")
+            if gemini_key:
+                _cfg_logger.warning(
+                    "GITHUB_TOKEN not set — auto-falling back to Gemini. "
+                    "Set GITHUB_TOKEN in .env to use GitHub Copilot."
+                )
+                cfg.llm.provider = "gemini"
+                cfg.llm.model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+                cfg.llm.base_url = None
+                cfg.llm.api_key = gemini_key
 
     return cfg
 
