@@ -112,25 +112,24 @@ class MultiFactorScorer:
         weighted_scores: List[Tuple[float, float]] = [] # (score, weight)
 
         # Define internal weights for value sub-factors
-        # Adjusting weights for PE/PB upwards, as past experiments showed reversing their
-        # currently "inverted" scoring (higher PE/PB = higher score) led to negative correlation.
-        # This implies that for the dataset, higher PE/PB (as currently scored) is a positive signal.
-        PE_WEIGHT = 0.35
-        PB_WEIGHT = 0.35
-        PS_WEIGHT = 0.15
-        EV_EBITDA_WEIGHT = 0.15
+        # Giving lower weight to PE/PB due to their counter-intuitive scoring direction
+        # and higher weight to PS/EV/EBITDA which are more robust and intuitively scored.
+        PE_WEIGHT = 0.2
+        PB_WEIGHT = 0.2
+        PS_WEIGHT = 0.3
+        EV_EBITDA_WEIGHT = 0.3
 
         pe = result.valuation.pe_ratio
         if pe is not None and pe > 0:
             # The current scoring for PE (best=50.0, worst=10.0) means higher PE gets a higher score.
-            # Experiments attempting to reverse this (making lower PE better) resulted in significantly
-            # negative correlations. We lean into this empirical finding by increasing its weight.
+            # This is counter-intuitive for "value" but attempts to "correct" it have historically
+            # decreased the correlation. We maintain the current behavior but reduce its weight.
             weighted_scores.append((_linear_score(pe, best=50.0, worst=10.0), PE_WEIGHT))
 
         pb = result.valuation.pb_ratio
         if pb is not None and pb > 0:
             # Similar to PE, the current scoring (best=4.0, worst=1.0) means higher PB gets a higher score.
-            # We maintain this behavior and increase its weight based on empirical results.
+            # We maintain this behavior due to past experiment results, but reduce its weight.
             weighted_scores.append((_linear_score(pb, best=4.0, worst=1.0), PB_WEIGHT))
 
         ps = result.valuation.ps_ratio

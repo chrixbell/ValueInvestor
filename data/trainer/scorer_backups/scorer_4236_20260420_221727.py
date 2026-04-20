@@ -112,25 +112,24 @@ class MultiFactorScorer:
         weighted_scores: List[Tuple[float, float]] = [] # (score, weight)
 
         # Define internal weights for value sub-factors
-        # Adjusting weights for PE/PB upwards, as past experiments showed reversing their
-        # currently "inverted" scoring (higher PE/PB = higher score) led to negative correlation.
-        # This implies that for the dataset, higher PE/PB (as currently scored) is a positive signal.
-        PE_WEIGHT = 0.35
-        PB_WEIGHT = 0.35
-        PS_WEIGHT = 0.15
-        EV_EBITDA_WEIGHT = 0.15
+        # Giving lower weight to PE/PB due to their counter-intuitive scoring direction
+        # and higher weight to PS/EV/EBITDA which are more robust and intuitively scored.
+        PE_WEIGHT = 0.2
+        PB_WEIGHT = 0.2
+        PS_WEIGHT = 0.3
+        EV_EBITDA_WEIGHT = 0.3
 
         pe = result.valuation.pe_ratio
         if pe is not None and pe > 0:
             # The current scoring for PE (best=50.0, worst=10.0) means higher PE gets a higher score.
-            # Experiments attempting to reverse this (making lower PE better) resulted in significantly
-            # negative correlations. We lean into this empirical finding by increasing its weight.
+            # This is counter-intuitive for "value" but attempts to "correct" it have historically
+            # decreased the correlation. We maintain the current behavior but reduce its weight.
             weighted_scores.append((_linear_score(pe, best=50.0, worst=10.0), PE_WEIGHT))
 
         pb = result.valuation.pb_ratio
         if pb is not None and pb > 0:
             # Similar to PE, the current scoring (best=4.0, worst=1.0) means higher PB gets a higher score.
-            # We maintain this behavior and increase its weight based on empirical results.
+            # We maintain this behavior due to past experiment results, but reduce its weight.
             weighted_scores.append((_linear_score(pb, best=4.0, worst=1.0), PB_WEIGHT))
 
         ps = result.valuation.ps_ratio
@@ -205,26 +204,19 @@ class MultiFactorScorer:
     @staticmethod
     def _growth_score(result: ScreeningResult) -> float:
         """Simplified growth score: lower PEG → higher growth potential."""
-        weighted_scores: List[Tuple[float, float]] = [] # (score, weight)
+        scores: List[float] = []
 
-        # Define internal weights for growth sub-factors
-        PEG_GROWTH_WEIGHT = 0.7
-        ROE_GROWTH_WEIGHT = 0.3
-
+        # MODIFICATION: Re-introducing ROE into growth score, but with higher thresholds
+        # to focus on more robust growth, differentiating it from the quality score's ROE.
         roe = result.financials.roe
         if roe is not None:
             # Score ROE: 0 if ROE <= 0.10, 100 if ROE >= 0.30.
             # This emphasizes strong, growth-oriented ROE performance.
-            weighted_scores.append((_linear_score(roe, best=0.30, worst=0.10), ROE_GROWTH_WEIGHT))
+            scores.append(_linear_score(roe, best=0.30, worst=0.10))
 
         peg = result.valuation.peg_ratio
         if peg is not None and peg > 0:
             # Lower PEG is better: 100 if PEG <= 0.7, 0 if PEG >= 1.8. Correctly assigns 100 to 0.7 and 0 to 1.8
-            weighted_scores.append((_linear_score(peg, best=0.7, worst=1.8), PEG_GROWTH_WEIGHT))
+            scores.append(_linear_score(peg, best=0.7, worst=1.8))
 
-        if weighted_scores:
-            total_score = sum(score * weight for score, weight in weighted_scores)
-            total_weight = sum(weight for score, weight in weighted_scores)
-            return total_score / total_weight if total_weight > 0 else 50.0
-        else:
-            return 50.0
+        return sum(scores) / len(scores) if scores else 50.0

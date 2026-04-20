@@ -156,12 +156,14 @@ class MultiFactorScorer:
         weighted_scores: List[Tuple[float, float]] = [] # (score, weight)
 
         # Define internal weights for quality sub-factors
-        ROE_WEIGHT = 0.20 # Adjusted from 0.25
-        NET_MARGIN_WEIGHT = 0.15 # Adjusted from 0.20
-        GROSS_MARGIN_WEIGHT = 0.10 # Adjusted from 0.15
-        DEBT_TO_EQUITY_WEIGHT = 0.20 # Adjusted from 0.25
-        ROE_TO_DEBT_WEIGHT = 0.10 # Adjusted from 0.15
-        FCF_TO_ASSETS_WEIGHT = 0.25 # NEW FACTOR WEIGHT
+        # Adjusted weights to accommodate the new OCF_MARGIN_WEIGHT
+        ROE_WEIGHT = 0.20
+        NET_MARGIN_WEIGHT = 0.15
+        GROSS_MARGIN_WEIGHT = 0.10
+        DEBT_TO_EQUITY_WEIGHT = 0.15 # Reduced from 0.20
+        ROE_TO_DEBT_WEIGHT = 0.10
+        FCF_TO_ASSETS_WEIGHT = 0.20 # Reduced from 0.25
+        OCF_MARGIN_WEIGHT = 0.10 # NEW FACTOR WEIGHT
 
         roe = result.financials.roe
         if roe is not None:
@@ -179,21 +181,30 @@ class MultiFactorScorer:
 
         debt_ratio = result.financials.debt_to_equity
         if debt_ratio is not None:
-            # 100 if debt_ratio <= 0.4, 0 if >= 0.8. Correctly assigns 100 to 0.4 and 0 to 0.8
-            weighted_scores.append((_linear_score(debt_ratio, best=0.4, worst=0.8), DEBT_TO_EQUITY_WEIGHT))
+            # 100 if debt_ratio <= 0.25, 0 if >= 0.8.
+            # Adjusted 'best' threshold from 0.4 to 0.25 to make the low-leverage criteria more stringent.
+            weighted_scores.append((_linear_score(debt_ratio, best=0.25, worst=0.8), DEBT_TO_EQUITY_WEIGHT))
 
         # Add interaction term: ROE / Debt-to-Equity
         if roe is not None and debt_ratio is not None and debt_ratio > 0:
             roe_to_debt = roe / debt_ratio
             weighted_scores.append((_linear_score(roe_to_debt, best=0.5, worst=0.0), ROE_TO_DEBT_WEIGHT))
         
-        # NEW: Add Free Cash Flow to Total Assets as a quality sub-factor
+        # Add Free Cash Flow to Total Assets as a quality sub-factor
         fcf = result.financials.free_cash_flow
         total_assets = result.financials.total_assets
         if fcf is not None and total_assets is not None and total_assets > 0:
             fcf_to_assets = fcf / total_assets
             # Higher FCF/Assets is better: 100 if >= 0.10, 0 if <= 0.0
             weighted_scores.append((_linear_score(fcf_to_assets, best=0.10, worst=0.0), FCF_TO_ASSETS_WEIGHT))
+
+        # NEW: Add Operating Cash Flow Margin as a quality sub-factor
+        ocf = result.financials.operating_cash_flow
+        revenue = result.financials.revenue
+        if ocf is not None and revenue is not None and revenue > 0:
+            ocf_margin = ocf / revenue
+            # Higher OCF Margin is better: 100 if >= 0.20, 0 if <= 0.0
+            weighted_scores.append((_linear_score(ocf_margin, best=0.20, worst=0.0), OCF_MARGIN_WEIGHT))
 
         if weighted_scores:
             total_score = sum(score * weight for score, weight in weighted_scores)
