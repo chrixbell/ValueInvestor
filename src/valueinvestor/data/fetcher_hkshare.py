@@ -92,17 +92,31 @@ class HKShareFetcher:
 
         logger.info("Falling back to hardcoded HK ticker list (%d tickers)", len(_FALLBACK_TICKERS))
         try:
-            return [
-                Company(
-                    ticker=t,
-                    name=t,
-                    market=Market.HK_SHARE,
-                    currency="HKD",
+            # Build companies from fallback tickers, enriching names from yfinance
+            companies = []
+            for t in _FALLBACK_TICKERS:
+                name = self._get_hk_stock_name(t)
+                companies.append(
+                    Company(
+                        ticker=t,
+                        name=name,
+                        market=Market.HK_SHARE,
+                        currency="HKD",
+                    )
                 )
-                for t in _FALLBACK_TICKERS
-            ]
+            return companies
         except Exception as exc:
             raise DataFetchError("Failed to build HK-share fallback stock list") from exc
+
+    def _get_hk_stock_name(self, ticker: str) -> str:
+        """Fetch company name for HK ticker from yfinance. Falls back to ticker if unavailable."""
+        try:
+            stock = yf.Ticker(ticker)
+            info = stock.info if hasattr(stock, 'info') else {}
+            name = info.get('shortName') or info.get('longName') or ticker
+            return str(name).strip() if name else ticker
+        except Exception:
+            return ticker
 
     def _fetch_stock_list_akshare(self) -> List[Company]:
         """Try fetching HK stock spot data via akshare."""
