@@ -22,6 +22,21 @@ from valueinvestor.data.models import (
 logger = logging.getLogger(__name__)
 
 
+def _coerce_to_str(value) -> str:
+    """Ensure a value is a plain string — some models return nested dicts/lists."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        # Flatten nested dict: join values that are strings, recurse otherwise
+        parts = []
+        for v in value.values():
+            parts.append(_coerce_to_str(v))
+        return "\n\n".join(p for p in parts if p)
+    if isinstance(value, list):
+        return "\n".join(_coerce_to_str(item) for item in value)
+    return str(value)
+
+
 def _screening_to_data(result: ScreeningResult) -> dict:
     """Convert a ScreeningResult into the flat dict expected by prompt builders."""
     return {
@@ -107,7 +122,7 @@ class AnalysisPipeline:
                 dim = AnalysisDimension(
                     dimension=dim_name,
                     title=parsed.get("title", dim_name),
-                    content=parsed.get("content", raw),
+                    content=_coerce_to_str(parsed.get("content", raw)),
                     confidence=parsed.get("confidence"),
                 )
                 dimensions.append(dim)
