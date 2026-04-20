@@ -319,12 +319,13 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
             )
         except Exception as e:
             err_str = str(e).lower()
-            # On auth failure, try Gemini fallback once
-            if any(k in err_str for k in ("401", "unauthorized", "authentication", "invalid api key")):
+            # On auth failure or connection error, try Gemini fallback
+            should_fallback = any(k in err_str for k in ("401", "unauthorized", "authentication", "invalid api key", "connection", "refused", "timeout"))
+            if should_fallback:
                 if _fallback_llm is None:
                     _fallback_llm = _make_gemini_fallback_client()
                 if _fallback_llm is not None and _fallback_llm is not llm:
-                    logger.warning("Primary LLM auth failed, switching to Gemini fallback")
+                    logger.warning("Primary LLM failed (%s), switching to Gemini fallback", e)
                     llm = _fallback_llm
                     try:
                         response = llm.complete(
@@ -343,7 +344,7 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
                         time.sleep(5)
                         continue
                 else:
-                    logger.error("LLM call failed (auth): %s", e)
+                    logger.error("LLM call failed: %s", e)
                     exp_log.log(
                         iteration=iteration,
                         spearman_rho=baseline_rho,
