@@ -53,6 +53,8 @@ _MODEL_PRICING: Dict[str, Dict[str, float]] = {
     "gemini-3.1-pro-preview": {"input": 1.25, "output": 3.75},
     # Kimi
     "Kimi Code 2.5": {"input": 1.00, "output": 2.00},
+    # NVIDIA NIM (Minimax M2.7)
+    "minimax-m2-7": {"input": 0.30, "output": 0.60},
 }
 
 

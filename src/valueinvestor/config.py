@@ -100,6 +100,7 @@ def _apply_env_overrides(cfg: AppConfig) -> AppConfig:
         # env var), fall back to GITHUB_API_KEY (legacy ValueInvestor naming).
         "github": ("GITHUB_TOKEN", "GITHUB_API_KEY"),
         "kimi": ("KIMI_API_KEY",),
+        "nvidia_nim": ("NVIDIA_NIM_API_KEY",),
     }
 
     env_keys = provider_keys.get(cfg.llm.provider, ())
@@ -187,10 +188,10 @@ investment:
 
 # LLM / AI provider settings
 llm:
-  provider: openai                # openai, gemini, openrouter, github, kimi
-  model: gpt-4o                   # e.g., gpt-4o, gemini-pro-3.1, chatgpt-5.4, kimi-code-2.5
+  provider: openai                # openai, gemini, openrouter, github, kimi, nvidia_nim
+  model: gpt-4o                   # e.g., gpt-4o, gemini-pro-3.1, chatgpt-5.4, kimi-code-2.5, minimax-m2-7
   api_key: ""                      # Leave blank; set appropriate env var instead (e.g. GEMINI_API_KEY)
-  base_url: null                   # Optional: override for openrouter, github, etc.
+  base_url: null                   # Optional: override for openrouter, github, nvidia_nim, etc.
   max_retries: 3
   temperature: 0.3
 

@@ -12,10 +12,10 @@ logger = logging.getLogger(__name__)
 
 # Default factor weights
 _DEFAULT_WEIGHTS: Dict[str, float] = {
-    "value": 0.41,   # Increased from 0.35
-    "quality": 0.35, # Increased from 0.30
-    "growth": 0.24,  # Increased from 0.20
-    "momentum": 0.00, # Decreased from 0.15
+    "value": 0.35,
+    "quality": 0.30,
+    "growth": 0.20,
+    "momentum": 0.15,
 }
 
 
@@ -50,6 +50,14 @@ class MultiFactorScorer:
         # Momentum is a placeholder — set to 50 (neutral) for now.
         momentum_score = 50.0
 
+        # Applying weights directly to the scores before geometric mean
+        value_weight = self.weights.get("value", 0.35)
+        quality_weight = self.weights.get("quality", 0.30)
+        growth_weight = self.weights.get("growth", 0.20)
+        momentum_weight = self.weights.get("momentum", 0.15)
+
+        # Use geometric mean with weights as exponents
+        # Use geometric mean for composite score
         scores = {
             "value": result.value_score,
             "quality": result.quality_score,
@@ -57,45 +65,36 @@ class MultiFactorScorer:
             "momentum": momentum_score,
         }
 
-        # --- MODIFICATION START ---
-        # Corrected weighted geometric mean calculation
-        
-        # Collect scores with positive weights, ensuring they are at least 1.0 to avoid
-        # issues with log(0) or 0^weight, and to ensure a positive composite score.
-        # Scores are initially in [0, 100].
-        weighted_scores_to_process = {}
-        for k, score_val in scores.items():
-            weight = self.weights.get(k, 0.0)
-            if weight > 0:
-                weighted_scores_to_process[k] = max(1.0, score_val) # Ensure score is >= 1.0
+        # Filter out zero or negative scores before calculating the geometric mean
+        positive_scores = {k: v for k, v in scores.items() if v > 0}
 
-        if not weighted_scores_to_process:
-            # If no factors have positive weights, return a neutral score
-            result.composite_score = 50.0
-            return result
+        if positive_scores:
+            # Normalize scores to the range of [1, 100] to avoid issues with geometric mean
+            normalized_scores = {k: max(1.0, v) for k, v in positive_scores.items()}
 
-        product_of_powers = 1.0
-        total_weight = 0.0
+            # Use geometric mean with weights as exponents — only include non-zero-weight keys
+            product = 1.0
+            weighted_scores = {k: v for k, v in normalized_scores.items() if self.weights.get(k, 0.0) > 0}
+            if weighted_scores:
+                total_weight = sum(self.weights.get(k, 1.0) for k in weighted_scores)
+                for k, score in weighted_scores.items():
+                    weight = self.weights.get(k, 1.0)
+                    product *= (score / 100.0) ** (weight / total_weight)
+            else:
+                # All specified weights are zero — fall back to equal-weight geometric mean
+                n = len(normalized_scores)
+                for score in normalized_scores.values():
+                    product *= (score / 100.0) ** (1.0 / n)
+                total_weight = 1.0  # used only for the exponent below
 
-        for k, score_val in weighted_scores_to_process.items():
-            weight = self.weights[k] # We have already filtered for keys with positive weights
-            total_weight += weight
-            # Normalize score to [0.01, 1.0] range for geometric mean calculation by dividing by 100
-            # score_val is guaranteed to be >= 1.0 here, so score_val / 100.0 is >= 0.01
-            product_of_powers *= (score_val / 100.0) ** weight
-
-        if total_weight > 0:
-            # Calculate the weighted geometric mean: (S1^w1 * S2^w2 * ...) ^ (1 / sum(wi))
-            # The product_of_powers already contains (S1/100)^w1 * (S2/100)^w2 * ...
-            # The final result is scaled back to [0, 100].
-            composite_score = (product_of_powers ** (1.0 / total_weight)) * 100.0
+            # Modified composite score calculation
+            composite_score = (product ** (1.0 / total_weight)) * 100.0  # Scale back to [0, 100]
         else:
-            # Fallback for an unlikely edge case where total_weight becomes 0 despite checks
-            composite_score = 50.0 
+            composite_score = 0.0
 
         result.composite_score = composite_score
+
         return result
-        # --- MODIFICATION END ---
 
     def rank(self, results: List[ScreeningResult]) -> List[ScreeningResult]:
         """Score every result, sort by composite descending, and assign ranks."""
