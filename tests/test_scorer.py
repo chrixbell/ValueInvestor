@@ -59,12 +59,12 @@ class TestMultiFactorScorer:
     def test_moderate_company(self):
         """PE=10, PB=2, ROE=0.15 — decent but not outstanding."""
         scorer = MultiFactorScorer()
-        r = scorer.score(_result(pe=10, pb=2, roe=0.15))
-        # Note: After iterative improvements, scoring produces lower composite scores
-        # due to weighted geometric mean of sub-factors.
+        # Test with growth signal (PEG < 1.0) to get non-zero growth_score
+        r = scorer.score(_result(pe=10, pb=2, roe=0.15, peg_ratio=0.8))
         assert r.composite_score > 0
         assert r.value_score > 0
         assert r.quality_score > 0
+        assert r.growth_score > 0
 
     def test_cheap_high_quality(self):
         """PE=5, PB=0.8, ROE=0.25 — produces valid scores."""

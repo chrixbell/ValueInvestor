@@ -101,6 +101,7 @@ def _apply_env_overrides(cfg: AppConfig) -> AppConfig:
         "github": ("GITHUB_TOKEN", "GITHUB_API_KEY"),
         "kimi": ("KIMI_API_KEY",),
         "nvidia_nim": ("NVIDIA_NIM_API_KEY",),
+        "local_llm": (),  # Local LLM doesn't require API key
     }
 
     env_keys = provider_keys.get(cfg.llm.provider, ())

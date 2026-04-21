@@ -49,7 +49,7 @@ def _log_score(value: float, best: float, worst: float) -> float:
         # If any input is non-positive, return 0.0. This is a conservative approach.
         # For cases where 'value' can be 0 and is considered 'best' (like 0 debt),
         # that specific case should be handled externally before calling _log_score.
-        return 0.0
+        return 0.0 
 
     log_value = math.log(value)
     log_best = math.log(best)
@@ -89,15 +89,14 @@ class MultiFactorScorer:
             "momentum": momentum_score,
         }
 
-        # Collect scores with positive weights.
-        # MODIFICATION: Removed the `max(1.0, score_val)` clamping. This allows sub-scores of 0
-        # to propagate, potentially resulting in a composite score of 0, which is more
-        # aligned with a true geometric mean and penalizes fundamental flaws more severely.
+        # Collect scores with positive weights, ensuring they are at least 1.0 to avoid
+        # issues with log(0) or 0^weight, and to ensure a positive composite score.
+        # Scores are initially in [0, 100].
         weighted_scores_to_process = {}
         for k, score_val in scores.items():
             weight = self.weights.get(k, 0.0)
             if weight > 0:
-                weighted_scores_to_process[k] = score_val # Removed max(1.0, score_val)
+                weighted_scores_to_process[k] = max(1.0, score_val) # Ensure score is >= 1.0
 
         if not weighted_scores_to_process:
             # If no factors have positive weights, return a neutral score
@@ -110,8 +109,8 @@ class MultiFactorScorer:
         for k, score_val in weighted_scores_to_process.items():
             weight = self.weights[k] # We have already filtered for keys with positive weights
             total_weight += weight
-            # Normalize score to [0.0, 1.0] range for geometric mean calculation by dividing by 100
-            # If score_val is 0, (0.0/100.0)**weight will be 0, making product_of_powers 0.
+            # Normalize score to [0.01, 1.0] range for geometric mean calculation by dividing by 100
+            # score_val is guaranteed to be >= 1.0 here, so score_val / 100.0 is >= 0.01
             product_of_powers *= (score_val / 100.0) ** weight
 
         if total_weight > 0:

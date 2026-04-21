@@ -55,6 +55,8 @@ _MODEL_PRICING: Dict[str, Dict[str, float]] = {
     "Kimi Code 2.5": {"input": 1.00, "output": 2.00},
     # NVIDIA NIM (Minimax M2.7)
     "minimax-m2-7": {"input": 0.30, "output": 0.60},
+    # Local LLM (free, no cost)
+    "local_llm": {"input": 0.00, "output": 0.00},
 }
 
 
@@ -134,6 +136,11 @@ class LLMClient:
         if self.provider == "gemini":
             genai.configure(api_key=api_key)
             self._gemini_model = genai.GenerativeModel(self.model)
+        elif self.provider == "local_llm":
+            # For local LLM, base_url must be provided
+            self._base_url = base_url or "http://127.0.0.1:1234"
+            # Create OpenAI client pointing to local LLM server (OpenAI-compatible API)
+            self._client = OpenAI(api_key="not-needed", base_url=self._base_url, max_retries=0)
         else:
             # The SDK's own retry is disabled so we handle backoff ourselves.
             self._client = OpenAI(api_key=api_key, base_url=base_url, max_retries=0)
@@ -254,6 +261,7 @@ class LLMClient:
         if self.provider == "gemini":
             return self._complete_gemini(system_prompt, user_prompt, response_format)
 
+        # Handle local_llm and OpenAI-compatible APIs (OpenAI, GitHub, OpenRouter, NVIDIA NIM, etc.)
         messages: list[Dict[str, str]] = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},

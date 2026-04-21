@@ -54,12 +54,41 @@ After the code, briefly explain what you changed and why (1-2 sentences).
 
 
 def _get_llm_client():
-    """Create an LLM client using load_config() — same resolution as the main pipeline."""
+    """Create an LLM client for improve_scorer.
+    
+    Priority order for trainer:
+    1. Local LLM (if LOCAL_LLM_ENABLED=true and server is reachable)
+    2. Primary provider from config (GitHub, Gemini, etc.)
+    3. Gemini fallback
+    """
     import os
 
     from valueinvestor.analysis.llm_client import LLMClient
-    from valueinvestor.config import load_config
+    from valueinvestor.config import load_config, LLMConfig
 
+    # First, try local LLM if enabled
+    local_llm_enabled = os.environ.get("LOCAL_LLM_ENABLED", "").lower() == "true"
+    if local_llm_enabled:
+        local_base_url = os.environ.get("LOCAL_LLM_BASE_URL", "http://127.0.0.1:1234")
+        local_model = os.environ.get("LOCAL_LLM_MODEL", "default")
+        
+        try:
+            logger.info("Attempting to connect to local LLM at %s (model: %s)", local_base_url, local_model)
+            local_config = LLMConfig(
+                provider="local_llm",
+                model=local_model,
+                api_key="not-needed",  # Local LLM doesn't require API key
+                base_url=local_base_url,
+                max_retries=2,
+                temperature=0.7,
+            )
+            client = LLMClient(config=local_config)
+            logger.info("✓ Using Local LLM at %s", local_base_url)
+            return client
+        except Exception as e:
+            logger.warning("Local LLM connection failed (%s). Falling back to primary provider.", e)
+    
+    # Fall back to primary provider
     cfg = load_config()
     cfg.llm.temperature = 0.7  # Higher creativity for exploration
 
@@ -68,7 +97,7 @@ def _get_llm_client():
 
     if not api_key:
         raise RuntimeError(
-            "No LLM API key available. Set GITHUB_TOKEN or GEMINI_API_KEY in .env"
+            "No LLM API key available. Set LOCAL_LLM_ENABLED=true, GITHUB_TOKEN, or GEMINI_API_KEY in .env"
         )
 
     logger.info("Agent using provider=%s model=%s", provider, cfg.llm.model)
