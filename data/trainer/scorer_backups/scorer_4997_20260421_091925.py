@@ -144,14 +144,15 @@ class MultiFactorScorer:
         weighted_scores: List[Tuple[float, float]] = [] # (score, weight)
 
         # Define internal weights for value sub-factors.
-        # MODIFICATION: Added DIVIDEND_YIELD as a new sub-factor and adjusted existing weights.
-        # Original internal weights (sum=1.0): PB=0.5, Market Cap=0.2, PS=0.3.
-        # New desired weights: Dividend Yield=0.2, PB=0.4, PS=0.25, Market Cap=0.15.
-        # These sum to 1.0 (0.2 + 0.4 + 0.25 + 0.15 = 1.0).
+        # MODIFICATION: Added EV_TO_EBITDA as a new sub-factor and adjusted existing weights.
+        # Original internal weights (sum=1.0): Dividend Yield=0.2, PB=0.4, PS=0.25, Market Cap=0.15.
+        # New desired weights: Dividend Yield=0.2, PB=0.3, PS=0.2, Market Cap=0.1, EV_TO_EBITDA=0.2.
+        # These sum to 1.0 (0.2 + 0.3 + 0.2 + 0.1 + 0.2 = 1.0).
         DIVIDEND_YIELD_WEIGHT = 0.2
-        PB_WEIGHT = 0.4
-        PS_WEIGHT = 0.25
-        MARKET_CAP_WEIGHT = 0.15
+        PB_WEIGHT = 0.3 # Reduced from 0.4
+        PS_WEIGHT = 0.2 # Reduced from 0.25
+        MARKET_CAP_WEIGHT = 0.1 # Reduced from 0.15
+        EV_TO_EBITDA_WEIGHT = 0.2 # New factor
 
         pb = result.valuation.pb_ratio
         if pb is not None and pb > 0:
@@ -178,6 +179,12 @@ class MultiFactorScorer:
             # Use linear scoring as yield is typically interpreted linearly.
             weighted_scores.append((_linear_score(dividend_yield, best=0.05, worst=0.01), DIVIDEND_YIELD_WEIGHT))
 
+        # NEW SUB-FACTOR: EV/EBITDA
+        # Lower EV/EBITDA generally indicates better value, as it accounts for debt.
+        ev_to_ebitda = result.valuation.ev_to_ebitda
+        if ev_to_ebitda is not None and ev_to_ebitda > 0:
+            # Lower EV/EBITDA is better: best=5.0, worst=20.0.
+            weighted_scores.append((_linear_score(ev_to_ebitda, best=5.0, worst=20.0), EV_TO_EBITDA_WEIGHT))
 
         if weighted_scores:
             total_score = sum(score * weight for score, weight in weighted_scores)
