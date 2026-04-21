@@ -1,0 +1,332 @@
+"""Multi-factor scoring and ranking for screening results."""
+
+from __future__ import annotations
+
+import logging
+import math
+from typing import Dict, List, Optional, Tuple
+
+from valueinvestor.data.models import ScreeningResult
+
+logger = logging.getLogger(__name__)
+
+# Default factor weights
+_DEFAULT_WEIGHTS: Dict[str, float] = {
+    "value": 0.65,     # Retained at 0.65 as decreasing it previously hurt performance.
+    "quality": 0.15,   # Decreased from 0.20 to reallocate weight to growth, continuing a past successful trend.
+    "growth": 0.20,    # Increased from 0.15, taking weight from quality. This aligns with a potential market
+                       # where growth is more rewarded, which might explain the "higher PE is better" signal
+                       # from the value factor.
+    "momentum": 0.00,  # Set to 0.0 as it's a fixed placeholder score, effectively removing its influence
+}
+
+
+def _linear_score(value: float, best: float, worst: float) -> float:
+    """Return a score in [0, 100] via linear interpolation.
+
+    *best* is the value that maps to 100 and *worst* maps to 0.
+    Values beyond the endpoints are clamped.
+    """
+    if best == worst:
+        return 50.0
+    score = (value - worst) / (best - worst) * 100.0
+    return max(0.0, min(100.0, score))
+
+
+def _log_score(value: float, best: float, worst: float) -> float:
+    """Return a score in [0, 100] via logarithmic interpolation.
+
+    *best* is the value that maps to 100 and *worst* maps to 0.
+    Assumes 'value', 'best', and 'worst' are positive for math.log.
+    Values beyond the endpoints are clamped.
+    """
+    # Handle non-positive values gracefully, as math.log is undefined for them.
+    # If a value is non-positive, it's considered the absolute worst for factors
+    # where _log_score is used (e.g., ROE for growth, PE/PB where higher is better).
+    # This ensures that truly poor performance is scored at 0, not a neutral 50.0.
+    # Note: If 0 is explicitly the BEST score (e.g., for debt), it needs custom handling before calling this.
+    if value <= 0 or best <= 0 or worst <= 0:
+        # If any input is non-positive, return 0.0. This is a conservative approach.
+        # For cases where 'value' can be 0 and is considered 'best' (like 0 debt),
+        # that specific case should be handled externally before calling _log_score.
+        return 0.0
+
+    log_value = math.log(value)
+    log_best = math.log(best)
+    log_worst = math.log(worst)
+
+    if log_best == log_worst:
+        return 50.0
+    
+    score = (log_value - log_worst) / (log_best - log_worst) * 100.0
+    return max(0.0, min(100.0, score))
+
+
+class MultiFactorScorer:
+    """Score :class:`ScreeningResult` objects across value, quality, and growth dimensions."""
+
+    def __init__(self, weights: Optional[Dict[str, float]] = None) -> None:
+        self.weights = weights or dict(_DEFAULT_WEIGHTS)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def score(self, result: ScreeningResult) -> ScreeningResult:
+        """Compute sub-scores and composite score, updating *result* in place."""
+        result.value_score = self._value_score(result)
+        result.quality_score = self._quality_score(result)
+        result.growth_score = self._growth_score(result)
+
+        # Momentum is a placeholder — set to 50 (neutral).
+        # Its weight has been set to 0 in _DEFAULT_WEIGHTS, so it will not affect the composite score.
+        momentum_score = 50.0 
+
+        scores = {
+            "value": result.value_score,
+            "quality": result.quality_score,
+            "growth": result.growth_score,
+            "momentum": momentum_score,
+        }
+
+        # Collect scores with positive weights.
+        # MODIFICATION: Removed the `max(1.0, score_val)` clamping. This allows sub-scores of 0
+        # to propagate, potentially resulting in a composite score of 0, which is more
+        # aligned with a true geometric mean and penalizes fundamental flaws more severely.
+        weighted_scores_to_process = {}
+        for k, score_val in scores.items():
+            weight = self.weights.get(k, 0.0)
+            if weight > 0:
+                weighted_scores_to_process[k] = score_val # Removed max(1.0, score_val)
+
+        if not weighted_scores_to_process:
+            # If no factors have positive weights, return a neutral score
+            result.composite_score = 50.0
+            return result
+
+        product_of_powers = 1.0
+        total_weight = 0.0
+
+        for k, score_val in weighted_scores_to_process.items():
+            weight = self.weights[k] # We have already filtered for keys with positive weights
+            total_weight += weight
+            # Normalize score to [0.0, 1.0] range for geometric mean calculation by dividing by 100
+            # If score_val is 0, (0.0/100.0)**weight will be 0, making product_of_powers 0.
+            product_of_powers *= (score_val / 100.0) ** weight
+
+        if total_weight > 0:
+            # Calculate the weighted geometric mean: (S1^w1 * S2^w2 * ...) ^ (1 / sum(wi))
+            # The product_of_powers already contains (S1/100)^w1 * (S2/100)^w2 * ...
+            # The final result is scaled back to [0, 100).
+            composite_score = (product_of_powers ** (1.0 / total_weight)) * 100.0
+        else:
+            # Fallback for an unlikely edge case where total_weight becomes 0 despite checks
+            composite_score = 50.0 
+
+        result.composite_score = composite_score
+        return result
+
+    def rank(self, results: List[ScreeningResult]) -> List[ScreeningResult]:
+        """Score every result, sort by composite descending, and assign ranks."""
+        for r in results:
+            self.score(r)
+        results.sort(key=lambda r: r.composite_score, reverse=True)
+        for idx, r in enumerate(results, start=1):
+            r.rank = idx
+        return results
+
+    # ------------------------------------------------------------------
+    # Sub-score helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _value_score(result: ScreeningResult) -> float:
+        """Lower valuation multiples → higher score. (Note: PB scoring is still empirically inverted)."""
+        weighted_scores: List[Tuple[float, float]] = [] # (score, weight)
+
+        # Define internal weights for value sub-factors.
+        # MODIFICATION: Added PE_RATIO as a new sub-factor and adjusted existing weights.
+        # New desired weights (sum=1.0): PE=0.2, Dividend Yield=0.15, PB=0.25, PS=0.15, Market Cap=0.1, EV/EBITDA=0.15.
+        PE_RATIO_WEIGHT = 0.2 # New factor, lower is better
+        DIVIDEND_YIELD_WEIGHT = 0.15 # Reduced from 0.2
+        PB_WEIGHT = 0.25 # Reduced from 0.3
+        PS_WEIGHT = 0.15 # Reduced from 0.2
+        MARKET_CAP_WEIGHT = 0.1 # Retained at 0.1
+        EV_TO_EBITDA_WEIGHT = 0.15 # Reduced from 0.2
+
+        # NEW SUB-FACTOR: Trailing PE Ratio
+        # Lower PE is generally considered a positive value indicator.
+        pe = result.valuation.pe_ratio
+        if pe is not None and pe > 0: # Only consider positive PE ratios for traditional value.
+            # Lower PE is better: best=8.0, worst=30.0. Standard value ranges.
+            weighted_scores.append((_linear_score(pe, best=8.0, worst=30.0), PE_RATIO_WEIGHT))
+
+        pb = result.valuation.pb_ratio
+        if pb is not None and pb > 0:
+            # Higher PB gets a higher score based on empirical results.
+            # Logarithmic scoring allows for differentiation among high-PB stocks with diminishing returns.
+            weighted_scores.append((_log_score(pb, best=18.0, worst=1.5), PB_WEIGHT))
+
+        ps = result.valuation.ps_ratio
+        if ps is not None and ps > 0:
+            # Lower PS is better: best=0.5, worst=3.0 correctly assigns 100 to 0.5 and 0 to 3.0.
+            weighted_scores.append((_linear_score(ps, best=0.5, worst=3.0), PS_WEIGHT))
+
+        market_cap = result.valuation.market_cap_rmb
+        if market_cap is not None and market_cap > 0:
+            # Smaller market cap is generally better for a "small cap premium" value factor.
+            # Using logarithmic scoring to account for the wide range of market cap values.
+            weighted_scores.append((_log_score(market_cap, best=1_000_000_000.0, worst=100_000_000_000.0), MARKET_CAP_WEIGHT))
+
+        # Dividend Yield
+        # Higher dividend yield is generally considered a positive value indicator.
+        dividend_yield = result.valuation.dividend_yield
+        if dividend_yield is not None and dividend_yield >= 0:
+            # Higher dividend yield is better: best=0.05 (5%), worst=0.01 (1%).
+            # Use linear scoring as yield is typically interpreted linearly.
+            weighted_scores.append((_linear_score(dividend_yield, best=0.05, worst=0.01), DIVIDEND_YIELD_WEIGHT))
+
+        # EV/EBITDA
+        # Lower EV/EBITDA is generally considered a positive value indicator.
+        ev_to_ebitda = result.valuation.ev_to_ebitda
+        if ev_to_ebitda is not None and ev_to_ebitda > 0:
+            # Lower EV/EBITDA is better: best=5.0, worst=15.0.
+            # Using linear scoring as this multiple is often interpreted linearly for value.
+            weighted_scores.append((_linear_score(ev_to_ebitda, best=5.0, worst=15.0), EV_TO_EBITDA_WEIGHT))
+
+
+        if weighted_scores:
+            total_score = sum(score * weight for score, weight in weighted_scores)
+            total_weight = sum(weight for score, weight in weighted_scores)
+            return total_score / total_weight if total_weight > 0 else 50.0
+        else:
+            return 50.0
+
+    @staticmethod
+    def _quality_score(result: ScreeningResult) -> float:
+        """Higher profitability and lower leverage → higher score."""
+        weighted_scores: List[Tuple[float, float]] = [] # (score, weight)
+
+        # Define internal weights for quality sub-factors.
+        ROE_WEIGHT = 0.15
+        NET_MARGIN_WEIGHT = 0.1024
+        GROSS_MARGIN_WEIGHT = 0.1024
+        DEBT_TO_EQUITY_WEIGHT = 0.0615
+        ROE_TO_DEBT_WEIGHT = 0.0819
+        OCF_MARGIN_WEIGHT = 0.0819
+        ROA_WEIGHT = 0.1024
+        FCF_MARGIN_WEIGHT = 0.0819
+        CURRENT_RATIO_WEIGHT = 0.0512
+        ROCE_WEIGHT = 0.1024
+
+        roe = result.financials.roe
+        if roe is not None:
+            weighted_scores.append((_linear_score(roe, best=0.20, worst=-0.10), ROE_WEIGHT))
+
+        net_margin = result.financials.net_margin
+        if net_margin is not None:
+            weighted_scores.append((_log_score(net_margin, best=0.15, worst=0.001), NET_MARGIN_WEIGHT))
+
+        gross_margin = result.financials.gross_margin
+        if gross_margin is not None:
+            weighted_scores.append((_linear_score(gross_margin, best=0.30, worst=0.0), GROSS_MARGIN_WEIGHT))
+
+        debt_ratio = result.financials.debt_to_equity
+        if debt_ratio is not None:
+            if debt_ratio == 0:
+                score = 100.0
+            elif debt_ratio > 0:
+                score = _log_score(debt_ratio, best=0.1, worst=1.2)
+            else:
+                score = 0.0
+            weighted_scores.append((score, DEBT_TO_EQUITY_WEIGHT))
+
+        # Add interaction term: ROE / Debt-to-Equity
+        if roe is not None and debt_ratio is not None and debt_ratio > 0:
+            roe_to_debt = roe / debt_ratio
+            weighted_scores.append((_linear_score(roe_to_debt, best=0.5, worst=0.0), ROE_TO_DEBT_WEIGHT))
+        
+        # Add Operating Cash Flow Margin as a sub-factor for quality score.
+        operating_cash_flow = result.financials.operating_cash_flow
+        revenue = result.financials.revenue
+        if operating_cash_flow is not None and revenue is not None and revenue > 0:
+            ocf_margin = operating_cash_flow / revenue
+            weighted_scores.append((_linear_score(ocf_margin, best=0.20, worst=0.0), OCF_MARGIN_WEIGHT))
+
+        # Add Return on Assets (ROA) as a sub-factor for quality score.
+        roa = result.financials.roa
+        if roa is not None:
+            weighted_scores.append((_linear_score(roa, best=0.10, worst=0.0), ROA_WEIGHT))
+
+        # Add Free Cash Flow Margin as a sub-factor for quality score with a positive weight.
+        free_cash_flow = result.financials.free_cash_flow
+        revenue = result.financials.revenue
+        if free_cash_flow is not None and revenue is not None and revenue > 0:
+            fcf_margin = free_cash_flow / revenue
+            weighted_scores.append((_linear_score(fcf_margin, best=0.10, worst=0.0), FCF_MARGIN_WEIGHT))
+
+        # Add Current Ratio as a sub-factor for quality score.
+        current_ratio = result.financials.current_ratio
+        if current_ratio is not None:
+            weighted_scores.append((_linear_score(current_ratio, best=2.0, worst=1.0), CURRENT_RATIO_WEIGHT))
+
+        # Add Return on Capital Employed (ROCE) as a sub-factor for quality score.
+        net_income = result.financials.net_income
+        total_equity = result.financials.total_equity
+        debt_to_equity = result.financials.debt_to_equity
+
+        if (net_income is not None and total_equity is not None and total_equity > 0 and
+            debt_to_equity is not None and debt_to_equity >= 0): 
+            
+            capital_employed = total_equity * (1 + debt_to_equity)
+            
+            if capital_employed > 0:
+                roce_proxy = net_income / capital_employed
+                weighted_scores.append((_linear_score(roce_proxy, best=0.15, worst=0.05), ROCE_WEIGHT))
+
+
+        if weighted_scores:
+            total_score = sum(score * weight for score, weight in weighted_scores)
+            total_weight = sum(weight for score, weight in weighted_scores)
+            return total_score / total_weight if total_weight > 0 else 50.0
+        else:
+            return 50.0
+
+    @staticmethod
+    def _growth_score(result: ScreeningResult) -> float:
+        """Growth score based on PEG ratio, PE ratio (as a proxy for growth expectations),
+        and forward earnings improvement.
+        """
+        weighted_scores: List[Tuple[float, float]] = [] # (score, weight)
+
+        # Define internal weights for growth sub-factors
+        PEG_GROWTH_WEIGHT = 0.4
+        PE_GROWTH_WEIGHT = 0.3
+        FORWARD_PE_IMPROVEMENT_WEIGHT = 0.3
+
+        peg = result.valuation.peg_ratio
+        if peg is not None and peg > 0:
+            # Lower PEG is better: 100 if PEG <= 0.7, 0 if PEG >= 1.8.
+            weighted_scores.append((_log_score(peg, best=0.7, worst=1.8), PEG_GROWTH_WEIGHT))
+
+        # Trailing PE ratio in the growth score (higher PE implies higher growth expectations)
+        pe = result.valuation.pe_ratio
+        if pe is not None and pe > 0:
+            # Score PE such that higher PE gets a higher score, using log_score for diminishing returns.
+            weighted_scores.append((_log_score(pe, best=150.0, worst=10.0), PE_GROWTH_WEIGHT))
+
+        # NEW SUB-FACTOR: Forward PE Improvement
+        pe_trailing = result.valuation.pe_ratio
+        pe_forward = result.valuation.pe_forward
+
+        if pe_trailing is not None and pe_forward is not None and pe_forward > 0 and pe_trailing > 0:
+            forward_pe_ratio = pe_trailing / pe_forward
+            weighted_scores.append((_linear_score(forward_pe_ratio, best=2.0, worst=0.5), FORWARD_PE_IMPROVEMENT_WEIGHT))
+
+
+        if weighted_scores:
+            total_score = sum(score * weight for score, weight in weighted_scores)
+            total_weight = sum(weight for score, weight in weighted_scores)
+            return total_score / total_weight if total_weight > 0 else 50.0
+        else:
+            return 50.0
