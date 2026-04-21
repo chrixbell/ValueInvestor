@@ -137,8 +137,11 @@ class LLMClient:
             genai.configure(api_key=api_key)
             self._gemini_model = genai.GenerativeModel(self.model)
         elif self.provider == "local_llm":
-            # For local LLM, base_url must be provided
-            self._base_url = base_url or "http://127.0.0.1:1234"
+            # For local LLM, base_url must include /v1 prefix for OpenAI-compatible API
+            base = (base_url or "http://127.0.0.1:1234").rstrip("/")
+            if not base.endswith("/v1"):
+                base = base + "/v1"
+            self._base_url = base
             # Create OpenAI client pointing to local LLM server (OpenAI-compatible API)
             self._client = OpenAI(api_key="not-needed", base_url=self._base_url, max_retries=0)
         else:
@@ -337,6 +340,15 @@ class LLMClient:
                 cost,
             )
 
+        # Defensive: check response structure before subscripting
+        if not response or not response.choices or len(response.choices) == 0:
+            logger.error("Malformed LLM response: choices is empty or missing. Full response: %s", response)
+            raise LLMError(f"Malformed LLM response: no choices returned")
+        
+        if not response.choices[0].message:
+            logger.error("Malformed LLM response: message is missing from choice 0. Full response: %s", response)
+            raise LLMError(f"Malformed LLM response: no message in choice")
+        
         content = response.choices[0].message.content or ""
         return content
 

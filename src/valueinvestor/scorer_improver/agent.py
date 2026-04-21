@@ -152,8 +152,13 @@ def _build_prompt(
     experiment_history: str,
     baseline_rho: float,
     best_rho: Optional[float],
+    is_local_llm: bool = False,
 ) -> str:
-    """Build the user prompt for the LLM."""
+    """Build the user prompt for the LLM.
+    
+    For local LLM with limited context, include only key parts.
+    For cloud LLMs, include full context for best suggestions.
+    """
     status = (
         f"Baseline Spearman ρ: {baseline_rho:.4f}\n"
         f"Best ρ achieved: {best_rho:.4f}" if best_rho is not None else f"Baseline Spearman ρ: {baseline_rho:.4f}\nNo experiments yet."
@@ -161,11 +166,31 @@ def _build_prompt(
 
     # Inject status into program.md
     context = program_md.replace("{current_status}", status)
-    context = context.replace("{experiment_history}", experiment_history or "No experiments yet.")
+    
+    if is_local_llm:
+        # For local LLM, limit history to first 3 entries only
+        history_lines = experiment_history.split("\n")[:3]
+        context = context.replace("{experiment_history}", "\n".join(history_lines) or "No experiments yet.")
+        
+        # For local LLM, include only the key scoring function, not the entire file
+        # Extract the score() method and a summary of weights
+        score_start = scorer_code.find("    def score(")
+        if score_start > 0:
+            score_end = scorer_code.find("\n    def ", score_start + 1)
+            if score_end < 0:
+                score_end = len(scorer_code)
+            truncated_code = scorer_code[:score_start] + scorer_code[score_start:score_end]
+        else:
+            # Fallback: use first 1500 chars
+            truncated_code = scorer_code[:1500]
+    else:
+        # Full context for cloud LLMs
+        context = context.replace("{experiment_history}", experiment_history or "No experiments yet.")
+        truncated_code = scorer_code
 
     return (
         f"## Program Context\n\n{context}\n\n"
-        f"## Current scorer.py\n\n```python\n{scorer_code}\n```\n\n"
+        f"## Current scorer.py\n\n```python\n{truncated_code}\n```\n\n"
         "Now propose your improvement. Output the COMPLETE new scorer.py "
         "wrapped in ```python ... ``` code fences, followed by a brief explanation."
     )
@@ -333,12 +358,14 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
             experiment_history = ""
 
         # 4. Build prompt and call LLM
+        is_local = llm.provider == "local_llm"
         user_prompt = _build_prompt(
             scorer_code=original_code,
             program_md=program_md,
             experiment_history=experiment_history,
             baseline_rho=baseline_rho,
             best_rho=best_rho,
+            is_local_llm=is_local,
         )
 
         try:
