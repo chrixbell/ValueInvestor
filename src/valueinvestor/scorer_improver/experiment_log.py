@@ -56,22 +56,16 @@ class ExperimentLog:
 
         logger.debug("Logged experiment #%d (ρ=%.4f, kept=%s)", iteration, spearman_rho, kept)
 
-    def read_last_n(self, n: int = 10) -> List[Dict[str, Any]]:
-        """Read the last *n* experiment records."""
-        if not self.path.exists():
+    def read_last_n(self, n: int = 10, current_lineage: bool = False) -> List[Dict[str, Any]]:
+        """Read the last *n* experiment records.
+
+        When *current_lineage* is true, only consider the active experiment
+        lineage after the most recent kept-score reset.
+        """
+        records = self.read_current_lineage() if current_lineage else self.read_all()
+        if not records:
             return []
-
-        lines = self.path.read_text(encoding="utf-8").strip().split("\n")
-        lines = [l for l in lines if l.strip()]
-        recent = lines[-n:] if len(lines) > n else lines
-
-        records = []
-        for line in recent:
-            try:
-                records.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-        return records
+        return records[-n:] if len(records) > n else records
 
     def total_experiments(self) -> int:
         """Count total experiments logged."""
@@ -79,9 +73,13 @@ class ExperimentLog:
             return 0
         return sum(1 for line in self.path.read_text().strip().split("\n") if line.strip())
 
-    def best_rho(self) -> Optional[float]:
-        """Return the best Spearman ρ achieved so far."""
-        records = self.read_all()
+    def best_rho(self, current_lineage: bool = False) -> Optional[float]:
+        """Return the best Spearman ρ achieved so far.
+
+        When *current_lineage* is true, only consider the active experiment
+        lineage after the most recent kept-score reset.
+        """
+        records = self.read_current_lineage() if current_lineage else self.read_all()
         if not records:
             return None
         kept = [r for r in records if r.get("kept")]
@@ -102,3 +100,32 @@ class ExperimentLog:
                 except json.JSONDecodeError:
                     continue
         return records
+
+    def read_current_lineage(self) -> List[Dict[str, Any]]:
+        """Read the active lineage after the most recent kept-score reset.
+
+        A reset is inferred when a kept experiment has a lower ρ than the
+        previous kept experiment, which indicates the trainer was intentionally
+        rolled back to an earlier scorer and resumed from there.
+        """
+        records = self.read_all()
+        if not records:
+            return []
+
+        last_reset_index = 0
+        previous_kept_rho: Optional[float] = None
+
+        for idx, record in enumerate(records):
+            if not record.get("kept"):
+                continue
+
+            rho = record.get("spearman_rho")
+            if rho is None:
+                continue
+
+            rho = float(rho)
+            if previous_kept_rho is not None and rho < previous_kept_rho:
+                last_reset_index = idx
+            previous_kept_rho = rho
+
+        return records[last_reset_index:]

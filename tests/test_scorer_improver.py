@@ -5,13 +5,11 @@ Tests cover experiment_log, evaluator, agent, and ground_truth helpers.
 
 from __future__ import annotations
 
-import json
 import textwrap
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
-import pytest
 
 
 # ── ExperimentLog tests ─────────────────────────────────────────────────────
@@ -64,6 +62,23 @@ class TestExperimentLog:
         log = ExperimentLog(path=log_file)
         log.log(iteration=1, spearman_rho=0.1, baseline_rho=0.2, kept=False, description="x")
         assert log.best_rho() is None
+
+    def test_current_lineage_ignores_older_branch(self, tmp_path: Path) -> None:
+        from valueinvestor.scorer_improver.experiment_log import ExperimentLog
+
+        log_file = tmp_path / "exp.jsonl"
+        log = ExperimentLog(path=log_file)
+        log.log(iteration=1, spearman_rho=0.10, baseline_rho=0.00, kept=True, description="a")
+        log.log(iteration=2, spearman_rho=0.50, baseline_rho=0.10, kept=True, description="b")
+        log.log(iteration=3, spearman_rho=0.20, baseline_rho=0.20, kept=True, description="manual reset")
+        log.log(iteration=4, spearman_rho=0.18, baseline_rho=0.20, kept=False, description="reverted")
+        log.log(iteration=5, spearman_rho=0.30, baseline_rho=0.20, kept=True, description="improved")
+
+        current = log.read_current_lineage()
+        assert [record["iteration"] for record in current] == [3, 4, 5]
+        assert log.read_last_n(2, current_lineage=True)[0]["iteration"] == 4
+        assert log.best_rho(current_lineage=True) == 0.30
+        assert log.best_rho() == 0.50
 
     def test_empty_log(self, tmp_path: Path) -> None:
         from valueinvestor.scorer_improver.experiment_log import ExperimentLog
@@ -166,6 +181,21 @@ class TestEvaluator:
             "pe_ratio": np.random.uniform(5, 50, n),
             "pb_ratio": np.random.uniform(0.5, 8, n),
             "market_cap_rmb": np.random.uniform(1e9, 1e11, n),
+            "pe_forward": np.random.uniform(4, 40, n),
+            "ps_ratio": np.random.uniform(0.2, 8, n),
+            "peg_ratio": np.random.uniform(0.2, 3, n),
+            "dividend_yield": np.random.uniform(0, 0.08, n),
+            "ev_to_ebitda": np.random.uniform(2, 30, n),
+            "revenue": np.random.uniform(1e8, 1e11, n),
+            "net_income": np.random.uniform(-1e9, 1e10, n),
+            "total_assets": np.random.uniform(1e9, 2e11, n),
+            "total_liabilities": np.random.uniform(1e8, 1e11, n),
+            "total_equity": np.random.uniform(1e8, 1e11, n),
+            "operating_cash_flow": np.random.uniform(-1e9, 1e10, n),
+            "free_cash_flow": np.random.uniform(-1e9, 1e10, n),
+            "gross_margin": np.random.uniform(0, 0.8, n),
+            "roa": np.random.uniform(-0.1, 0.2, n),
+            "current_ratio": np.random.uniform(0.2, 4, n),
             "roe": np.random.uniform(-0.1, 0.3, n),
             "net_margin": np.random.uniform(-0.05, 0.3, n),
             "debt_to_equity": np.random.uniform(0, 3, n),
@@ -199,6 +229,32 @@ class TestEvaluator:
         result = evaluate_scorer(use_original_scores=True)
         assert result["spearman_rho"] == 0.0
         assert result["n_snapshots"] == 0
+
+    @patch("valueinvestor.scorer_improver.evaluator._load_ground_truth")
+    def test_rescore_passes_full_feature_set(self, mock_load: MagicMock) -> None:
+        from valueinvestor.scorer_improver import evaluator
+
+        gt = self._make_gt().head(12).copy()
+        mock_load.return_value = gt
+        seen = {}
+
+        class RecordingScorer:
+            def score(self, result):
+                seen["financials"] = result.financials
+                seen["valuation"] = result.valuation
+                result.composite_score = 42.0
+                return result
+
+        with patch.object(evaluator.importlib, "reload", side_effect=lambda mod: mod):
+            with patch("valueinvestor.screener.scorer.MultiFactorScorer", return_value=RecordingScorer()):
+                evaluator.evaluate_scorer(use_original_scores=False)
+
+        assert seen["valuation"].ps_ratio is not None
+        assert seen["valuation"].peg_ratio is not None
+        assert seen["valuation"].dividend_yield is not None
+        assert seen["financials"].revenue is not None
+        assert seen["financials"].gross_margin is not None
+        assert seen["financials"].operating_cash_flow is not None
 
 
 # ── Ground truth helper tests ───────────────────────────────────────────────

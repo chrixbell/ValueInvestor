@@ -14,7 +14,7 @@ import shutil
 import signal
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -93,8 +93,15 @@ def _get_llm_client():
     cfg.llm.temperature = 0.7  # Higher creativity for exploration
 
     provider = cfg.llm.provider
-    api_key = cfg.llm.api_key
 
+    # local_llm via LLM_PROVIDER env var / config — no API key required
+    if provider == "local_llm":
+        if not cfg.llm.api_key:
+            cfg.llm.api_key = "not-needed"
+        logger.info("Agent using local LLM at %s (model: %s)", cfg.llm.base_url, cfg.llm.model)
+        return LLMClient(config=cfg.llm)
+
+    api_key = cfg.llm.api_key
     if not api_key:
         raise RuntimeError(
             "No LLM API key available. Set LOCAL_LLM_ENABLED=true, GITHUB_TOKEN, or GEMINI_API_KEY in .env"
@@ -230,6 +237,13 @@ def _compute_diff_summary(old_code: str, new_code: str) -> str:
     return diff_text[:500] if diff_text else "(no changes)"
 
 
+def _is_duplicate_diff(diff_summary: str, recent_records: list[dict]) -> bool:
+    """Return True when this proposal repeats a recent evaluated change."""
+    if not diff_summary or diff_summary == "(no changes)":
+        return False
+    return any(r.get("diff_summary") == diff_summary for r in recent_records)
+
+
 def _validate_scorer() -> bool:
     """Check if the current scorer.py is valid Python and doesn't crash."""
     try:
@@ -315,11 +329,11 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
     logger.info("Computing baseline evaluation …")
     baseline_metrics = evaluate_scorer(use_original_scores=False)
     baseline_rho = float(baseline_metrics["spearman_rho"])
-    best_rho = float(exp_log.best_rho() or baseline_rho)
+    best_rho = float(exp_log.best_rho(current_lineage=True) or baseline_rho)
 
     print(f"\n🎯 Baseline Spearman ρ = {baseline_rho:.4f}")
     print(f"📊 Best achieved ρ = {best_rho:.4f}")
-    print(f"🔄 Starting improvement loop …\n")
+    print("🔄 Starting improvement loop …\n")
 
     # Create LLM client
     llm = _get_llm_client()
@@ -339,12 +353,8 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
         # 1. Read current scorer
         original_code = _read_scorer()
 
-        # 2. Backup
-        backup_path = _backup_scorer(iteration)
-        logger.info("Backed up scorer → %s", backup_path)
-
-        # 3. Get experiment history
-        recent = exp_log.read_last_n(10)
+        # 2. Get experiment history
+        recent = exp_log.read_last_n(10, current_lineage=True)
         if recent:
             history_lines = []
             for r in recent:
@@ -357,7 +367,7 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
         else:
             experiment_history = ""
 
-        # 4. Build prompt and call LLM
+        # 3. Build prompt and call LLM
         is_local = llm.provider == "local_llm"
         user_prompt = _build_prompt(
             scorer_code=original_code,
@@ -422,9 +432,10 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
                 time.sleep(5)
                 continue
 
-        # 5. Extract code from response
+        # 4. Extract code from response
         new_code = _extract_code(response)
         explanation = _extract_explanation(response)
+        diff_summary = _compute_diff_summary(original_code, new_code) if new_code else ""
 
         if not new_code:
             logger.warning("Could not extract code from LLM response")
@@ -437,11 +448,36 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
             )
             continue
 
-        # 6. Apply change
-        _write_scorer(new_code)
-        diff_summary = _compute_diff_summary(original_code, new_code)
+        if diff_summary == "(no changes)":
+            logger.info("LLM proposed no code changes; skipping evaluation")
+            exp_log.log(
+                iteration=iteration,
+                spearman_rho=baseline_rho,
+                baseline_rho=baseline_rho,
+                kept=False,
+                description=f"No code changes proposed: {explanation}",
+                diff_summary=diff_summary,
+            )
+            continue
 
-        # 7. Validate (syntax + basic test)
+        if _is_duplicate_diff(diff_summary, recent):
+            logger.info("LLM repeated a recent diff; skipping evaluation")
+            exp_log.log(
+                iteration=iteration,
+                spearman_rho=baseline_rho,
+                baseline_rho=baseline_rho,
+                kept=False,
+                description=f"Duplicate recent proposal skipped: {explanation}",
+                diff_summary=diff_summary,
+            )
+            continue
+
+        # 5. Backup and apply change
+        backup_path = _backup_scorer(iteration)
+        logger.info("Backed up scorer → %s", backup_path)
+        _write_scorer(new_code)
+
+        # 6. Validate (syntax + basic test)
         if not _validate_scorer():
             logger.warning("Modified scorer failed validation — reverting")
             _write_scorer(original_code)
@@ -456,7 +492,7 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
             _print_banner(iteration, baseline_rho, baseline_rho, best_rho, False, "Validation failed")
             continue
 
-        # 8. Evaluate
+        # 7. Evaluate
         try:
             new_metrics = evaluate_scorer(use_original_scores=False)
             new_rho = new_metrics["spearman_rho"]
@@ -474,21 +510,22 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
             _print_banner(iteration, baseline_rho, baseline_rho, best_rho, False, f"Eval crashed: {e}")
             continue
 
-        # 9. Keep or revert
-        improved = bool(new_rho > baseline_rho)
+        # 8. Keep or revert
+        previous_rho = baseline_rho
+        improved = bool(new_rho > previous_rho)
         if improved:
             baseline_rho = float(new_rho)
             if new_rho > best_rho:
                 best_rho = float(new_rho)
-            logger.info("✅ Improvement! ρ: %.4f → %.4f", baseline_rho, new_rho)
+            logger.info("✅ Improvement! ρ: %.4f → %.4f", previous_rho, new_rho)
         else:
             _write_scorer(original_code)
-            logger.info("❌ No improvement (ρ=%.4f ≤ %.4f) — reverted", new_rho, baseline_rho)
+            logger.info("❌ No improvement (ρ=%.4f ≤ %.4f) — reverted", new_rho, previous_rho)
 
         exp_log.log(
             iteration=iteration,
             spearman_rho=float(new_rho),
-            baseline_rho=float(baseline_rho),
+            baseline_rho=float(previous_rho),
             kept=improved,
             description=explanation,
             diff_summary=diff_summary,
@@ -498,7 +535,7 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
             },
         )
 
-        _print_banner(iteration, new_rho, baseline_rho, best_rho, improved, explanation)
+        _print_banner(iteration, new_rho, previous_rho, best_rho, improved, explanation)
 
         # Brief pause between iterations
         time.sleep(1)
@@ -523,10 +560,10 @@ def show_status() -> None:
 
     total = len(records)
     kept = sum(1 for r in records if r.get("kept"))
-    best = exp_log.best_rho()
+    best = exp_log.best_rho(current_lineage=True)
     latest_rho = records[-1]["spearman_rho"]
 
-    print(f"\n📊 Scorer Improvement Status")
+    print("\n📊 Scorer Improvement Status")
     print(f"{'─'*40}")
     print(f"  Total experiments: {total}")
     print(f"  Kept (improved):   {kept}")
@@ -535,7 +572,7 @@ def show_status() -> None:
     print(f"  Latest ρ:          {latest_rho:.4f}")
     print(f"  Best ρ:            {best:.4f}" if best else "  Best ρ:            N/A")
     print(f"{'─'*40}")
-    print(f"\nLast 10 experiments:")
+    print("\nLast 10 experiments:")
     for r in records[-10:]:
         status = "✅" if r["kept"] else "❌"
         print(

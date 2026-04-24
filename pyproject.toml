@@ -23,7 +23,7 @@ dependencies = [
     "markdown>=3.6",
     "python-multipart>=0.0.9",
     "python-dotenv>=1.0.0",
-    "google-generativeai>=0.5.2",
+    "google-genai>=1.0.0",
     "scipy>=1.10.0",
     "pyarrow>=14.0.0",
 ]

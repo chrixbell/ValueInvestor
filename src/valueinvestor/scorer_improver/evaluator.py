@@ -10,14 +10,11 @@ from __future__ import annotations
 import importlib
 import logging
 import sys
-import types
-from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import pandas as pd
 from scipy import stats
 
-from valueinvestor.scorer_improver.data_prep import TRAINER_DIR
 from valueinvestor.scorer_improver.ground_truth import GROUND_TRUTH_FILE
 
 logger = logging.getLogger(__name__)
@@ -31,6 +28,35 @@ def _load_ground_truth() -> pd.DataFrame:
             "Run `valueinvestor improve-scorer --fetch-only` first."
         )
     return pd.read_parquet(str(GROUND_TRUTH_FILE))
+
+
+_FINANCIAL_FIELDS = (
+    "revenue",
+    "net_income",
+    "total_assets",
+    "total_liabilities",
+    "total_equity",
+    "operating_cash_flow",
+    "free_cash_flow",
+    "gross_margin",
+    "net_margin",
+    "roe",
+    "roa",
+    "debt_to_equity",
+    "current_ratio",
+)
+
+_VALUATION_FIELDS = (
+    "price",
+    "pe_ratio",
+    "pe_forward",
+    "pb_ratio",
+    "ps_ratio",
+    "peg_ratio",
+    "dividend_yield",
+    "ev_to_ebitda",
+    "market_cap_rmb",
+)
 
 
 def _rescore_with_current_scorer(gt_df: pd.DataFrame) -> pd.DataFrame:
@@ -56,7 +82,7 @@ def _rescore_with_current_scorer(gt_df: pd.DataFrame) -> pd.DataFrame:
     scorer = MultiFactorScorer()
     new_scores = []
 
-    for _, row in gt_df.iterrows():
+    for row in gt_df.to_dict("records"):
         ticker = str(row["ticker"])
         market = Market.HK_SHARE if ticker.endswith(".HK") else Market.A_SHARE
 
@@ -64,17 +90,15 @@ def _rescore_with_current_scorer(gt_df: pd.DataFrame) -> pd.DataFrame:
         financials = Financials(
             ticker=ticker,
             period="snapshot",
-            roe=_safe(row, "roe"),
-            net_margin=_safe(row, "net_margin"),
-            debt_to_equity=_safe(row, "debt_to_equity"),
+            **{field: _safe(row, field) for field in _FINANCIAL_FIELDS},
         )
         valuation = ValuationMetrics(
             ticker=ticker,
             date=str(row.get("snapshot_date", "")),
-            price=_safe(row, "close"),
-            pe_ratio=_safe(row, "pe_ratio"),
-            pb_ratio=_safe(row, "pb_ratio"),
-            market_cap_rmb=_safe(row, "market_cap_rmb"),
+            **{
+                field: _safe(row, "close" if field == "price" else field)
+                for field in _VALUATION_FIELDS
+            },
         )
         sr = ScreeningResult(
             company=company,
@@ -155,10 +179,14 @@ def evaluate_scorer(
         valid = group.dropna(subset=[score_col, "forward_return_6m"])
         if len(valid) < 10:
             continue
+        if valid[score_col].nunique() < 2 or valid["forward_return_6m"].nunique() < 2:
+            continue
 
         rho, p = stats.spearmanr(valid[score_col], valid["forward_return_6m"])
+        if pd.isna(rho):
+            continue
         rhos.append(rho)
-        pvals.append(p)
+        pvals.append(1.0 if pd.isna(p) else p)
 
         # Hit rate: % of top-20 that beat median
         median_ret = valid["forward_return_6m"].median()

@@ -1,6 +1,6 @@
 """Phase 2 — Build ground-truth dataset with forward returns.
 
-For each rolling quarter across the 3-year history window, creates a snapshot
+For each rolling quarter across the 10-year history window, creates a snapshot
 of each stock's fundamentals and valuation, then computes the 6-month forward
 return as the ground-truth label.  The current scorer is also run to produce
 baseline scores.
@@ -10,11 +10,10 @@ Output: ``data/trainer/ground_truth.parquet``
 
 from __future__ import annotations
 
-import importlib
 import logging
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional
 
 import pandas as pd
 
@@ -132,10 +131,8 @@ def _build_snapshot_features(
 ) -> pd.DataFrame:
     """Build feature rows for all stocks at a given snapshot date.
 
-    For each stock with available data, produces a row with:
-    - ticker, snapshot_date, close_price
-    - pe_ratio, pb_ratio, market_cap_rmb (from valuations)
-    - roe, net_margin, debt_to_equity (from financials)
+    For each stock with available data, produces a feature row containing
+    all valuation and financial fields that ``MultiFactorScorer`` can use.
     """
     records = []
     tickers = prices_df["ticker"].unique()
@@ -147,32 +144,49 @@ def _build_snapshot_features(
 
         # Get valuation data (use latest available, may not be date-specific)
         val_row = val_df[val_df["ticker"] == ticker]
-        pe = pb = mktcap = None
+        valuation_fields = {
+            "pe_ratio": None,
+            "pe_forward": None,
+            "pb_ratio": None,
+            "ps_ratio": None,
+            "peg_ratio": None,
+            "dividend_yield": None,
+            "ev_to_ebitda": None,
+            "market_cap_rmb": None,
+        }
         if not val_row.empty:
             row = val_row.iloc[-1]
-            pe = _safe_float(row.get("pe_ratio"))
-            pb = _safe_float(row.get("pb_ratio"))
-            mktcap = _safe_float(row.get("market_cap_rmb"))
+            for field in valuation_fields:
+                valuation_fields[field] = _safe_float(row.get(field))
 
         # Get financial data
         fin_row = fin_df[fin_df["ticker"] == ticker]
-        roe = net_margin = debt_to_equity = None
+        financial_fields = {
+            "revenue": None,
+            "net_income": None,
+            "total_assets": None,
+            "total_liabilities": None,
+            "total_equity": None,
+            "operating_cash_flow": None,
+            "free_cash_flow": None,
+            "gross_margin": None,
+            "net_margin": None,
+            "roe": None,
+            "roa": None,
+            "debt_to_equity": None,
+            "current_ratio": None,
+        }
         if not fin_row.empty:
             row = fin_row.iloc[-1]
-            roe = _safe_float(row.get("roe"))
-            net_margin = _safe_float(row.get("net_margin"))
-            debt_to_equity = _safe_float(row.get("debt_to_equity"))
+            for field in financial_fields:
+                financial_fields[field] = _safe_float(row.get(field))
 
         records.append({
             "ticker": ticker,
             "snapshot_date": snapshot_date,
             "close": price,
-            "pe_ratio": pe,
-            "pb_ratio": pb,
-            "market_cap_rmb": mktcap,
-            "roe": roe,
-            "net_margin": net_margin,
-            "debt_to_equity": debt_to_equity,
+            **valuation_fields,
+            **financial_fields,
         })
 
     return pd.DataFrame(records)
@@ -202,7 +216,7 @@ def _score_snapshot(features_df: pd.DataFrame) -> pd.DataFrame:
     scorer = MultiFactorScorer()
     scored_records = []
 
-    for _, row in features_df.iterrows():
+    for row in features_df.to_dict("records"):
         ticker = row["ticker"]
         # Determine market from ticker format
         if str(ticker).endswith(".HK"):
@@ -214,16 +228,31 @@ def _score_snapshot(features_df: pd.DataFrame) -> pd.DataFrame:
         financials = Financials(
             ticker=ticker,
             period="snapshot",
-            roe=row.get("roe"),
+            revenue=row.get("revenue"),
+            net_income=row.get("net_income"),
+            total_assets=row.get("total_assets"),
+            total_liabilities=row.get("total_liabilities"),
+            total_equity=row.get("total_equity"),
+            operating_cash_flow=row.get("operating_cash_flow"),
+            free_cash_flow=row.get("free_cash_flow"),
+            gross_margin=row.get("gross_margin"),
             net_margin=row.get("net_margin"),
+            roe=row.get("roe"),
+            roa=row.get("roa"),
             debt_to_equity=row.get("debt_to_equity"),
+            current_ratio=row.get("current_ratio"),
         )
         valuation = ValuationMetrics(
             ticker=ticker,
             date=str(row["snapshot_date"]),
             price=row.get("close"),
             pe_ratio=row.get("pe_ratio"),
+            pe_forward=row.get("pe_forward"),
             pb_ratio=row.get("pb_ratio"),
+            ps_ratio=row.get("ps_ratio"),
+            peg_ratio=row.get("peg_ratio"),
+            dividend_yield=row.get("dividend_yield"),
+            ev_to_ebitda=row.get("ev_to_ebitda"),
             market_cap_rmb=row.get("market_cap_rmb"),
         )
         sr = ScreeningResult(
@@ -238,11 +267,26 @@ def _score_snapshot(features_df: pd.DataFrame) -> pd.DataFrame:
             "snapshot_date": row["snapshot_date"],
             "close": row["close"],
             "pe_ratio": row.get("pe_ratio"),
+            "pe_forward": row.get("pe_forward"),
             "pb_ratio": row.get("pb_ratio"),
+            "ps_ratio": row.get("ps_ratio"),
+            "peg_ratio": row.get("peg_ratio"),
+            "dividend_yield": row.get("dividend_yield"),
+            "ev_to_ebitda": row.get("ev_to_ebitda"),
             "market_cap_rmb": row.get("market_cap_rmb"),
+            "revenue": row.get("revenue"),
+            "net_income": row.get("net_income"),
+            "total_assets": row.get("total_assets"),
+            "total_liabilities": row.get("total_liabilities"),
+            "total_equity": row.get("total_equity"),
+            "operating_cash_flow": row.get("operating_cash_flow"),
+            "free_cash_flow": row.get("free_cash_flow"),
+            "gross_margin": row.get("gross_margin"),
             "roe": row.get("roe"),
+            "roa": row.get("roa"),
             "net_margin": row.get("net_margin"),
             "debt_to_equity": row.get("debt_to_equity"),
+            "current_ratio": row.get("current_ratio"),
             "composite_score": sr.composite_score,
             "value_score": sr.value_score,
             "quality_score": sr.quality_score,

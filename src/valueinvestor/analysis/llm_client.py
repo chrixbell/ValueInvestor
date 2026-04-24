@@ -9,8 +9,8 @@ from typing import Any, Dict, Optional
 
 import openai
 from openai import OpenAI
-import google.generativeai as genai
-from google.generativeai.types import generation_types
+from google import genai
+from google.genai import types as genai_types
 
 from valueinvestor.config import LLMConfig
 from valueinvestor.data.models import AnalysisDimension
@@ -50,6 +50,8 @@ _MODEL_PRICING: Dict[str, Dict[str, float]] = {
     "gemini-2.0-flash": {"input": 0.10, "output": 0.40},
     "gemini-2.0-flash-lite": {"input": 0.075, "output": 0.30},
     "gemini-2.5-pro": {"input": 1.25, "output": 10.00},
+    "gemini-2.5-flash": {"input": 0.075, "output": 0.30},
+    "gemini-3.1-flash-lite-preview": {"input": 0.075, "output": 0.30},
     "gemini-3.1-pro-preview": {"input": 1.25, "output": 3.75},
     # Kimi
     "Kimi Code 2.5": {"input": 1.00, "output": 2.00},
@@ -134,8 +136,7 @@ class LLMClient:
         self.temperature = temperature
 
         if self.provider == "gemini":
-            genai.configure(api_key=api_key)
-            self._gemini_model = genai.GenerativeModel(self.model)
+            self._gemini_client = genai.Client(api_key=api_key)
         elif self.provider == "local_llm":
             # For local LLM, base_url must include /v1 prefix for OpenAI-compatible API
             base = (base_url or "http://127.0.0.1:1234").rstrip("/")
@@ -185,21 +186,21 @@ class LLMClient:
         user_prompt: str,
         response_format: Optional[str] = None,
     ) -> str:
-        generation_config = genai.types.GenerationConfig(
+        generation_config = genai_types.GenerateContentConfig(
             temperature=self.temperature,
+            response_mime_type="application/json" if response_format == "json" else None,
         )
-        if response_format == "json":
-            generation_config.response_mime_type = "application/json"
-            
+
         # Combine system prompt and user prompt
         prompt = f"{system_prompt}\n\n{user_prompt}"
 
         last_exception: Exception | None = None
         for attempt in range(1, self.max_retries + 1):
             try:
-                response = self._gemini_model.generate_content(
-                    prompt,
-                    generation_config=generation_config,
+                response = self._gemini_client.models.generate_content(
+                    model=self.model,
+                    contents=prompt,
+                    config=generation_config,
                 )
                 
                 # Track usage

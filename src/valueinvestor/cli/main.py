@@ -535,8 +535,9 @@ def improve_scorer(
 ) -> None:
     """Autonomous scorer improvement loop (autoresearch-inspired).
 
-    Fetches 3-year historical data, builds ground truth with 6-month forward
-    returns, then iteratively uses an LLM to improve scorer.py code.
+    Fetches 10-year historical data (differential download), builds ground
+    truth with 6-month forward returns, then iteratively uses an LLM to
+    improve scorer.py code.
     """
     logging.basicConfig(
         level=logging.INFO,
@@ -561,7 +562,7 @@ def improve_scorer(
                 console=console,
                 transient=True,
             ) as progress:
-                progress.add_task("Fetching 3-year historical data …", total=None)
+                progress.add_task("Fetching 10-year historical data (differential) …", total=None)
                 files = fetch_training_data(force=force)
 
             console.print(f"[green]✓[/green] Training data ready — {len(files)} files")
