@@ -194,7 +194,7 @@ class DataCache:
         return [Company.model_validate(item) for item in raw_list]
 
     def set_stock_list(self, market: str, companies: List[Company]) -> None:
-        blob = json.dumps([json.loads(c.model_dump_json()) for c in companies])
+        blob = json.dumps([c.model_dump(mode="json") for c in companies])
         with self._connect() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO stock_lists (market, data, updated_at) VALUES (?, ?, ?)",

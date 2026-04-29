@@ -46,6 +46,7 @@ class ScreeningEngine:
         self._a_fetcher = AShareFetcher()
         self._hk_fetcher = HKShareFetcher()
         self._scorer = scorer if scorer is not None else MultiFactorScorer()
+        self.last_total_screened: int = 0
 
     # ------------------------------------------------------------------
     # 1. Universe
@@ -172,6 +173,7 @@ class ScreeningEngine:
         if not companies:
             logger.warning("No companies in universe — aborting screening run")
             return []
+        self.last_total_screened = len(companies)
 
         # Step 2 — valuations
         logger.info("Step 2/6: Fetching valuation data …")

@@ -201,7 +201,7 @@ def _run_multi_timeframe_scan(engine, cfg, cache, skip_analysis: bool) -> None:
         results_by_horizon={"1m": results, "3m": results, "6m": results},
         analyses=analyses,
         config=cfg,
-        total_screened=len(results),
+        total_screened=engine.last_total_screened,
         spearman_rhos=spearman_rhos,
     )
 
@@ -321,7 +321,7 @@ def scan(
             cache=cache,
             config=cfg,
         )
-        report = temp_pipeline.build_report(analyses, cfg)
+        report = temp_pipeline.build_report(analyses, cfg, total_screened=engine.last_total_screened)
 
         with Progress(
             SpinnerColumn(),

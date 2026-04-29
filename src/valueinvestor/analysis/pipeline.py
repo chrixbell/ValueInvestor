@@ -161,7 +161,6 @@ class AnalysisPipeline:
     def analyze_batch(
         self,
         results: List[ScreeningResult],
-        max_concurrent: int = 3,
     ) -> List[CompanyAnalysis]:
         """Analyse a list of screened companies sequentially.
 
@@ -201,6 +200,7 @@ class AnalysisPipeline:
         self,
         analyses: List[CompanyAnalysis],
         config: AppConfig,
+        total_screened: int = 0,
     ) -> InvestmentReport:
         """Assemble a final :class:`InvestmentReport` from completed analyses."""
         config_summary = {
@@ -215,7 +215,7 @@ class AnalysisPipeline:
             title="ValueInvestor Investment Report",
             generated_at=datetime.now(timezone.utc).isoformat(),
             config_summary=config_summary,
-            total_screened=config.screening.top_n,
+            total_screened=total_screened,
             total_candidates=len(analyses),
             candidates=analyses,
         )
@@ -248,7 +248,7 @@ class AnalysisPipeline:
             "screening": config.screening.model_dump(),
             "investment": config.investment.model_dump(),
             "llm_model": config.llm.model,
-            "output_language": "zh-CN",
+            "output_language": config.output.language,
         }
         return MultiTimeframeReport(
             title="价值投资多时间框架筛选报告",

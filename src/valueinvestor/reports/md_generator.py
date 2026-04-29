@@ -30,6 +30,49 @@ def _fmt_pct(value: float | None) -> str:
     return f"{display:.1f}%"
 
 
+def _zh_financials_table(sr) -> str:
+    """Render a Chinese key-financials Markdown table for *sr*."""
+    v = sr.valuation
+    f = sr.financials
+    rows = [
+        ("市值", _fmt_billions(v.market_cap_rmb or sr.company.market_cap_rmb)),
+        ("股价", _fmt_number(v.price, decimals=2)),
+        ("市盈率（TTM）", _fmt_number(v.pe_ratio)),
+        ("市盈率（预测）", _fmt_number(v.pe_forward)),
+        ("市净率", _fmt_number(v.pb_ratio)),
+        ("市销率", _fmt_number(v.ps_ratio)),
+        ("PEG", _fmt_number(v.peg_ratio)),
+        ("股息率", _fmt_pct(v.dividend_yield)),
+        ("EV/EBITDA", _fmt_number(v.ev_to_ebitda)),
+        ("净资产收益率（ROE）", _fmt_pct(f.roe)),
+        ("总资产收益率（ROA）", _fmt_pct(f.roa)),
+        ("毛利率", _fmt_pct(f.gross_margin)),
+        ("净利率", _fmt_pct(f.net_margin)),
+        ("负债/股东权益比", _fmt_number(f.debt_to_equity, decimals=2)),
+        ("流动比率", _fmt_number(f.current_ratio, decimals=2)),
+    ]
+    lines = [
+        "#### 主要财务指标",
+        "| 指标 | 数值 |",
+        "|------|------|",
+    ]
+    for label, val in rows:
+        lines.append(f"| {label} | {val} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _zh_disclaimer() -> str:
+    """Return the standard Chinese investment disclaimer section."""
+    return (
+        "## 免责声明\n"
+        "本报告由自动化分析工具生成，不构成专业金融建议。"
+        "所示信息来源于公开数据和AI驱动的分析，可能存在不准确之处。"
+        "投资者在做出投资决策前应进行独立尽职调查并咨询专业投资顾问。"
+        "历史业绩并不代表未来表现。\n"
+    )
+
+
 class MarkdownReportGenerator:
     """Produces a full Markdown document from an :class:`InvestmentReport`.
 
@@ -195,6 +238,9 @@ class MarkdownReportGenerator:
 
     def _financials_table(self, sr) -> str:
         """Build a two-column key-financials table with optional translation."""
+        if self.output_language == "zh-CN":
+            return _zh_financials_table(sr)
+
         v = sr.valuation
         f = sr.financials
         rows = [
@@ -214,36 +260,6 @@ class MarkdownReportGenerator:
             ("Debt / Equity", _fmt_number(f.debt_to_equity, decimals=2)),
             ("Current Ratio", _fmt_number(f.current_ratio, decimals=2)),
         ]
-
-        if self.output_language == "zh-CN":
-            label_map = {
-                "Market Cap": "市值",
-                "Price": "股价",
-                "PE Ratio (TTM)": "市盈率（TTM）",
-                "PE Ratio (Fwd)": "市盈率（预测）",
-                "PB Ratio": "市净率",
-                "PS Ratio": "市销率",
-                "PEG Ratio": "PEG",
-                "Dividend Yield": "股息率",
-                "EV/EBITDA": "EV/EBITDA",
-                "ROE": "净资产收益率（ROE）",
-                "ROA": "总资产收益率（ROA）",
-                "Gross Margin": "毛利率",
-                "Net Margin": "净利率",
-                "Debt / Equity": "负债/股东权益比",
-                "Current Ratio": "流动比率",
-            }
-            lines = [
-                "#### 主要财务指标",
-                "| 指标 | 数值 |",
-                "|------|------|",
-            ]
-            for label, val in rows:
-                lbl = label_map.get(label, label)
-                lines.append(f"| {lbl} | {val} |")
-            lines.append("")
-            return "\n".join(lines)
-
         lines = [
             "#### Key Financials",
             "| Metric | Value |",
@@ -256,10 +272,7 @@ class MarkdownReportGenerator:
 
     def _disclaimer(self) -> str:
         if self.output_language == "zh-CN":
-            return (
-                "## 免责声明\n"
-                "本报告由自动化分析工具生成，不构成专业金融建议。所示信息来源于公开数据和AI驱动的分析，可能存在不准确之处。投资者在做出投资决策前应进行独立尽职调查并咨询专业投资顾问。历史业绩并不代表未来表现。\n"
-            )
+            return _zh_disclaimer()
 
         return (
             "## Disclaimer\n"
@@ -449,43 +462,10 @@ class MultiTimeframeMarkdownReportGenerator:
         return "\n".join(parts)
 
     def _financials_table(self, sr) -> str:
-        v = sr.valuation
-        f = sr.financials
-        rows = [
-            ("市值", _fmt_billions(v.market_cap_rmb or sr.company.market_cap_rmb)),
-            ("股价", _fmt_number(v.price, decimals=2)),
-            ("市盈率（TTM）", _fmt_number(v.pe_ratio)),
-            ("市盈率（预测）", _fmt_number(v.pe_forward)),
-            ("市净率", _fmt_number(v.pb_ratio)),
-            ("市销率", _fmt_number(v.ps_ratio)),
-            ("PEG", _fmt_number(v.peg_ratio)),
-            ("股息率", _fmt_pct(v.dividend_yield)),
-            ("EV/EBITDA", _fmt_number(v.ev_to_ebitda)),
-            ("净资产收益率（ROE）", _fmt_pct(f.roe)),
-            ("总资产收益率（ROA）", _fmt_pct(f.roa)),
-            ("毛利率", _fmt_pct(f.gross_margin)),
-            ("净利率", _fmt_pct(f.net_margin)),
-            ("负债/股东权益比", _fmt_number(f.debt_to_equity, decimals=2)),
-            ("流动比率", _fmt_number(f.current_ratio, decimals=2)),
-        ]
-        lines = [
-            "#### 主要财务指标",
-            "| 指标 | 数值 |",
-            "|------|------|",
-        ]
-        for label, val in rows:
-            lines.append(f"| {label} | {val} |")
-        lines.append("")
-        return "\n".join(lines)
+        return _zh_financials_table(sr)
 
     def _disclaimer(self) -> str:
-        return (
-            "## 免责声明\n"
-            "本报告由自动化分析工具生成，不构成专业金融建议。"
-            "所示信息来源于公开数据和AI驱动的分析，可能存在不准确之处。"
-            "投资者在做出投资决策前应进行独立尽职调查并咨询专业投资顾问。"
-            "历史业绩并不代表未来表现。\n"
-        )
+        return _zh_disclaimer()
 
 
 def _rho_quality(rho: float) -> str:
