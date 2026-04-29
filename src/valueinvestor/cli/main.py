@@ -109,12 +109,126 @@ def _screening_table(results: list[ScreeningResult]) -> Table:
 # scan
 # ---------------------------------------------------------------------------
 
+
+def _run_multi_timeframe_scan(engine, cfg, cache, skip_analysis: bool) -> None:
+    """Run single-screen multi-timeframe pipeline and generate a Chinese report.
+
+    Screens once using the same scoring algorithm for all horizons, then reports
+    the current Spearman ρ for 1m/3m/6m forward returns alongside the results.
+    """
+    # ── Screen once ──────────────────────────────────────────────────
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        progress.add_task("Screening candidates…", total=None)
+        try:
+            results = engine.run(top_n=cfg.screening.top_n)
+        except Exception as exc:
+            err_console.print(f"[red]Screening failed:[/red] {exc}")
+            raise typer.Exit(code=1) from exc
+
+    if not results:
+        console.print("[yellow]No candidates survived screening.[/yellow]")
+        raise typer.Exit(code=0)
+
+    console.print(f"\n[green]✓[/green] {len(results)} candidates\n")
+    console.print(_screening_table(results))
+
+    # ── Get current ρ values (if ground truth available) ─────────────
+    spearman_rhos: dict = {}
+    try:
+        from valueinvestor.scorer_improver.evaluator import evaluate_scorer_all_targets
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+            transient=True,
+        ) as progress:
+            progress.add_task("Evaluating ρ against ground truth…", total=None)
+            eval_results = evaluate_scorer_all_targets()
+        for h in ("1m", "3m", "6m"):
+            spearman_rhos[h] = eval_results.get(h, {}).get("spearman_rho", None)
+        console.print(
+            "[dim]ρ 1m=%.4f  3m=%.4f  6m=%.4f[/dim]"
+            % (spearman_rhos.get("1m", 0), spearman_rhos.get("3m", 0), spearman_rhos.get("6m", 0))
+        )
+    except Exception:
+        console.print("[dim]Ground truth not available — skipping ρ evaluation[/dim]")
+
+    # ── LLM analysis ─────────────────────────────────────────────────
+    analyses = []
+    if not skip_analysis:
+        try:
+            from valueinvestor.analysis.llm_client import LLMClient
+            from valueinvestor.analysis.pipeline import AnalysisPipeline
+
+            llm = LLMClient(config=cfg.llm)
+            pipeline = AnalysisPipeline(llm=llm, cache=cache, config=cfg)
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+                transient=True,
+            ) as progress:
+                task = progress.add_task(
+                    f"Analyzing {len(results)} candidates…", total=len(results)
+                )
+                for idx, sr in enumerate(results, 1):
+                    progress.update(task, description=f"Analyzing [{idx}/{len(results)}] {sr.company.ticker}…")
+                    try:
+                        analysis = pipeline.analyze_company(sr)
+                        analyses.append(analysis)
+                    except Exception:
+                        err_console.print(f"[yellow]⚠ Analysis failed for {sr.company.ticker} — skipping[/yellow]")
+                    progress.advance(task)
+
+            console.print(f"[green]✓[/green] Analysis complete — {len(analyses)}/{len(results)} succeeded")
+        except Exception as exc:
+            err_console.print(f"[red]LLM analysis error:[/red] {exc}")
+            err_console.print("[yellow]Continuing without analysis…[/yellow]")
+
+    # ── Build and save report ────────────────────────────────────────
+    from valueinvestor.analysis.pipeline import AnalysisPipeline as AP
+    from valueinvestor.reports.md_generator import MultiTimeframeMarkdownReportGenerator
+
+    rpt_pipeline = AP(llm=None, cache=cache, config=cfg)  # type: ignore[arg-type]
+    report = rpt_pipeline.build_multi_timeframe_report(
+        results_by_horizon={"1m": results, "3m": results, "6m": results},
+        analyses=analyses,
+        config=cfg,
+        total_screened=len(results),
+        spearman_rhos=spearman_rhos,
+    )
+
+    md_gen = MultiTimeframeMarkdownReportGenerator()
+    md_path = md_gen.save(report, cfg.output.reports_dir)
+    console.print(f"\n[green]✓[/green] Report saved → {md_path}")
+
+    if "pdf" in cfg.output.formats:
+        try:
+            from valueinvestor.reports.pdf_generator import PDFReportGenerator
+
+            pdf_gen = PDFReportGenerator()
+            pdf_path = pdf_gen.generate_from_multi_timeframe_report(
+                report, cfg.output.reports_dir
+            )
+            console.print(f"[green]✓[/green] PDF saved → {pdf_path}")
+        except Exception as exc:
+            err_console.print(f"[yellow]PDF generation skipped:[/yellow] {exc}")
+
+
 @app.command()
 def scan(
     config: str = typer.Option("config.yaml", "--config", "-c", help="Path to config YAML."),
     top_n: Optional[int] = typer.Option(None, "--top-n", "-n", help="Override screening.top_n."),
     skip_analysis: bool = typer.Option(False, "--skip-analysis", help="Skip LLM analysis step."),
     output_dir: Optional[str] = typer.Option(None, "--output-dir", "-o", help="Report output dir."),
+    multi_timeframe: bool = typer.Option(False, "--multi-timeframe", help="Run screening for 1m/3m/6m horizons and generate Chinese multi-timeframe report."),
 ) -> None:
     """Full pipeline: fetch → screen → score → LLM analysis → generate reports."""
     cfg = _load_cfg(config)
@@ -128,6 +242,10 @@ def scan(
     from valueinvestor.screener.engine import ScreeningEngine
 
     engine = ScreeningEngine(config=cfg, cache=cache)
+
+    if multi_timeframe:
+        _run_multi_timeframe_scan(engine, cfg, cache, skip_analysis)
+        return
 
     with Progress(
         SpinnerColumn(),
@@ -535,9 +653,10 @@ def improve_scorer(
 ) -> None:
     """Autonomous scorer improvement loop (autoresearch-inspired).
 
-    Fetches 10-year historical data (differential download), builds ground
-    truth with 6-month forward returns, then iteratively uses an LLM to
-    improve scorer.py code.
+    Fetches 10-year historical data, builds ground truth with forward returns
+    for 1-month, 3-month, and 6-month horizons, then iteratively uses an LLM
+    to improve scorer.py.  Each change is evaluated against all three horizons
+    and kept if ANY target improves.
     """
     logging.basicConfig(
         level=logging.INFO,
@@ -595,8 +714,9 @@ def improve_scorer(
             console.print("\n[yellow]--fetch-only mode: stopping after data prep.[/yellow]")
             return
 
-    # Phase 3: Improvement loop
+    # Phase 3: Improvement loop (all horizons — 1m, 3m, 6m)
     console.print("\n[bold cyan]Phase 3:[/bold cyan] Starting improvement loop …")
+    console.print("  Evaluating 1-month, 3-month, and 6-month forward returns")
     console.print("[dim]Press Ctrl-C to stop gracefully[/dim]\n")
 
     try:

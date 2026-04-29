@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-
 import yaml
 
 from valueinvestor.config import AppConfig, load_config, save_default_config
@@ -21,6 +19,27 @@ class TestLoadConfigDefaults:
         cfg = load_config(str(tmp_path / "missing.yaml"))
         assert cfg.cache.enabled is True
         assert cfg.cache.ttl_hours == 24
+
+    def test_default_llm_is_deepseek(self, tmp_path, monkeypatch):
+        for env_key in (
+            "LLM_PROVIDER",
+            "LLM_MODEL",
+            "LLM_BASE_URL",
+            "DEEPSEEK_API_KEY",
+            "OPENAI_API_KEY",
+            "GEMINI_API_KEY",
+            "OPENROUTER_API_KEY",
+            "GITHUB_TOKEN",
+            "GITHUB_API_KEY",
+            "KIMI_API_KEY",
+            "NVIDIA_NIM_API_KEY",
+        ):
+            monkeypatch.setenv(env_key, "")
+
+        cfg = load_config(str(tmp_path / "missing.yaml"))
+        assert cfg.llm.provider == "deepseek"
+        assert cfg.llm.model == "DeepSeek-V4-Flash"
+        assert cfg.llm.base_url == "https://api.deepseek.com/v1"
 
 
 class TestLoadConfigFromFile:

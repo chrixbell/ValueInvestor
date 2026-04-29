@@ -21,7 +21,6 @@ from valueinvestor.screener.scorer import MultiFactorScorer
 
 logger = logging.getLogger(__name__)
 
-
 class ScreeningEngine:
     """End-to-end quantitative stock screener.
 
@@ -31,14 +30,22 @@ class ScreeningEngine:
         Application configuration (screening thresholds, market list, etc.).
     cache:
         SQLite-backed data cache for avoiding redundant API calls.
+    scorer:
+        Optional scorer instance. If ``None``, a default ``MultiFactorScorer``
+        (optimised for 6-month returns) is created automatically.
     """
 
-    def __init__(self, config: AppConfig, cache: DataCache) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        cache: DataCache,
+        scorer: Optional[MultiFactorScorer] = None,
+    ) -> None:
         self.config = config
         self.cache = cache
         self._a_fetcher = AShareFetcher()
         self._hk_fetcher = HKShareFetcher()
-        self._scorer = MultiFactorScorer()
+        self._scorer = scorer if scorer is not None else MultiFactorScorer()
 
     # ------------------------------------------------------------------
     # 1. Universe

@@ -1,4 +1,4 @@
-"""OpenAI API client wrapper for ValueInvestor LLM-driven analysis."""
+"""Multi-provider LLM client wrapper for ValueInvestor analysis."""
 
 from __future__ import annotations
 
@@ -53,6 +53,9 @@ _MODEL_PRICING: Dict[str, Dict[str, float]] = {
     "gemini-2.5-flash": {"input": 0.075, "output": 0.30},
     "gemini-3.1-flash-lite-preview": {"input": 0.075, "output": 0.30},
     "gemini-3.1-pro-preview": {"input": 1.25, "output": 3.75},
+    # DeepSeek models
+    "DeepSeek-V4-Flash": {"input": 0.14, "output": 0.28},
+    "deepseek-v4-flash": {"input": 0.14, "output": 0.28},
     # Kimi
     "Kimi Code 2.5": {"input": 1.00, "output": 2.00},
     # NVIDIA NIM (Minimax M2.7)
@@ -102,6 +105,18 @@ _DIMENSION_TITLES: Dict[str, str] = {
     "recommendation": "Investment Recommendation",
 }
 
+_MODEL_ALIASES: Dict[str, Dict[str, str]] = {
+    "deepseek": {
+        "DeepSeek-V4-Flash": "deepseek-v4-flash",
+        "DeepSeek-V4-Pro": "deepseek-v4-pro",
+    }
+}
+
+
+def _normalize_model_name(provider: str, model: str) -> str:
+    """Normalize user-facing model aliases to provider API model IDs."""
+    return _MODEL_ALIASES.get(provider, {}).get(model, model)
+
 
 class LLMClient:
     """Wrapper around the OpenAI Python SDK for ValueInvestor analysis tasks."""
@@ -131,7 +146,9 @@ class LLMClient:
                 f"No API key provided for {provider_name}. Check your environment variables or config."
             )
 
-        self.model = model
+        normalized_model = _normalize_model_name(self.provider, model)
+
+        self.model = normalized_model
         self.max_retries = max_retries
         self.temperature = temperature
 
@@ -185,11 +202,14 @@ class LLMClient:
         system_prompt: str,
         user_prompt: str,
         response_format: Optional[str] = None,
+        max_tokens: Optional[int] = None,
     ) -> str:
-        generation_config = genai_types.GenerateContentConfig(
-            temperature=self.temperature,
-            response_mime_type="application/json" if response_format == "json" else None,
-        )
+        generation_kwargs: Dict[str, Any] = {"temperature": self.temperature}
+        if response_format == "json":
+            generation_kwargs["response_mime_type"] = "application/json"
+        if max_tokens is not None:
+            generation_kwargs["max_output_tokens"] = max_tokens
+        generation_config = genai_types.GenerateContentConfig(**generation_kwargs)
 
         # Combine system prompt and user prompt
         prompt = f"{system_prompt}\n\n{user_prompt}"
@@ -245,6 +265,7 @@ class LLMClient:
         system_prompt: str,
         user_prompt: str,
         response_format: Optional[str] = None,
+        max_tokens: Optional[int] = None,
     ) -> str:
         """Send a chat completion request with retry and usage tracking.
 
@@ -263,9 +284,9 @@ class LLMClient:
             The assistant's response content.
         """
         if self.provider == "gemini":
-            return self._complete_gemini(system_prompt, user_prompt, response_format)
+            return self._complete_gemini(system_prompt, user_prompt, response_format, max_tokens)
 
-        # Handle local_llm and OpenAI-compatible APIs (OpenAI, GitHub, OpenRouter, NVIDIA NIM, etc.)
+        # Handle local_llm and OpenAI-compatible APIs (OpenAI, DeepSeek, GitHub, OpenRouter, NVIDIA NIM, etc.)
         messages: list[Dict[str, str]] = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -278,6 +299,8 @@ class LLMClient:
         }
         if response_format == "json":
             kwargs["response_format"] = {"type": "json_object"}
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
 
         last_exception: Exception | None = None
         for attempt in range(1, self.max_retries + 1):
@@ -344,11 +367,11 @@ class LLMClient:
         # Defensive: check response structure before subscripting
         if not response or not response.choices or len(response.choices) == 0:
             logger.error("Malformed LLM response: choices is empty or missing. Full response: %s", response)
-            raise LLMError(f"Malformed LLM response: no choices returned")
+            raise LLMError("Malformed LLM response: no choices returned")
         
         if not response.choices[0].message:
             logger.error("Malformed LLM response: message is missing from choice 0. Full response: %s", response)
-            raise LLMError(f"Malformed LLM response: no message in choice")
+            raise LLMError("Malformed LLM response: no message in choice")
         
         content = response.choices[0].message.content or ""
         return content

@@ -6,7 +6,14 @@ You are an autonomous research agent improving a stock scoring algorithm.
 The scorer (`scorer.py`) assigns a composite score to Chinese stocks (A-share
 and Hong Kong) based on valuation, quality, and growth metrics. Your goal is
 to maximize the **Spearman rank correlation (ρ)** between the composite score
-and the actual 6-month forward stock return.
+and forward stock returns across **three time horizons simultaneously**:
+
+- **1-month** (30-day forward return)
+- **3-month** (90-day forward return)
+- **6-month** (126-day forward return)
+
+A change is kept if it improves ρ for **any** of the three horizons — you do
+not need to improve all three at once.
 
 Higher ρ means the scorer is better at ranking stocks by future performance.
 
@@ -64,13 +71,16 @@ Each `ScreeningResult` has:
 
 ## Strategy Tips
 
-- **Weights**: try different allocations between value, quality, growth, and momentum
+- **New sub-factors**: use dividend_yield, current_ratio, free_cash_flow, gross_margin, roa — these have the
+  most untapped predictive power and the highest success rate
+- **Interaction terms**: combine factors (e.g., ROE/PE as earnings yield quality, FCF/market_cap)
 - **Non-linear scoring**: try logarithmic, exponential, or sigmoid transforms instead of linear
-- **New sub-factors**: use dividend_yield, current_ratio, free_cash_flow, gross_margin
-- **Interaction terms**: combine factors (e.g., ROE/PE as earnings yield quality)
-- **Clamping ranges**: adjust the best/worst thresholds (PE 8→30 might not be optimal)
-- **Momentum**: the momentum score is currently a placeholder (50.0) — computing it from price data isn't available, but you can adjust its weight or remove it
 - **Composite formula**: try geometric mean, harmonic mean, or rank-based aggregation instead of weighted sum
+- **Clamping ranges**: adjust the best/worst thresholds (PE 8→30 might not be optimal for current market)
+- **Momentum**: the momentum score is currently a placeholder (50.0) — computing it from price data isn't
+  available, but you can adjust its weight or remove it entirely
+- **Weights**: small weight-only reallocations ALMOST NEVER improve ρ (they have a <2% success rate).
+  Only adjust weights when accompanied by a structural change to the sub-scores themselves.
 
 ## Current Status
 

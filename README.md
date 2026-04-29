@@ -9,7 +9,7 @@ ValueInvestor screens thousands of listed companies, scores them with a multi-fa
 
 - **Quantitative screening** — filters A-share (SSE + SZSE) and HK-share stocks by market cap (>5 B RMB), P/E, P/B, ROE, and debt ratio.
 - **Multi-factor scoring** — ranks candidates across value, quality, and growth dimensions.
-- **AI qualitative analysis** — uses OpenAI (GPT-4o by default) to evaluate business nature, management quality, competitive moats, market narrative, and investment recommendation for each pick.
+- **AI qualitative analysis** — uses DeepSeek (DeepSeek-V4-Flash by default) to evaluate business nature, management quality, competitive moats, market narrative, and investment recommendation for each pick.
 - **Report generation** — outputs polished Markdown and PDF reports listing the top 20 candidates with full reasoning.
 - **CLI interface** — end-to-end pipeline via the `valueinvestor` command.
 - **Web dashboard** — FastAPI-based UI for browsing candidates, viewing analysis detail, and downloading reports.
@@ -34,8 +34,8 @@ pip install -e ".[dev]"
 # Generate a default config file
 valueinvestor config init
 
-# Set your OpenAI API key (required for LLM analysis)
-export OPENAI_API_KEY="sk-..."
+# Set your DeepSeek API key (required for LLM analysis)
+export DEEPSEEK_API_KEY="sk-..."
 
 # Run the full pipeline: screen → score → analyse → report
 valueinvestor scan
@@ -154,7 +154,7 @@ A JSON API is also available under `/api/`:
 
 All settings live in `config.yaml` at the project root. Generate a default one with `valueinvestor config init`.
 
-Environment variables override file values — notably `OPENAI_API_KEY`.
+Environment variables override file values — notably `DEEPSEEK_API_KEY`.
 
 ```yaml
 # Target markets
@@ -181,9 +181,10 @@ investment:
 
 # LLM provider
 llm:
-  provider: openai
-  model: gpt-4o
-  api_key: ""                      # prefer OPENAI_API_KEY env var
+  provider: deepseek
+  model: DeepSeek-V4-Flash
+  api_key: ""                      # prefer DEEPSEEK_API_KEY env var
+  base_url: https://api.deepseek.com/v1
   max_retries: 3
   temperature: 0.3
 
@@ -205,7 +206,7 @@ cache:
 |---|---|---|
 | `screening` | `market_cap_min_rmb` | Minimum market capitalisation in RMB |
 | `screening` | `top_n` | Number of top candidates to keep after scoring |
-| `llm` | `model` | OpenAI model to use (e.g. `gpt-4o`, `gpt-4o-mini`) |
+| `llm` | `model` | LLM model to use (default: `DeepSeek-V4-Flash`) |
 | `llm` | `temperature` | Lower = more deterministic analysis |
 | `cache` | `ttl_hours` | How long cached data stays valid |
 
@@ -226,7 +227,7 @@ src/valueinvestor/
 │   ├── engine.py           # Screening pipeline
 │   └── scorer.py           # Multi-factor scoring
 ├── analysis/            # AI qualitative analysis
-│   ├── llm_client.py       # OpenAI API wrapper
+│   ├── llm_client.py       # Multi-provider LLM wrapper
 │   ├── pipeline.py         # Analysis orchestration
 │   └── prompts.py          # Prompt templates
 ├── reports/             # Report generation
@@ -262,7 +263,7 @@ Report Generator (Markdown → PDF)
 |---|---|---|
 | [akshare](https://github.com/akfamily/akshare) | A-share market data (SSE + SZSE) | Free, no API key needed |
 | [yfinance](https://github.com/ranaroussi/yfinance) | HK-share market data (HKEX) | Free, no API key needed |
-| [OpenAI API](https://platform.openai.com/) | Qualitative analysis (GPT-4o) | Requires `OPENAI_API_KEY`; billed per token |
+| [DeepSeek API](https://api-docs.deepseek.com/) | Qualitative analysis (DeepSeek-V4-Flash) | Requires `DEEPSEEK_API_KEY`; billed per token |
 
 ---
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import List, Optional
@@ -33,10 +34,10 @@ class InvestmentConfig(BaseModel):
 
 
 class LLMConfig(BaseModel):
-    provider: str = "openai"
-    model: str = "gpt-4o"
+    provider: str = "deepseek"
+    model: str = "DeepSeek-V4-Flash"
     api_key: str = ""
-    base_url: Optional[str] = None
+    base_url: Optional[str] = "https://api.deepseek.com/v1"
     max_retries: int = 3
     temperature: float = 0.3
 
@@ -70,11 +71,60 @@ class AppConfig(BaseModel):
 # Helpers
 # ---------------------------------------------------------------------------
 
-import logging as _logging
-_cfg_logger = _logging.getLogger(__name__)
+_cfg_logger = logging.getLogger(__name__)
+
+_PROVIDER_DEFAULTS = {
+    "deepseek": {"model": "DeepSeek-V4-Flash", "base_url": "https://api.deepseek.com/v1"},
+    "openai": {"model": "gpt-4o", "base_url": None},
+    "gemini": {"model": "gemini-2.0-flash", "base_url": None},
+    "openrouter": {"model": "deepseek/deepseek-v4-flash", "base_url": "https://openrouter.ai/api/v1"},
+    "github": {"model": "claude-sonnet-4.6", "base_url": "https://api.githubcopilot.com"},
+    "kimi": {"model": "Kimi Code 2.5", "base_url": "https://api.moonshot.cn/v1"},
+    "nvidia_nim": {"model": "minimax-m2-7", "base_url": "https://api.studio.nvidia.com/v1"},
+    "local_llm": {"model": "default", "base_url": "http://127.0.0.1:1234"},
+}
+
+_PROVIDER_KEYS = {
+    "deepseek": ("DEEPSEEK_API_KEY",),
+    "openai": ("OPENAI_API_KEY",),
+    "gemini": ("GEMINI_API_KEY",),
+    "openrouter": ("OPENROUTER_API_KEY",),
+    # GitHub Copilot / GitHub Models: prefer GITHUB_TOKEN (standard GitHub
+    # env var), fall back to GITHUB_API_KEY (legacy ValueInvestor naming).
+    "github": ("GITHUB_TOKEN", "GITHUB_API_KEY"),
+    "kimi": ("KIMI_API_KEY",),
+    "nvidia_nim": ("NVIDIA_NIM_API_KEY",),
+    "local_llm": (),  # Local LLM doesn't require API key
+}
 
 
-def _apply_env_overrides(cfg: AppConfig) -> AppConfig:
+def _apply_provider_defaults(
+    cfg: AppConfig,
+    *,
+    llm_config: Optional[dict] = None,
+    provider_changed_by_env: bool = False,
+) -> AppConfig:
+    defaults = _PROVIDER_DEFAULTS.get(cfg.llm.provider)
+    if defaults is None:
+        return cfg
+
+    if provider_changed_by_env:
+        if not os.environ.get("LLM_MODEL"):
+            cfg.llm.model = defaults["model"]
+        if not os.environ.get("LLM_BASE_URL"):
+            cfg.llm.base_url = defaults["base_url"]
+        return cfg
+
+    llm_config = llm_config or {}
+    if "model" not in llm_config:
+        cfg.llm.model = defaults["model"]
+    if "base_url" not in llm_config:
+        cfg.llm.base_url = defaults["base_url"]
+
+    return cfg
+
+
+def _apply_env_overrides(cfg: AppConfig, *, llm_config: Optional[dict] = None) -> AppConfig:
     """Merge selected environment variables over file/default values.
 
     Auto-fallback: if provider is ``github`` but ``GITHUB_TOKEN`` is not set
@@ -84,27 +134,23 @@ def _apply_env_overrides(cfg: AppConfig) -> AppConfig:
     preferred default when a real token is provided.
     """
     # Override LLM selection via environment variables
+    original_provider = cfg.llm.provider
     if env_provider := os.environ.get("LLM_PROVIDER"):
         cfg.llm.provider = env_provider
+    provider_changed_by_env = bool(env_provider and env_provider != original_provider)
+
+    cfg = _apply_provider_defaults(
+        cfg,
+        llm_config=llm_config,
+        provider_changed_by_env=provider_changed_by_env,
+    )
+
     if env_model := os.environ.get("LLM_MODEL"):
         cfg.llm.model = env_model
     if env_base_url := os.environ.get("LLM_BASE_URL"):
         cfg.llm.base_url = env_base_url
 
-    # Mapping of provider to env var names (primary, fallback)
-    provider_keys = {
-        "openai": ("OPENAI_API_KEY",),
-        "gemini": ("GEMINI_API_KEY",),
-        "openrouter": ("OPENROUTER_API_KEY",),
-        # GitHub Copilot / GitHub Models: prefer GITHUB_TOKEN (standard GitHub
-        # env var), fall back to GITHUB_API_KEY (legacy ValueInvestor naming).
-        "github": ("GITHUB_TOKEN", "GITHUB_API_KEY"),
-        "kimi": ("KIMI_API_KEY",),
-        "nvidia_nim": ("NVIDIA_NIM_API_KEY",),
-        "local_llm": (),  # Local LLM doesn't require API key
-    }
-
-    env_keys = provider_keys.get(cfg.llm.provider, ())
+    env_keys = _PROVIDER_KEYS.get(cfg.llm.provider, ())
     for env_key in env_keys:
         api_key = os.environ.get(env_key)
         if api_key:
@@ -139,8 +185,7 @@ def _apply_env_overrides(cfg: AppConfig) -> AppConfig:
 def load_config(path: str = "config.yaml") -> AppConfig:
     """Load configuration from a YAML file, falling back to defaults.
 
-    Environment variables (``OPENAI_API_KEY``) always take precedence over
-    values found in the file.
+    Environment variables always take precedence over values found in the file.
     """
     load_dotenv()
     config_path = Path(path)
@@ -149,9 +194,10 @@ def load_config(path: str = "config.yaml") -> AppConfig:
             raw: Optional[dict] = yaml.safe_load(fh)
         cfg = AppConfig.model_validate(raw) if raw else AppConfig()
     else:
+        raw = None
         cfg = AppConfig()
 
-    return _apply_env_overrides(cfg)
+    return _apply_env_overrides(cfg, llm_config=(raw or {}).get("llm"))
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +209,7 @@ _DEFAULT_YAML = """\
 # ValueInvestor configuration
 # ==========================================================================
 # Copy this file to `config.yaml` at the project root and adjust as needed.
-# Environment variables (e.g. OPENAI_API_KEY) override values set here.
+# Environment variables (e.g. DEEPSEEK_API_KEY) override values set here.
 
 # Target stock markets to screen
 markets:
@@ -189,10 +235,10 @@ investment:
 
 # LLM / AI provider settings
 llm:
-  provider: openai                # openai, gemini, openrouter, github, kimi, nvidia_nim
-  model: gpt-4o                   # e.g., gpt-4o, gemini-pro-3.1, chatgpt-5.4, kimi-code-2.5, minimax-m2-7
-  api_key: ""                      # Leave blank; set appropriate env var instead (e.g. GEMINI_API_KEY)
-  base_url: null                   # Optional: override for openrouter, github, nvidia_nim, etc.
+  provider: deepseek              # deepseek, openai, gemini, openrouter, github, kimi, nvidia_nim
+  model: DeepSeek-V4-Flash        # Provider defaults apply when model/base_url are omitted
+  api_key: ""                      # Leave blank; set appropriate env var instead (e.g. DEEPSEEK_API_KEY)
+  base_url: https://api.deepseek.com/v1
   max_retries: 3
   temperature: 0.3
 

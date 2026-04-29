@@ -90,3 +90,18 @@ class InvestmentReport(BaseModel):
     total_screened: int
     total_candidates: int
     candidates: List[CompanyAnalysis]
+
+
+class MultiTimeframeReport(BaseModel):
+    """Report covering top candidates with per-horizon ρ metrics."""
+
+    title: str
+    generated_at: str
+    config_summary: Dict[str, object]
+    total_screened: int
+    # Top screening results (single list, same scoring for all horizons)
+    results_by_horizon: Dict[str, List[ScreeningResult]]
+    # Deduplicated company analyses
+    company_analyses: List[CompanyAnalysis]
+    # Spearman ρ per horizon (keys: "1m", "3m", "6m") — may be empty
+    spearman_rhos: Dict[str, Optional[float]] = {}

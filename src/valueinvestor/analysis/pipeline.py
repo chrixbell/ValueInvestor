@@ -16,6 +16,7 @@ from valueinvestor.data.models import (
     AnalysisDimension,
     CompanyAnalysis,
     InvestmentReport,
+    MultiTimeframeReport,
     ScreeningResult,
 )
 
@@ -217,4 +218,44 @@ class AnalysisPipeline:
             total_screened=config.screening.top_n,
             total_candidates=len(analyses),
             candidates=analyses,
+        )
+
+    def build_multi_timeframe_report(
+        self,
+        results_by_horizon: dict,
+        analyses: List[CompanyAnalysis],
+        config: AppConfig,
+        total_screened: int = 0,
+        spearman_rhos: dict | None = None,
+    ) -> MultiTimeframeReport:
+        """Assemble a :class:`MultiTimeframeReport` from multi-horizon screening.
+
+        Parameters
+        ----------
+        results_by_horizon:
+            Dict keyed by "1m", "3m", "6m" with top-N ``ScreeningResult`` lists.
+        analyses:
+            Deduplicated ``CompanyAnalysis`` list.
+        config:
+            Application config.
+        total_screened:
+            Total stocks evaluated before filtering (for summary display).
+        spearman_rhos:
+            Optional dict of Spearman ρ per horizon (keys: "1m", "3m", "6m").
+        """
+        config_summary = {
+            "markets": config.markets,
+            "screening": config.screening.model_dump(),
+            "investment": config.investment.model_dump(),
+            "llm_model": config.llm.model,
+            "output_language": "zh-CN",
+        }
+        return MultiTimeframeReport(
+            title="价值投资多时间框架筛选报告",
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            config_summary=config_summary,
+            total_screened=total_screened,
+            results_by_horizon=results_by_horizon,
+            company_analyses=analyses,
+            spearman_rhos=spearman_rhos or {},
         )

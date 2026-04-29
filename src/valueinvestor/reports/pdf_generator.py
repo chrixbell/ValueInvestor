@@ -1,14 +1,23 @@
-"""PDF report generator – converts Markdown reports to styled PDFs."""
+"""PDF report generator – converts Markdown reports to styled PDFs.
+
+Uses the ``weasyprint`` CLI (install via ``brew install weasyprint`` on macOS)
+to avoid Python library / system dependency conflicts.
+"""
 
 from __future__ import annotations
 
+import subprocess
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
 import markdown
 
-from valueinvestor.data.models import InvestmentReport
-from valueinvestor.reports.md_generator import MarkdownReportGenerator
+from valueinvestor.data.models import InvestmentReport, MultiTimeframeReport
+from valueinvestor.reports.md_generator import (
+    MarkdownReportGenerator,
+    MultiTimeframeMarkdownReportGenerator,
+)
 
 # ---------------------------------------------------------------------------
 # Professional finance-themed CSS
@@ -114,7 +123,7 @@ p {
 
 _HTML_TEMPLATE = """\
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <title>{title}</title>
@@ -128,15 +137,37 @@ _HTML_TEMPLATE = """\
 </html>
 """
 
+# ---------------------------------------------------------------------------
+# Path to the weasyprint CLI (brew-installed)
+# ---------------------------------------------------------------------------
+
+_WEASYPRINT_BIN = "/opt/homebrew/bin/weasyprint"
+
+
+def _weasyprint_available() -> bool:
+    """Return True if the weasyprint CLI can be found."""
+    return Path(_WEASYPRINT_BIN).exists()
+
 
 class PDFReportGenerator:
-    """Converts Markdown content (or an :class:`InvestmentReport`) to a styled PDF."""
+    """Converts Markdown content (or a report object) to a styled PDF.
+
+    Uses the ``weasyprint`` CLI under the hood, which must be installed
+    separately (``brew install weasyprint`` on macOS).
+    """
 
     def generate(self, md_content: str, output_path: str) -> str:
         """Convert *md_content* (Markdown string) to a PDF file at *output_path*.
 
         Returns the absolute path of the generated PDF.
         """
+        if not _weasyprint_available():
+            raise RuntimeError(
+                "weasyprint CLI not found at %s. "
+                "Install it via: brew install weasyprint"
+                % _WEASYPRINT_BIN
+            )
+
         html_body = markdown.markdown(
             md_content,
             extensions=["tables", "fenced_code", "toc"],
@@ -147,11 +178,29 @@ class PDFReportGenerator:
             body=html_body,
         )
 
-        from weasyprint import HTML  # lazy import – requires system libs
-
         out = Path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
-        HTML(string=full_html).write_pdf(str(out))
+
+        with tempfile.NamedTemporaryFile(
+            suffix=".html", mode="w", encoding="utf-8", delete=False
+        ) as tmp:
+            tmp.write(full_html)
+            html_path = tmp.name
+
+        try:
+            subprocess.run(
+                [_WEASYPRINT_BIN, html_path, str(out)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                "weasyprint failed:\n%s" % exc.stderr.strip()
+            ) from exc
+        finally:
+            Path(html_path).unlink(missing_ok=True)
+
         return str(out)
 
     def generate_from_report(
@@ -160,9 +209,6 @@ class PDFReportGenerator:
         output_dir: str = "reports",
     ) -> str:
         """Generate a PDF directly from an :class:`InvestmentReport`.
-
-        Uses :class:`MarkdownReportGenerator` internally to produce the
-        intermediate Markdown, then converts it to PDF.
 
         Returns the absolute path of the generated PDF.
         """
@@ -173,4 +219,22 @@ class PDFReportGenerator:
         out.mkdir(parents=True, exist_ok=True)
         date_str = datetime.now().strftime("%Y-%m-%d")
         pdf_path = out / f"{date_str}_china_value_report.pdf"
+        return self.generate(md_content, str(pdf_path))
+
+    def generate_from_multi_timeframe_report(
+        self,
+        report: MultiTimeframeReport,
+        output_dir: str = "reports",
+    ) -> str:
+        """Generate a PDF from a :class:`MultiTimeframeReport`.
+
+        Returns the absolute path of the generated PDF.
+        """
+        md_gen = MultiTimeframeMarkdownReportGenerator()
+        md_content = md_gen.generate(report)
+
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        pdf_path = out / f"{date_str}_china_value_multi_timeframe.pdf"
         return self.generate(md_content, str(pdf_path))
