@@ -24,13 +24,11 @@ from valueinvestor.data.models import ScreeningResult
 logger = logging.getLogger(__name__)
 
 _DEFAULT_WEIGHTS: Dict[str, float] = {
-    "value": 0.65,
-    "quality": 0.35,
-    "growth": 0.00,   # removed – growth sub‑score contributes only noise
-    "momentum": 0.00,
+    "value": 0.50,
+    "quality": 0.30,
+    "growth": 0.10,   # reintroduced with cross‑sectional ranking of growth raw
+    "momentum": 0.10,   # financial strength factor (forward PE improvement)
 }
-
-
 def _linear_score(value: float, best: float, worst: float) -> float:
     if best == worst:
         return 50.0
@@ -76,19 +74,23 @@ class MultiFactorScorer:
 
     def score(self, result: ScreeningResult) -> ScreeningResult:
         result.value_score = self._value_score(result)
-        result.quality_score = 0.0  # placeholder; percentile will fill later
         result.growth_score = self._growth_score(result)
+        # Compute and store raw growth metric; will be percentile‑ranked later
+        result._growth_raw = self._compute_growth_raw(result)
 
-        # Store raw quality composite for later cross‑sectional ranking
         result._quality_raw = self._compute_quality_raw(result)
+        # Direct quality score for individual use; rank() overwrites with cross‑sectional percentile
+        if result._quality_raw is not None and result._quality_raw > 0:
+            result.quality_score = _log_score(result._quality_raw, best=0.05, worst=0.001)
+        else:
+            result.quality_score = 50.0
 
-        momentum_score = 50.0
-
+        result._momentum_score = self._momentum_score(result)
         scores = {
             "value": result.value_score,
             "quality": result.quality_score,
             "growth": result.growth_score,
-            "momentum": momentum_score,
+            "momentum": result._momentum_score,
         }
 
         weighted_scores_to_process = {}
@@ -126,6 +128,21 @@ class MultiFactorScorer:
         for r in results:
             if not hasattr(r, '_quality_raw') or r._quality_raw is None or r._quality_raw <= 0:
                 r.quality_score = 50.0
+        # 2b. Cross‑sectional percentile for growth raw metric
+        valid_growth = [
+            r for r in results
+            if hasattr(r, '_growth_raw') and r._growth_raw is not None and r._growth_raw > 0
+        ]
+        if valid_growth:
+            valid_growth.sort(key=lambda r: r._growth_raw)
+            n = len(valid_growth)
+            for i, r in enumerate(valid_growth):
+                # Spread uniformly (avoid 0 or 100)
+                percentile = (i + 0.5) / n
+                r.growth_score = percentile * 100.0
+        for r in results:
+            if not hasattr(r, '_growth_raw') or r._growth_raw is None or r._growth_raw <= 0:
+                r.growth_score = 50.0
 
         # 3. Recompute composite using final quality_score
         for r in results:
@@ -133,7 +150,7 @@ class MultiFactorScorer:
                 "value": r.value_score,
                 "quality": r.quality_score,
                 "growth": r.growth_score,
-                "momentum": 50.0,
+                "momentum": getattr(r, "_momentum_score", 50.0),
             }
             weighted_scores = {
                 k: v for k, v in scores.items() if self.weights.get(k, 0.0) > 0
@@ -145,28 +162,75 @@ class MultiFactorScorer:
         for idx, r in enumerate(results, start=1):
             r.rank = idx
         return results
+    # ------------------------------------------------------------------
+    # New momentum sub‑score – financial strength (free cash flow yield × current ratio)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _momentum_score(result: ScreeningResult) -> float:
+        """Asset turnover (revenue / total assets) – higher is better.
+        Measures efficiency of asset usage.
+        """
+        revenue = result.financials.revenue
+        total_assets = result.financials.total_assets
+        if revenue is not None and total_assets is not None and total_assets > 0:
+            if revenue > 0:
+                turnover = revenue / total_assets
+                return _linear_score(turnover, best=2.0, worst=0.0)
+        return 50.0
 
     # ------------------------------------------------------------------
     # New helpers for quality raw and harmonic mean
     # ------------------------------------------------------------------
     @staticmethod
     def _compute_quality_raw(result: ScreeningResult) -> Optional[float]:
-        """Compute a quality metric based on profitability and leverage; returns None if insufficient data."""
+        """Compute a quality metric based on profitability, leverage, and valuation."""
         roe = result.financials.roe
         gm = result.financials.gross_margin
         dte = result.financials.debt_to_equity
-        if None in (roe, gm, dte):
+        pe_fwd = result.valuation.pe_forward
+        pe_val = pe_fwd if (pe_fwd is not None and pe_fwd > 0) else result.valuation.pe_ratio
+        if None in (roe, gm, dte, pe_val):
             return None
-        if roe <= 0 or gm <= 0:
+        if roe <= 0 or gm <= 0 or pe_val <= 0:
             return None
-        dte_safe = max(dte, 0.01)
-        raw = (roe * gm) / (dte_safe + 1.0)
-        try:
-            raw = (roe * gm) / (dte_safe + 1.0) / pe_safe
-        except ZeroDivisionError:
+        dte_pos = max(dte, 0.0)
+        pe_safe = max(pe_val, 0.01)
+        # Exclude stocks with negative free cash flow from quality raw ranking
+        fcf_check = result.financials.free_cash_flow
+        if fcf_check is not None and fcf_check < 0:
             return None
+        raw = (roe * gm) / ((1.0 + math.sqrt(dte_pos)) * pe_safe)
+        pe = result.valuation.pe_ratio
+        pe_fwd = result.valuation.pe_forward
+        if pe is not None and pe_fwd is not None and pe > 0 and pe_fwd > 0:
+            fw_improve = pe / pe_fwd
+            improve_score = _linear_score(fw_improve, best=2.0, worst=0.5)
+            raw *= (1.0 + improve_score / 100.0)
+        # Free cash flow margin bonus: higher cash flow margin boosts quality
+        fcf = result.financials.free_cash_flow
+        revenue = result.financials.revenue
+        if fcf is not None and revenue is not None and revenue > 0 and fcf > 0:
+            cf_margin = fcf / revenue
+            cf_margin_score = _linear_score(cf_margin, best=0.30, worst=0.0)
+            raw *= (1.0 + cf_margin_score / 100.0)
+        roa = result.financials.roa
+        if roa is not None and roa > 0:
+            roa_score = _linear_score(roa, best=0.20, worst=0.0)
+            raw *= (1.0 + roa_score / 100.0)
         return raw
+    @staticmethod
+    def _compute_growth_raw(result: ScreeningResult) -> Optional[float]:
+        """Compute a growth raw metric from PEG ratio.
 
+        Lower PEG is better, so we invert it (1/PEG) so that higher raw means
+        better growth at a reasonable price.
+        """
+        peg = result.valuation.peg_ratio
+        if peg is None or peg <= 0:
+            return None
+        return 1.0 / peg
+
+    # ------------------------------------------------------------------
     def _weighted_harmonic_mean(self, weighted_scores: Dict[str, float]) -> float:
         """Compute weighted harmonic mean of a dict of {factor: score}."""
         total_weight = 0.0
@@ -204,6 +268,7 @@ class MultiFactorScorer:
         OCF_YIELD_WEIGHT = 0.06
         CURRENT_RATIO_WEIGHT = 0.06
         PS_GM_WEIGHT = 0.06
+        GM_WEIGHT = 0.05
         EARNINGS_YIELD_WEIGHT = 0.06
         EARNINGS_YIELD_ROE_WEIGHT = 0.05
         FCF_YIELD_ROE_WEIGHT = 0.05
@@ -218,7 +283,7 @@ class MultiFactorScorer:
         pe_forward = result.valuation.pe_forward
         if pe_forward is not None and pe_forward > 0:
             weighted_scores.append(
-                (_triangular_score(pe_forward, low=0.5, optimal=10.0, high=25.0), PFORWARD_WEIGHT)
+                (_log_score(pe_forward, best=6.0, worst=50.0), PFORWARD_WEIGHT)
             )
         # Trailing-to-forward PE improvement: higher ratio indicates earnings growth or undervaluation
         FORWARD_PE_IMPROVEMENT_VAL_WEIGHT = 0.06
@@ -232,7 +297,7 @@ class MultiFactorScorer:
             weighted_scores.append((0.0, FORWARD_PE_IMPROVEMENT_VAL_WEIGHT))
         ps = result.valuation.ps_ratio
         if ps is not None and ps > 0:
-            weighted_scores.append((_log_score(ps, best=0.4, worst=5.0), PS_WEIGHT))
+            weighted_scores.append((_log_score(ps, best=0.3, worst=4.0), PS_WEIGHT))
         market_cap = result.valuation.market_cap_rmb
         if market_cap is not None and market_cap > 0:
             score_mcap = _linear_score(market_cap, best=500_000_000_000.0, worst=1_000_000_000.0)
@@ -250,7 +315,7 @@ class MultiFactorScorer:
         ev_to_ebitda = result.valuation.ev_to_ebitda
         if ev_to_ebitda is not None and ev_to_ebitda > 0:
             weighted_scores.append(
-                (_triangular_score(ev_to_ebitda, low=0.5, optimal=6.0, high=40.0), EV_TO_EBITDA_WEIGHT)
+                (_triangular_score(ev_to_ebitda, low=2.0, optimal=8.0, high=22.0), EV_TO_EBITDA_WEIGHT)
             )
         price = result.valuation.price
         if price is not None and price > 0:
@@ -285,11 +350,18 @@ class MultiFactorScorer:
         if current_ratio is not None:
             if current_ratio > 0:
                 weighted_scores.append(
-                    (_linear_score(current_ratio, best=3.0, worst=0.5), CURRENT_RATIO_WEIGHT)
+                    (_log_score(current_ratio, best=3.0, worst=0.5), CURRENT_RATIO_WEIGHT)
                 )
             else:
                 weighted_scores.append((0.0, CURRENT_RATIO_WEIGHT))
         gross_margin = result.financials.gross_margin
+        if gross_margin is not None:
+            if gross_margin > 0:
+                weighted_scores.append(
+                    (_linear_score(gross_margin, best=0.60, worst=0.05), GM_WEIGHT)
+                )
+            else:
+                weighted_scores.append((0.0, GM_WEIGHT))
         if ps is not None and gross_margin is not None and ps > 0:
             if gross_margin > 0:
                 ps_gm = ps / gross_margin
@@ -331,6 +403,7 @@ class MultiFactorScorer:
             weighted_scores.append((0.0, EARNINGS_YIELD_ROE_WEIGHT))
 
         fcf = result.financials.free_cash_flow
+        roe_val = result.financials.roe
         if fcf is not None and market_cap is not None and roe_val is not None and market_cap > 0:
             if fcf > 0 and roe_val > 0:
                 fcf_yield_roe = (fcf / market_cap) * roe_val

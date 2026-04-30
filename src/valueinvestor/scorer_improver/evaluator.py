@@ -85,14 +85,30 @@ _VALUATION_FIELDS = (
 )
 
 
+def _sanitize_score(score: float) -> float:
+    """Replace None, NaN, Inf with 50.0 neutral score."""
+    import math
+
+    if score is None:
+        return 50.0
+    try:
+        if math.isnan(score) or math.isinf(score):
+            return 50.0
+    except TypeError:
+        return 50.0
+    return max(0.0, min(100.0, float(score)))
+
+
 def _rescore_with_current_scorer(
     gt_df: pd.DataFrame,
     scorer_module: str = "valueinvestor.screener.scorer",
-) -> pd.DataFrame:
+) -> tuple:
     """Re-run the specified scorer module on ground-truth feature data.
 
     This dynamically reloads the scorer module to pick up any changes
     the agent has made.
+
+    Returns (DataFrame, error_count, first_error).
     """
     # Force a fresh import. The improvement loop rewrites scorer.py many times
     # per second, and timestamp-based .pyc files can otherwise preserve a stale
@@ -123,6 +139,9 @@ def _rescore_with_current_scorer(
 
     scorer = MultiFactorScorer()
     new_scores = []
+    error_count = 0
+    first_error: Optional[str] = None
+    first_error_ticker: Optional[str] = None
 
     for row in gt_df.to_dict("records"):
         ticker = str(row["ticker"])
@@ -149,12 +168,24 @@ def _rescore_with_current_scorer(
         )
         try:
             scorer.score(sr)
-            new_scores.append(sr.composite_score)
-        except Exception:
+            score = _sanitize_score(sr.composite_score)
+            new_scores.append(score)
+        except Exception as e:
             new_scores.append(None)
+            error_count += 1
+            if first_error is None:
+                first_error = f"{type(e).__name__}: {e}"
+                first_error_ticker = ticker
+
+    if error_count > 0:
+        logger.warning(
+            "Scorer crashed on %d/%d stocks (%.1f%%). First error: %s on %s",
+            error_count, len(gt_df), 100 * error_count / len(gt_df),
+            first_error, first_error_ticker,
+        )
 
     gt_df["new_composite_score"] = new_scores
-    return gt_df
+    return gt_df, error_count, first_error
 
 
 def _safe(row, col) -> Optional[float]:
@@ -217,14 +248,21 @@ def evaluate_scorer(
             "mean_excess_return": 0.0,
             "n_snapshots": 0,
             "n_stocks_per_snapshot": 0.0,
+            "error_rate": 0.0,
+            "error_count": 0,
         }
 
+    error_count = 0
+    first_error = None
     if use_original_scores:
         score_col = "composite_score"
     else:
-        gt_df = _rescore_with_current_scorer(gt_df, scorer_module=scorer_module)
+        gt_df, error_count, first_error = _rescore_with_current_scorer(gt_df, scorer_module=scorer_module)
         score_col = "new_composite_score"
         gt_df = gt_df.dropna(subset=[score_col])
+
+    total_stocks = len(gt_df) if use_original_scores else len(gt_df)
+    error_rate = error_count / total_stocks if total_stocks > 0 else 0.0
 
     if gt_df.empty:
         return {
@@ -234,6 +272,8 @@ def evaluate_scorer(
             "mean_excess_return": 0.0,
             "n_snapshots": 0,
             "n_stocks_per_snapshot": 0.0,
+            "error_rate": error_rate,
+            "error_count": error_count,
         }
 
     # Compute per-snapshot Spearman correlation
@@ -273,6 +313,8 @@ def evaluate_scorer(
             "mean_excess_return": 0.0,
             "n_snapshots": 0,
             "n_stocks_per_snapshot": 0.0,
+            "error_rate": error_rate,
+            "error_count": error_count,
         }
 
     result = {
@@ -282,11 +324,13 @@ def evaluate_scorer(
         "mean_excess_return": sum(excess_returns) / len(excess_returns),
         "n_snapshots": len(rhos),
         "n_stocks_per_snapshot": len(gt_df) / max(gt_df["snapshot_date"].nunique(), 1),
+        "error_rate": error_rate,
+        "error_count": error_count,
     }
 
     logger.info(
         "Evaluation (%s): ρ=%.4f (p=%.4f), hit_rate=%.1f%%, excess_ret=%.2f%%, "
-        "%d snapshots, ~%.0f stocks/snapshot",
+        "%d snapshots, ~%.0f stocks/snapshot (errors: %d, %.1f%%)",
         horizon,
         result["spearman_rho"],
         result["spearman_p"],
@@ -294,6 +338,8 @@ def evaluate_scorer(
         result["mean_excess_return"] * 100,
         result["n_snapshots"],
         result["n_stocks_per_snapshot"],
+        error_count,
+        error_rate * 100,
     )
     return result
 
@@ -438,7 +484,9 @@ def evaluate_scorer_all_targets(
     gt_df = _load_ground_truth(ground_truth_path, allow_legacy_schema=allow_legacy_schema)
 
     # Rescore once
-    gt_df = _rescore_with_current_scorer(gt_df, scorer_module=scorer_module)
+    gt_df, error_count, first_error = _rescore_with_current_scorer(gt_df, scorer_module=scorer_module)
+    total_stocks = len(gt_df)
+    error_rate = error_count / total_stocks if total_stocks > 0 else 0.0
     score_col = "new_composite_score"
     gt_df = gt_df.dropna(subset=[score_col])
 
@@ -450,15 +498,23 @@ def evaluate_scorer_all_targets(
             "mean_excess_return": 0.0,
             "n_snapshots": 0,
             "n_stocks_per_snapshot": 0.0,
+            "error_rate": error_rate,
+            "error_count": error_count,
         }
         return {"1m": dict(empty), "3m": dict(empty), "6m": dict(empty)}
 
     results: Dict[str, Dict[str, float]] = {}
     for horizon in ("1m", "3m", "6m"):
         return_col = HORIZON_TO_COLUMN.get(horizon, f"forward_return_{horizon}")
-        results[horizon] = _compute_snapshot_metrics_for_column(
+        metrics = _compute_snapshot_metrics_for_column(
             gt_df, score_col=score_col, return_col=return_col,
         )
+        metrics["error_rate"] = error_rate
+        metrics["error_count"] = error_count
+        results[horizon] = metrics
+
+    results["error_rate"] = error_rate
+    results["error_count"] = error_count
 
     logger.info(
         "All-targets evaluation — 1m: ρ=%.4f, 3m: ρ=%.4f, 6m: ρ=%.4f",
@@ -478,16 +534,14 @@ def quick_evaluate(
     """Evaluate a scorer on a random subset of the ground truth.
 
     Fast rejection check — runs in ~0.02s vs ~0.5s for the full evaluation.
-    Returns only ``spearman_rho`` per horizon (no hit-rate / excess-return).
-
-    Returns
-    -------
-    dict keyed by horizon ("1m", "3m", "6m") with just ``spearman_rho`` values.
+    Returns spearman_rho per horizon plus ``error_rate`` and ``error_count``.
     """
     gt_df = _load_ground_truth(ground_truth_path, allow_legacy_schema=allow_legacy_schema)
     gt_sample = _sample_by_snapshot(gt_df, sample_size)
 
-    gt_sample = _rescore_with_current_scorer(gt_sample, scorer_module=scorer_module)
+    gt_sample, error_count, first_error = _rescore_with_current_scorer(gt_sample, scorer_module=scorer_module)
+    total_sample = len(gt_sample)
+    error_rate = error_count / total_sample if total_sample > 0 else 0.0
     score_col = "new_composite_score"
     gt_sample = gt_sample.dropna(subset=[score_col])
 
@@ -501,8 +555,11 @@ def quick_evaluate(
         )
         result[horizon] = float(metrics["spearman_rho"])
 
+    result["error_rate"] = error_rate
+    result["error_count"] = float(error_count)
+
     logger.debug(
-        "Quick evaluation — 1m: ρ=%.4f, 3m: ρ=%.4f, 6m: ρ=%.4f",
-        result["1m"], result["3m"], result["6m"],
+        "Quick evaluation — 1m: ρ=%.4f, 3m: ρ=%.4f, 6m: ρ=%.4f (errors: %d, %.1f%%)",
+        result["1m"], result["3m"], result["6m"], error_count, error_rate * 100,
     )
     return result

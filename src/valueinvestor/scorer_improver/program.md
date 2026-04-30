@@ -68,6 +68,14 @@ Each `ScreeningResult` has:
 4. **Must not crash**: if any field is None, handle it gracefully (use defaults)
 5. **Keep it fast**: scoring ~5000 stocks must complete in < 5 seconds
 6. **Composite score should be positive**: higher = better
+7. **No undefined variables**: Every variable you reference must be defined within
+   the same function or passed as a parameter. Check `_value_score` carefully —
+   all financial fields use `result.financials.<field>` and all valuation fields
+   use `result.valuation.<field>`. Do NOT introduce new variable names without
+   first assigning them.
+8. **Verify your diff applies**: After writing your diff, mentally apply each hunk
+   to the current code to ensure line numbers and context match. Patches with
+   stale line offsets will fail to apply and waste an iteration.
 
 ## Strategy Tips
 

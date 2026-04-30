@@ -64,6 +64,17 @@ _MIN_RHO_IMPROVEMENT = 1e-6
 _HORIZON_WEIGHTS = {"1m": 0.25, "3m": 0.35, "6m": 0.40}
 # How many recent experiments to show the LLM
 _EXPERIMENT_HISTORY_COUNT = int(os.environ.get("IMPROVE_SCORER_HISTORY", "15"))
+_proj_root: Optional[Path] = None
+
+
+def _project_root() -> Path:
+    """Return the project root (cached)."""
+    global _proj_root
+    if _proj_root is None:
+        _proj_root = Path(__file__).resolve().parent.parent.parent.parent
+    return _proj_root
+
+
 _REPAIR_INVALID_PROPOSALS = os.environ.get("IMPROVE_SCORER_REPAIR_PROPOSALS", "true").lower() not in {
     "0", "false", "no", "off",
 }
@@ -1010,8 +1021,33 @@ def _legacy_guard_rejections(
     ]
 
 
+def _validate_static(code: str) -> list[str]:
+    """Run ruff on proposed code. Returns non-empty list of errors on failure."""
+    if not shutil.which("ruff"):
+        logger.warning("ruff not found; skipping static analysis")
+        return []
+    try:
+        result = subprocess.run(
+            ["ruff", "check", "--select", "F821", "--no-cache", "-"],
+            input=code, capture_output=True, text=True, timeout=10,
+            cwd=str(_project_root()),
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        logger.warning("ruff static analysis failed: %s", e)
+        return []
+    if result.returncode == 0:
+        return []
+    # ruff writes errors to stdout on failure
+    errors = [l.strip() for l in result.stdout.splitlines() if l.strip()]
+    return errors
+
+
 def _validate_scorer() -> bool:
-    """Check if the current scorer is valid Python and doesn't crash."""
+    """Check if the current scorer is valid Python and doesn't crash.
+
+    Runs compile() + 6 smoke-test fixtures covering edge cases, plus a rank()
+    call to verify cross-sectional ranking produces valid output.
+    """
     try:
         code = SCORER_PATH.read_text(encoding="utf-8")
         compile(code, str(SCORER_PATH), "exec")
@@ -1037,24 +1073,98 @@ def _validate_scorer() -> bool:
         loaded_mod = sys.modules[SCORER_MODULE]
         MultiFactorScorer = loaded_mod.MultiFactorScorer
 
-        scorer = MultiFactorScorer()
-        sr = ScreeningResult(
-            company=Company(ticker="TEST", name="Test", market=Market.A_SHARE),
-            financials=Financials(
-                ticker="TEST",
-                period="test",
-                roe=0.15,
-                net_margin=0.10,
-                debt_to_equity=0.5,
+        def _mk(pe=15.0, pb=2.0, roe=0.15, gm=0.30, dte=0.5, fcf=1e9,
+                mcap=1e10, current_ratio=1.5, market=Market.A_SHARE, **kw):
+            return ScreeningResult(
+                company=Company(ticker="TEST", name="Test", market=market),
+                financials=Financials(
+                    ticker="TEST", period="test",
+                    roe=roe, gross_margin=gm, debt_to_equity=dte,
+                    free_cash_flow=fcf, current_ratio=current_ratio,
+                    operating_cash_flow=1e9, revenue=5e9, net_income=1e9,
+                    roa=0.08, total_assets=1e10, total_equity=5e9, total_liabilities=5e9,
+                    net_margin=0.10,
+                ),
+                valuation=ValuationMetrics(
+                    ticker="TEST", date="2024-01-01",
+                    pe_ratio=pe, pb_ratio=pb, market_cap_rmb=mcap,
+                    ps_ratio=1.5, peg_ratio=1.0, dividend_yield=0.02,
+                    ev_to_ebitda=10.0, price=50.0, pe_forward=12.0,
+                    **kw,
+                ),
+            )
+
+        fixtures: dict[str, ScreeningResult] = {
+            "fully_populated": _mk(),
+            "zero_pe": _mk(pe=0.0),
+            "negative_roe": _mk(roe=-0.10),
+            "no_fcf": _mk(fcf=None),
+            "hk_share": _mk(pe=8.0, pb=1.5, roe=0.12, market=Market.HK_SHARE),
+            "sparse": ScreeningResult(
+                company=Company(ticker="SPARSE", name="Sparse", market=Market.A_SHARE),
+                financials=Financials(ticker="SPARSE", period="test"),
+                valuation=ValuationMetrics(ticker="SPARSE", date="2024-01-01"),
             ),
-            valuation=ValuationMetrics(ticker="TEST", date="2024-01-01", pe_ratio=15.0, pb_ratio=2.0, market_cap_rmb=1e10),
-        )
-        scorer.score(sr)
-        assert sr.composite_score >= 0, "Composite score must be non-negative"
+        }
+
+        scorer = MultiFactorScorer()
+        for name, sr in fixtures.items():
+            try:
+                scorer.score(sr)
+                if not (0.0 <= sr.composite_score <= 100.0):
+                    logger.warning("Validation failed on fixture '%s': composite_score=%.2f out of range",
+                                   name, sr.composite_score)
+                    return False
+            except Exception as e:
+                logger.warning("Validation failed on fixture '%s': %s: %s", name, type(e).__name__, e)
+                return False
+
+        # Cross-sectional rank validation
+        rank_fixtures = [
+            _mk(pe=25, pb=4, roe=0.05, gm=0.15, dte=1.0),
+            _mk(pe=5, pb=0.8, roe=0.25, gm=0.40, dte=0.2),
+            _mk(pe=12, pb=1.8, roe=0.15, gm=0.30, dte=0.5),
+        ]
+        ranked = scorer.rank(rank_fixtures)
+        ranks = [r.rank for r in ranked]
+        if set(ranks) != {1, 2, 3}:
+            logger.warning("Rank validation failed: got ranks %s", ranks)
+            return False
+        for r in ranked:
+            if not (0.0 <= r.composite_score <= 100.0):
+                logger.warning("Rank validation: composite_score=%.2f out of range", r.composite_score)
+                return False
+
         return True
     except Exception as e:
         logger.warning("Scorer validation failed: %s", e)
         return False
+
+
+def _run_scorer_test_suite() -> tuple:
+    """Run the scorer test suite. Returns (passed, output_summary)."""
+    try:
+        import pytest  # noqa: F401
+    except ImportError:
+        logger.warning("pytest not installed; skipping test suite")
+        return True, "pytest_not_available"
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "tests/test_scorer.py",
+             "-x", "-q", "--tb=short", "--no-header"],
+            capture_output=True, text=True, timeout=60,
+            cwd=str(_project_root()),
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        logger.warning("pytest run failed: %s", e)
+        return True, f"pytest_error: {e}"
+
+    passed = result.returncode == 0
+    summary = result.stdout.strip().split("\n")[-1] if result.stdout else result.stderr[:200]
+    if not passed:
+        logger.warning("Test suite failed: %s", result.stderr[:500] if result.stderr else summary)
+    return passed, summary
 
 
 def _print_iteration_summary(
@@ -1288,6 +1398,11 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
         if lineage_val is None or baseline_rhos[h] > lineage_val:
             best_rhos[h] = baseline_rhos[h]
 
+    # Proposals must beat the higher of current baseline or all-time best
+    target_rhos: dict[str, float] = {
+        h: max(baseline_rhos[h], float(best_rhos.get(h) or 0.0)) for h in _HORIZONS
+    }
+
     print("\n🎯 Current Benchmark Spearman ρ:" if dual_benchmark else "\n🎯 Baseline Spearman ρ:")
     for h in _HORIZONS:
         print(f"     {_HORIZON_LABELS[h]:>10}  {baseline_rhos[h]:.4f}")
@@ -1469,6 +1584,18 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
 
             # Write proposal and validate
             _write_scorer(new_code)
+
+            # Static analysis (ruff) — catch NameError before runtime
+            static_errors = _validate_static(new_code)
+            if static_errors:
+                logger.info("  #%d: ❌ static analysis failed — %s", iter_num, static_errors[0])
+                _log_skip(exp_log, iter_num, baseline_rhos,
+                          f"Static analysis failed: {static_errors[0]}", diff_summary=diff_summary)
+                _write_scorer(original_code)
+                proposal_lines.append(f"  #{iter_num}: ❌ static analysis — {static_errors[0]}")
+                _print_skip_banner(iter_num, baseline_rhos, best_rhos, "static analysis failed")
+                continue
+
             if not _validate_scorer():
                 logger.info("  #%d: ❌ validation failed — %s", iter_num, explanation[:80])
                 _log_skip(exp_log, iter_num, baseline_rhos,
@@ -1476,6 +1603,17 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
                 _write_scorer(original_code)
                 proposal_lines.append(f"  #{iter_num}: ❌ validation failed — {explanation[:80]}")
                 _print_skip_banner(iter_num, baseline_rhos, best_rhos, "validation failed")
+                continue
+
+            # Run test suite before accepting
+            tests_passed, test_summary = _run_scorer_test_suite()
+            if not tests_passed:
+                logger.info("  #%d: ❌ test suite failed — %s", iter_num, test_summary[:120])
+                _log_skip(exp_log, iter_num, baseline_rhos,
+                          f"Test suite failed: {test_summary[:120]}", diff_summary=diff_summary)
+                _write_scorer(original_code)
+                proposal_lines.append(f"  #{iter_num}: ❌ test suite failed — {test_summary[:80]}")
+                _print_skip_banner(iter_num, baseline_rhos, best_rhos, "test suite failed")
                 continue
 
             # Quick evaluation on 1K-row sample
@@ -1495,9 +1633,9 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
                 _print_skip_banner(iter_num, baseline_rhos, best_rhos, "quick eval crashed")
                 continue
 
-            # Quick reject: skip if all horizons are clearly below baseline
+            # Quick reject: skip if all horizons are clearly below target
             all_significantly_worse = all(
-                quick_rhos[h] < baseline_rhos[h] - _QUICK_REJECT_MARGIN
+                quick_rhos[h] < target_rhos[h] - _QUICK_REJECT_MARGIN
                 for h in _HORIZONS
             )
             if all_significantly_worse:
@@ -1531,6 +1669,24 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
                 new_rhos: dict[str, float] = {
                     h: float(new_metrics[h]["spearman_rho"]) for h in _HORIZONS
                 }
+
+                # Reject if scorer crashes on too many stocks
+                error_rate = float(new_metrics.get("error_rate", 0.0))
+                if error_rate > 0.0:
+                    logger.info("  #%d: ❌ high error rate — %.2f%% (%s)",
+                                iter_num, error_rate * 100,
+                                new_metrics.get("error_count", 0))
+                    _log_skip(exp_log, iter_num, baseline_rhos,
+                              f"Validation failed: {error_rate:.1%} error rate "
+                              f"({new_metrics.get('error_count', 0)} stocks)",
+                              diff_summary=diff_summary)
+                    _write_scorer(original_code)
+                    proposal_lines.append(
+                        f"  #{iter_num}: ❌ high error rate ({error_rate:.1%}) — {explanation[:60]}"
+                    )
+                    _print_skip_banner(iter_num, baseline_rhos, best_rhos, "high error rate")
+                    continue
+
             except Exception as e:
                 logger.info("  #%d: ❌ full eval crashed — %s", iter_num, e)
                 _log_skip(exp_log, iter_num, baseline_rhos,
@@ -1540,7 +1696,7 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
                 _print_skip_banner(iter_num, baseline_rhos, best_rhos, "full eval crashed")
                 continue
 
-            improved_horizons = _accepted_horizons(new_rhos, baseline_rhos)
+            improved_horizons = _accepted_horizons(new_rhos, target_rhos)
             improved_count = len(improved_horizons)
             legacy_candidate_metrics: Optional[dict[str, dict[str, float]]] = None
             legacy_candidate_rhos: Optional[dict[str, float]] = None
@@ -1613,7 +1769,7 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
                     "legacy_metrics": legacy_candidate_metrics,
                     "improved_count": improved_count,
                     "improved_horizons": improved_horizons,
-                    "utility": _proposal_utility(new_rhos, baseline_rhos),
+                    "utility": _proposal_utility(new_rhos, target_rhos),
                 })
 
             # Restore original for next proposal eval
@@ -1662,6 +1818,13 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
                         if imp["new_rhos"][h] > (best_rhos.get(h) or 0):
                             best_rhos[h] = float(imp["new_rhos"][h])
 
+                    # Update baselines so subsequent rounds must beat the new bar
+                    baseline_rhos = dict(current_rhos)
+                    target_rhos = {
+                        h: max(baseline_rhos[h], float(best_rhos.get(h) or 0.0))
+                        for h in _HORIZONS
+                    }
+
                     applied.append(imp)
                     applied_iterations.add(imp["iteration"])
                     _log_evaluated(
@@ -1702,6 +1865,18 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
 
                     # Validate stacked scorer
                     _write_scorer(stacked_code)
+
+                    # Static analysis on stacked code
+                    static_errors = _validate_static(stacked_code)
+                    if static_errors:
+                        logger.info("  #%d: ❌ stacked static analysis failed — %s",
+                                    imp["iteration"], static_errors[0])
+                        _write_scorer(current_code)
+                        proposal_lines.append(
+                            f"  #{imp['iteration']}: ❌ stacked static analysis — {static_errors[0]}"
+                        )
+                        continue
+
                     if not _validate_scorer():
                         logger.info("  #%d: ❌ stacked validation failed", imp["iteration"])
                         _write_scorer(current_code)
@@ -1747,6 +1922,17 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
                         stacked_rhos = {
                             h: float(stacked_metrics[h]["spearman_rho"]) for h in _HORIZONS
                         }
+
+                        error_rate = float(stacked_metrics.get("error_rate", 0.0))
+                        if error_rate > 0.0:
+                            logger.info("  #%d: ❌ stacked high error rate — %.2f%%",
+                                        imp["iteration"], error_rate * 100)
+                            _write_scorer(current_code)
+                            proposal_lines.append(
+                                f"  #{imp['iteration']}: ❌ stacked high error rate ({error_rate:.1%})"
+                            )
+                            continue
+
                     except Exception as e:
                         logger.info("  #%d: ❌ stacked full-eval crashed: %s", imp["iteration"], e)
                         _write_scorer(current_code)
@@ -1804,6 +1990,13 @@ def run_improvement_loop(max_iterations: int = 0) -> None:
                     for h in _HORIZONS:
                         if stacked_rhos[h] > (best_rhos.get(h) or 0):
                             best_rhos[h] = float(stacked_rhos[h])
+
+                    # Update baselines so subsequent rounds must beat the new bar
+                    baseline_rhos = dict(current_rhos)
+                    target_rhos = {
+                        h: max(baseline_rhos[h], float(best_rhos.get(h) or 0.0))
+                        for h in _HORIZONS
+                    }
 
                     applied.append(imp)
                     applied_iterations.add(imp["iteration"])

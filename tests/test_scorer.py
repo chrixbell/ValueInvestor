@@ -14,11 +14,15 @@ from valueinvestor.screener.scorer import MultiFactorScorer, _linear_score
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _result(pe: float, pb: float, roe: float, **val_kw) -> ScreeningResult:
+def _result(pe: float, pb: float, roe: float, gm: float = 0.30,
+            dte: float = 0.5, **val_kw) -> ScreeningResult:
     """Build a ScreeningResult with the given PE, PB, ROE."""
     return ScreeningResult(
         company=Company(ticker="TEST", name="Test Co", market=Market.A_SHARE),
-        financials=Financials(ticker="TEST", period="2024-12-31", roe=roe),
+        financials=Financials(
+            ticker="TEST", period="2024-12-31",
+            roe=roe, gross_margin=gm, debt_to_equity=dte,
+        ),
         valuation=ValuationMetrics(
             ticker="TEST", date="2024-06-01",
             pe_ratio=pe, pb_ratio=pb, **val_kw,
@@ -113,6 +117,6 @@ class TestCustomWeights:
     def test_quality_only_weights(self):
         """When quality weight is 1.0, high-ROE company should win."""
         scorer = MultiFactorScorer(weights={"value": 0, "quality": 1.0, "growth": 0, "momentum": 0})
-        high_q = scorer.score(_result(pe=25, pb=4, roe=0.25))
-        low_q = scorer.score(_result(pe=5, pb=0.8, roe=0.05))
+        high_q = scorer.score(_result(pe=25, pb=4, roe=0.25, gm=0.40, dte=0.3))
+        low_q = scorer.score(_result(pe=5, pb=0.8, roe=0.05, gm=0.15, dte=0.8))
         assert high_q.composite_score > low_q.composite_score

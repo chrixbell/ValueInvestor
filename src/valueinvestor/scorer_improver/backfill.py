@@ -17,11 +17,8 @@ current ``scorer.py`` if no variant beats it).
 from __future__ import annotations
 
 import hashlib
-import importlib
 import logging
 import sys
-import tempfile
-import time
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -144,7 +141,6 @@ def run_backfill(horizons: Tuple[str, ...] = ("1m", "3m")) -> Dict[str, float]:
 
     Returns a dict of ``{horizon: best_rho}`` for each processed horizon.
     """
-    from valueinvestor.scorer_improver.evaluator import evaluate_scorer
 
     horizon_targets: Dict[str, Path] = {
         "1m": SCORER_1M_PATH,

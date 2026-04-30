@@ -18,13 +18,13 @@ import logging
 import sqlite3
 import threading
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from valueinvestor.data.models import Company, Market
+from valueinvestor.data.models import Company
 
 logger = logging.getLogger(__name__)
 

@@ -13,7 +13,6 @@ Commands
 from __future__ import annotations
 
 import logging
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -427,7 +426,7 @@ def analyze(
 
     from valueinvestor.data.fetcher_ashare import AShareFetcher
     from valueinvestor.data.fetcher_hkshare import HKShareFetcher
-    from valueinvestor.data.models import Company, Financials, Market, ValuationMetrics
+    from valueinvestor.data.models import Company, Market
     from valueinvestor.screener.scorer import MultiFactorScorer
 
     # Determine market from ticker format
