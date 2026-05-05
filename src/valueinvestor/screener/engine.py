@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from valueinvestor.config import AppConfig
 from valueinvestor.data.cache import DataCache
@@ -40,13 +40,42 @@ class ScreeningEngine:
         config: AppConfig,
         cache: DataCache,
         scorer: Optional[MultiFactorScorer] = None,
+        progress_callback: Optional[Callable[[str, bool], None]] = None,
+        cache_only: bool = False,
     ) -> None:
         self.config = config
         self.cache = cache
+        self.cache_only = cache_only
         self._a_fetcher = AShareFetcher()
         self._hk_fetcher = HKShareFetcher()
         self._scorer = scorer if scorer is not None else MultiFactorScorer()
         self.last_total_screened: int = 0
+        self.progress_callback = progress_callback
+
+    def _emit_progress(self, message: str, checkpoint: bool = True) -> None:
+        if self.progress_callback is None:
+            return
+        try:
+            self.progress_callback(message, checkpoint)
+        except Exception:
+            logger.debug("Screening progress callback failed", exc_info=True)
+
+    @staticmethod
+    def _has_any_valuation_data(valuation: ValuationMetrics) -> bool:
+        return any(
+            value is not None
+            for value in (
+                valuation.price,
+                valuation.pe_ratio,
+                valuation.pe_forward,
+                valuation.pb_ratio,
+                valuation.ps_ratio,
+                valuation.peg_ratio,
+                valuation.dividend_yield,
+                valuation.ev_to_ebitda,
+                valuation.market_cap_rmb,
+            )
+        )
 
     # ------------------------------------------------------------------
     # 1. Universe
@@ -166,6 +195,7 @@ class ScreeningEngine:
 
         # Step 1 — universe
         logger.info("Step 1/6: Fetching stock universe …")
+        self._emit_progress("step 1/6 fetching stock universe")
         try:
             companies = self.fetch_universe()
         except DataFetchError as exc:
@@ -174,22 +204,29 @@ class ScreeningEngine:
             logger.warning("No companies in universe — aborting screening run")
             return []
         self.last_total_screened = len(companies)
+        self._emit_progress(f"step 1/6 complete: {len(companies)} companies")
 
         # Step 2 — valuations
         logger.info("Step 2/6: Fetching valuation data …")
+        self._emit_progress("step 2/6 fetching valuation data")
         valuations = self._fetch_all_valuations(companies)
         logger.info("Valuations available for %d companies", len(valuations))
+        self._emit_progress(f"step 2/6 complete: {len(valuations)} valuations")
 
         # Step 3 — valuation pre-filter (PE, PB, market-cap only)
         # This reduces 5 000+ stocks to a manageable subset so that the
         # per-stock financials fetch in Step 4 is fast (≤ ~300 calls instead
         # of 5 000+).
         logger.info("Step 3/6: Pre-filtering by valuation metrics …")
+        self._emit_progress("step 3/6 applying valuation pre-filter")
         pre_candidates = self._pre_filter_by_valuation(companies, valuations)
         logger.info(
             "Valuation pre-filter: %d / %d companies remain",
             len(pre_candidates),
             len(companies),
+        )
+        self._emit_progress(
+            f"step 3/6 complete: {len(pre_candidates)} / {len(companies)} remain"
         )
         if not pre_candidates:
             logger.warning("No candidates survived valuation pre-filter")
@@ -197,18 +234,25 @@ class ScreeningEngine:
 
         # Step 4 — financials (only for pre-filtered candidates)
         logger.info("Step 4/6: Fetching financials for %d candidates …", len(pre_candidates))
+        self._emit_progress(
+            f"step 4/6 fetching financials for {len(pre_candidates)} candidates"
+        )
         financials = self._fetch_all_financials(pre_candidates)
         logger.info("Financials available for %d companies", len(financials))
+        self._emit_progress(f"step 4/6 complete: {len(financials)} financials")
 
         # Step 5 — full filter (adds ROE and debt-ratio)
         logger.info("Step 5/6: Applying full quantitative filters …")
+        self._emit_progress("step 5/6 applying full quantitative filters")
         candidates = self.filter_candidates(pre_candidates, valuations, financials)
+        self._emit_progress(f"step 5/6 complete: {len(candidates)} candidates")
         if not candidates:
             logger.warning("No candidates survived filtering")
             return []
 
         # Step 6 — score & rank
         logger.info("Step 6/6: Scoring and ranking %d candidates …", len(candidates))
+        self._emit_progress(f"step 6/6 scoring and ranking {len(candidates)} candidates")
         ranked = self._scorer.rank(candidates)
 
         top = ranked[:top_n]
@@ -216,6 +260,9 @@ class ScreeningEngine:
             "Screening complete — returning top %d of %d candidates",
             len(top),
             len(ranked),
+        )
+        self._emit_progress(
+            f"screening complete: returning top {len(top)} of {len(ranked)} candidates"
         )
         return top
 
@@ -255,11 +302,29 @@ class ScreeningEngine:
 
     def _fetch_market_list(self, market: Market) -> List[Company]:
         """Fetch (or read from cache) the stock list for *market*."""
-        cached = self.cache.get_stock_list(market.value)
+        cached = self.cache.get_stock_list(market.value, allow_expired=self.cache_only)
         if cached is not None:
+            if market == Market.HK_SHARE:
+                filtered = self._hk_fetcher.filter_supported_companies(cached)
+                if len(filtered) != len(cached):
+                    logger.info(
+                        "Rewriting cached HK stock list after filtering unsupported instruments: "
+                        "%d -> %d",
+                        len(cached),
+                        len(filtered),
+                    )
+                    self.cache.set_stock_list(market.value, filtered)
+                cached = filtered
             logger.info("Using cached stock list for %s (%d companies)", market.value, len(cached))
+            self._emit_progress(
+                f"{market.value} stock list loaded from cache ({len(cached)} companies)"
+            )
             return cached
 
+        if self.cache_only:
+            raise DataFetchError(f"Cache-only mode: no cached stock list for {market.value}")
+
+        self._emit_progress(f"fetching {market.value} stock list")
         if market == Market.A_SHARE:
             companies = self._a_fetcher.fetch_stock_list()
         else:
@@ -267,6 +332,9 @@ class ScreeningEngine:
 
         if companies:
             self.cache.set_stock_list(market.value, companies)
+        self._emit_progress(
+            f"{market.value} stock list fetched ({len(companies)} companies)"
+        )
         return companies
 
     # ------------------------------------------------------------------
@@ -280,14 +348,27 @@ class ScreeningEngine:
         # A-shares — efficient bulk endpoint
         a_tickers = {c.ticker for c in companies if c.market == Market.A_SHARE}
         if a_tickers:
+            self._emit_progress(f"A-share valuations: checking {len(a_tickers)} tickers")
             result.update(self._bulk_a_share_valuations(a_tickers))
 
         # HK-shares — per-stock via yfinance
         hk_companies = [c for c in companies if c.market == Market.HK_SHARE]
-        for company in hk_companies:
+        total_hk = len(hk_companies)
+        if total_hk:
+            self._emit_progress(f"HK valuations: fetching {total_hk} tickers")
+        for idx, company in enumerate(hk_companies, 1):
+            self._emit_progress(
+                f"HK valuations {idx}/{total_hk}: {company.ticker} {company.name}",
+                checkpoint=False,
+            )
             val = self._cached_valuation(company.ticker, market=Market.HK_SHARE)
-            if val is not None:
+            if val is not None and self._has_any_valuation_data(val):
                 result[company.ticker] = val
+            if idx == 1 or idx % 25 == 0 or idx == total_hk:
+                self._emit_progress(
+                    f"HK valuations {idx}/{total_hk} processed; "
+                    f"{len(result)} total valuations available"
+                )
 
         return result
 
@@ -304,11 +385,21 @@ class ScreeningEngine:
         out: Dict[str, ValuationMetrics] = {}
         missing: List[str] = []
         for t in tickers:
-            cached = self.cache.get_valuation(t)
+            cached = self.cache.get_valuation(t, allow_expired=self.cache_only)
             if cached is not None:
                 out[t] = cached
             else:
                 missing.append(t)
+
+        if self.cache_only:
+            logger.info(
+                "Cache-only mode: A-share valuations loaded for %d/%d tickers; "
+                "%d misses skipped",
+                len(out),
+                len(tickers),
+                len(missing),
+            )
+            return out
 
         if not missing:
             logger.info("All %d A-share valuations served from cache", len(out))
@@ -338,9 +429,12 @@ class ScreeningEngine:
         self, ticker: str, *, market: Market
     ) -> Optional[ValuationMetrics]:
         """Return a valuation from cache or fetch + cache it."""
-        cached = self.cache.get_valuation(ticker)
+        cached = self.cache.get_valuation(ticker, allow_expired=self.cache_only)
         if cached is not None:
             return cached
+
+        if self.cache_only:
+            return None
 
         try:
             if market == Market.A_SHARE:
@@ -362,19 +456,32 @@ class ScreeningEngine:
     def _fetch_all_financials(self, companies: List[Company]) -> Dict[str, Financials]:
         """Fetch financials per stock, preferring the cache."""
         result: Dict[str, Financials] = {}
-        for company in companies:
+        total = len(companies)
+        for idx, company in enumerate(companies, 1):
+            self._emit_progress(
+                f"financials {idx}/{total}: {company.ticker} {company.name}",
+                checkpoint=False,
+            )
             fin = self._cached_financials(company.ticker, market=company.market)
             if fin is not None:
                 result[company.ticker] = fin
+            if idx == 1 or idx % 25 == 0 or idx == total:
+                self._emit_progress(
+                    f"financials {idx}/{total} processed; "
+                    f"{len(result)} financial records available"
+                )
         return result
 
     def _cached_financials(
         self, ticker: str, *, market: Market
     ) -> Optional[Financials]:
         """Return financials from cache or fetch + cache them."""
-        cached = self.cache.get_financials(ticker)
+        cached = self.cache.get_financials(ticker, allow_expired=self.cache_only)
         if cached is not None:
             return cached
+
+        if self.cache_only:
+            return None
 
         try:
             if market == Market.A_SHARE:

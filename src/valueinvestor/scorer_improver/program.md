@@ -1,94 +1,88 @@
-# Scorer Improvement Agent — Program Context
+# Scorer Improvement Agent
 
-## What You Are Doing
+## Goal
 
-You are an autonomous research agent improving a stock scoring algorithm.
-The scorer (`scorer.py`) assigns a composite score to Chinese stocks (A-share
-and Hong Kong) based on valuation, quality, and growth metrics. Your goal is
-to maximize the **Spearman rank correlation (ρ)** between the composite score
-and forward stock returns across **three time horizons simultaneously**:
+Maximize Spearman ρ between composite score and forward returns across 1m, 3m, and 6m horizons. A change is kept when it is a **material current-incumbent Pareto improvement**: at least one current horizon improves by more than the acceptance threshold (~0.00010), and no current horizon regresses by more than the behavior-neutral band (~0.00005). Historical-best metrics are tracked separately and should guide retries, but they no longer block a clean current-incumbent improvement.
 
-- **1-month** (30-day forward return)
-- **3-month** (90-day forward return)
-- **6-month** (126-day forward return)
+## File
 
-A change is kept if it improves ρ for **any** of the three horizons — you do
-not need to improve all three at once.
+You modify `src/valueinvestor/screener/scorer.py` only. It contains:
+- `_DEFAULT_WEIGHTS`: dict of six factor weights (`value`, `quality`, `growth`, `momentum`, `synergy`, `value_growth`)
+- `_linear_score(value, best, worst)`: maps value → [0, 100]
+- `MultiFactorScorer` with `score(result)`, `rank(results)`, and per-factor sub-score methods
 
-Higher ρ means the scorer is better at ranking stocks by future performance.
+The trainer requires `_DEFAULT_WEIGHTS` to include all six factors with positive numeric weights summing to `1.0`. Do not remove, zero, or omit `momentum`, `synergy`, or `value_growth`; proposals that start from partial weights are rejected before evaluation.
 
-## The File You Modify
+## Available Fields
 
-You modify **one file only**: `src/valueinvestor/screener/scorer.py`
+`result.valuation`: pe_ratio, pe_forward, pb_ratio, ps_ratio, peg_ratio, dividend_yield, ev_to_ebitda, market_cap_rmb, price — all float|None
 
-The file contains:
-- `_DEFAULT_WEIGHTS`: factor weight dict (value, quality, growth, momentum)
-- `_linear_score(value, best, worst)`: maps a value to [0, 100] linearly
-- `MultiFactorScorer` class with:
-  - `score(result)`: compute sub-scores and composite score for a ScreeningResult
-  - `rank(results)`: score all, sort by composite, assign ranks
-  - `_value_score(result)`: lower PE/PB → higher score
-  - `_quality_score(result)`: higher ROE/margin, lower leverage → higher score
-  - `_growth_score(result)`: higher ROE, lower PEG → higher score
+`result.financials`: revenue, net_income, gross_margin, net_margin, roe, roa, debt_to_equity, current_ratio, operating_cash_flow, free_cash_flow, total_assets, total_equity — all float|None
 
-## Available Data Fields
+`ScreeningResult` only has: `.valuation`, `.financials`, `.company`, `.composite_score`, `.value_score`, `.quality_score`, `.growth_score`, `.momentum_score`, `.synergy_score`, `.value_growth_score`, `.rank`. Do NOT invent fields like `.efficiency_score` — they don't exist and will crash validation.
 
-Each `ScreeningResult` has:
+## Already Implemented — Do NOT Re-Propose
 
-**Valuation** (`result.valuation`):
-- `pe_ratio` (float|None): trailing P/E ratio
-- `pe_forward` (float|None): forward P/E
-- `pb_ratio` (float|None): price-to-book
-- `ps_ratio` (float|None): price-to-sales
-- `peg_ratio` (float|None): PEG ratio
-- `dividend_yield` (float|None): dividend yield
-- `ev_to_ebitda` (float|None): EV/EBITDA
-- `market_cap_rmb` (float|None): market cap in RMB
-- `price` (float|None): current price
-
-**Financials** (`result.financials`):
-- `revenue` (float|None): total revenue
-- `net_income` (float|None): net income
-- `gross_margin` (float|None): gross margin ratio
-- `net_margin` (float|None): net margin ratio
-- `roe` (float|None): return on equity
-- `roa` (float|None): return on assets
-- `debt_to_equity` (float|None): debt-to-equity ratio
-- `current_ratio` (float|None): current ratio
-- `operating_cash_flow` (float|None)
-- `free_cash_flow` (float|None)
-- `total_assets` (float|None)
-- `total_equity` (float|None)
+The scorer already has these features. Re-proposing them wastes iterations because they do not produce useful ranking changes. **Critical**: `score()` runs per-stock (no access to other stocks); `rank()` runs across all stocks. Cross-sectional features belong in `rank()`, not `score()`.
+- **Cross-sectional percentile ranking**: `rank()` already sorts stocks by `_quality_raw` and `_growth_raw` within each snapshot and assigns percentile-based scores. Value is NOT percentile-ranked; recent ranked-evaluator tests showed adding value percentile ranking regressed all horizons, so do not re-propose it.
+- **Geometric mean composite**: `_weighted_geometric_mean()` with scores floored at 10 before log aggregation
+- **Synergy term**: `min(value_score, quality_score)` in `rank()`
+- **Value-growth interaction**: `sqrt(value_score * growth_score)` in `rank()`
+- **Multiplicative loss penalty**: `_loss_penalty()` reduces composite for negative net income relative to market cap
+- **Quality raw formula**: `(min(ROE, 0.30) × gross_margin) / (1 + sqrt(max(DTE, 0)))`, with `gross_margin > 0.15`, `DTE <= 2.0`, and an operating-cash-flow/assets multiplier capped at `1.5x`
+- **Growth raw formula**: `_compute_growth_raw()` currently ranks inverse PEG (`1 / PEG`)
+- **log_score and triangular_score helpers**: for ratio and range-based scoring
+- **Momentum proxy**: asset turnover (`revenue / total_assets`) — NOT price momentum
+- **Protected value sub-factors**: keep `price × market_cap`, `price × PB`, dividend-yield scoring, and the duplicate/zero earnings-yield append unless you have a genuinely new structural reason. Recent removal attempts regressed the benchmark.
 
 ## Constraints
 
-1. **Keep the class interface**: `MultiFactorScorer` must have `score(result)` and `rank(results)` methods
-2. **Valid Python 3.9+**: no walrus operators in comprehensions, no 3.10+ features
-3. **No external imports**: only use `math`, `logging`, `typing`, and modules already imported
-4. **Must not crash**: if any field is None, handle it gracefully (use defaults)
-5. **Keep it fast**: scoring ~5000 stocks must complete in < 5 seconds
-6. **Composite score should be positive**: higher = better
-7. **No undefined variables**: Every variable you reference must be defined within
-   the same function or passed as a parameter. Check `_value_score` carefully —
-   all financial fields use `result.financials.<field>` and all valuation fields
-   use `result.valuation.<field>`. Do NOT introduce new variable names without
-   first assigning them.
-8. **Verify your diff applies**: After writing your diff, mentally apply each hunk
-   to the current code to ensure line numbers and context match. Patches with
-   stale line offsets will fail to apply and waste an iteration.
+1. `MultiFactorScorer` must keep `score(result)` and `rank(results)` interface
+2. Valid Python 3.9+ (no walrus in comprehensions, no 3.10+ features)
+3. Only imports: `math`, `logging`, `typing`, and existing modules
+4. Handle None fields gracefully — use conditionals, don't crash
+5. Scoring ~5000 stocks must complete in <5s
+6. Higher composite = better stock
+7. No undefined variables — always access via `result.valuation.<field>` or `result.financials.<field>`
+8. ScreeningResult objects are not hashable — never use them in sets or as dict keys
+9. Verify diff hunks match current code line numbers — stale offsets waste iterations
 
-## Strategy Tips
+## Ranked-Evaluator Findings
 
-- **New sub-factors**: use dividend_yield, current_ratio, free_cash_flow, gross_margin, roa — these have the
-  most untapped predictive power and the highest success rate
-- **Interaction terms**: combine factors (e.g., ROE/PE as earnings yield quality, FCF/market_cap)
-- **Non-linear scoring**: try logarithmic, exponential, or sigmoid transforms instead of linear
-- **Composite formula**: try geometric mean, harmonic mean, or rank-based aggregation instead of weighted sum
-- **Clamping ranges**: adjust the best/worst thresholds (PE 8→30 might not be optimal for current market)
-- **Momentum**: the momentum score is currently a placeholder (50.0) — computing it from price data isn't
-  available, but you can adjust its weight or remove it entirely
-- **Weights**: small weight-only reallocations ALMOST NEVER improve ρ (they have a <2% success rate).
-  Only adjust weights when accompanied by a structural change to the sub-scores themselves.
+The trainer now evaluates the actual production workflow: it groups stocks by `snapshot_date`, calls `rank()` for each snapshot, then measures Spearman ρ from the final ranked `composite_score`.
+
+Recent ranked-evaluator run (`eval=ranked-snapshot-v1`) showed:
+- **Do NOT try value cross-sectional percentile ranking again.** It was tested as a broad `rank()` change and regressed all horizons.
+- **Do NOT flip PB polarity just because low PB sounds cheaper.** Reversing `pb_ratio` scoring was quick-rejected badly; the current unusual PB direction is empirically useful in this dataset.
+- **Avoid rare-trigger loss/leverage penalties.** Extra DTE penalties inside `_loss_penalty()` often produce no measurable ranking movement because they affect too few stocks.
+- **Avoid OCF/net-income multipliers inside `_compute_quality_raw()`.** Recent earnings-quality multipliers produced no useful movement or were rejected; quality raw is already fragile and heavily used by rank percentiles.
+- **Do NOT remove `price × market_cap`, `price × PB`, or dividend yield.** The latest ranked-evaluator runs tested these simplifications and all regressed, with `price × PB` removal damaging 3m and 6m heavily.
+- **Do NOT remove the duplicate/zero earnings-yield append.** It looks like a bug, but fresh ranked-evaluator runs showed it is protective; removing it caused large 1m and 6m damage.
+- **Do NOT widen the `price × PB` best threshold from `5.0` toward `10.0`.** This fresh test regressed every horizon.
+- **Do NOT raise the quality ROE cap from `0.30` to `0.40`.** This was behavior-neutral, not a useful direction.
+- **Do NOT loosen the `DTE > 2.0` exclusion in quality raw.** Replacing the exclusion with a leverage cap slightly regressed all horizons.
+- **Current-ratio value scoring is a near-miss, not a win.** Adding a triangular current-ratio factor improved 3m/6m slightly but hurt 1m enough to fail target utility; only retry it with an explicit 1m-protection gate.
+- **Gross-profit-to-assets is a current-Pareto positive lead.** Retry it only as a 1m-protected or gated variant, not as a broad unconditional weight bump.
+- **Do NOT spend another proposal on FCF/assets, FCF/equity, or FCF/debt variants when recent failure guidance marks them as blocked.** These have repeatedly consumed LLM calls and then failed or been skipped before evaluation.
+- **Do NOT replace `min(value_score, quality_score)` synergy with a smoother/geometric form.** Fresh ranked quick-eval rejected the geometric-mean replacement across all sampled horizons.
+- **Do NOT nudge blend weights for `_growth_abs` vs growth percentile or `log_q` vs quality percentile.** Recent attempts were either below target or 1m-only tradeoffs; they are not strong enough to clear the material threshold.
+- **Do NOT retune `boost_alpha`, ROA value thresholds, or add large-cap post-percentile quality bonuses unless recent failure guidance explicitly says the theme is no longer blocked.** Fresh runs showed these are behavior-neutral or below target.
+- **Do NOT add broad gross-profit-yield / market-cap factors.** They create the same 3m-only upside with severe 1m/6m damage that quick-eval is designed to reject.
+- **Do NOT keep retrying gross-profit-to-assets gates, shape changes, or added asset-turnover gates.** The most recent 10-round batch tested lower gates, net-income gates, turnover gates, log-to-linear shape changes, and weight bumps; all were below target or behavior-neutral.
+- **Do NOT tune EV/EBITDA, OCF-yield, PEG, PS, asset-turnover, or loss-penalty thresholds without a specific new structural reason.** Fresh attempts were quick-rejected or failed full eval.
+- **Tiny full-eval deltas are not signal.** Treat changes under roughly `0.00005` as behavior-neutral and require roughly `0.00010` upside before keeping a new incumbent. A tiny dip is tolerated if another horizon improves materially, but a proposal with only tiny movement is not useful.
+- **Monotonic transforms of ranked raw fields are no-ops.** If `rank()` sorts by `_quality_raw` or `_growth_raw`, replacing raw with `log(raw)`, multiplying all positive values by a constant, or capping without changing order will not change final ranks.
+
+## Strategy
+
+After 11K+ experiments, favor changes that affect many stocks and can change the final per-snapshot ordering:
+- **Tune high-coverage value thresholds** by a small amount where most rows have data: market cap preference, OCF yield, gross-profit yield, gross-profit/assets, ROA, earnings yield, or EV/EBITDA. Change one threshold or one sub-factor weight at a time.
+- **Preserve empirically useful value interactions.** Do not remove `price × market_cap`, `price × PB`, dividend yield, the duplicate earnings-yield zero append, or the current DTE quality exclusion just because they look unusual.
+- **Modify rank-stage composite breadth carefully.** Small structural changes to `synergy` or `value_growth` can matter, but avoid pure weight-only edits. Pair any weight tweak with one concrete structural simplification or threshold change.
+- **Try non-monotonic rank-stage gating**, not monotonic raw transforms. For example, use a thresholded bonus/penalty after percentile scores are assigned if it affects a broad subset and is not already captured by existing factors.
+- **For near-misses, constrain the retry.** If a candidate only helps 3m/6m while hurting 1m, preserve the 3m/6m mechanism but add a simple gate that avoids degrading high-1m-score stocks.
+- **Prefer threshold and gating experiments over deletions.** Recent deletion-style proposals mostly damaged the incumbent scorer; use deletion only when recent history shows the exact component is harmful.
+- **Weight-only changes almost never work** (<2% success rate) — only adjust weights alongside a structural change to a sub-score or rank-stage composite term.
 
 ## Current Status
 

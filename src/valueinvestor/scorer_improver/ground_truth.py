@@ -89,6 +89,22 @@ MINIMUM_GROUND_TRUTH_COLUMNS = (
 )
 
 
+_GT_CACHE: dict[str, pd.DataFrame] = {}
+
+
+def load_ground_truth_cached(path: Path) -> pd.DataFrame:
+    """Load a ground-truth parquet with in-memory caching.
+
+    The evaluator calls this 6+ times per round (quick-eval + full-eval per
+    horizon for both primary and legacy guard datasets). Cache avoids redundant
+    disk I/O and deserialization.
+    """
+    key = str(path)
+    if key not in _GT_CACHE:
+        _GT_CACHE[key] = pd.read_parquet(key)
+    return _GT_CACHE[key]
+
+
 def ground_truth_fingerprint(path: Path = GROUND_TRUTH_FILE) -> str:
     """Return a cheap identity for the current ground-truth parquet."""
     if not path.exists():

@@ -86,6 +86,9 @@ def _build_company_block(data: dict) -> str:
         lines.append(f"Value: {_fmt(scores.get('value_score'))}")
         lines.append(f"Quality: {_fmt(scores.get('quality_score'))}")
         lines.append(f"Growth: {_fmt(scores.get('growth_score'))}")
+        lines.append(f"Momentum: {_fmt(scores.get('momentum_score'))}")
+        lines.append(f"Synergy: {_fmt(scores.get('synergy_score'))}")
+        lines.append(f"Value-Growth: {_fmt(scores.get('value_growth_score'))}")
 
     return "\n".join(lines)
 

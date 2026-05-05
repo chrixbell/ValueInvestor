@@ -63,6 +63,9 @@ class ScreeningResult(BaseModel):
     value_score: float = 0.0
     quality_score: float = 0.0
     growth_score: float = 0.0
+    momentum_score: float = 0.0
+    synergy_score: float = 0.0
+    value_growth_score: float = 0.0
     rank: int = 0
 
 

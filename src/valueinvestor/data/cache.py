@@ -98,13 +98,13 @@ class DataCache:
     # Company
     # ------------------------------------------------------------------
 
-    def get_company(self, ticker: str) -> Optional[Company]:
+    def get_company(self, ticker: str, *, allow_expired: bool = False) -> Optional[Company]:
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT data, updated_at FROM companies WHERE ticker = ?",
                 (ticker,),
             ).fetchone()
-        if row is None or self.is_expired(row[1]):
+        if row is None or (not allow_expired and self.is_expired(row[1])):
             return None
         return Company.model_validate_json(row[0])
 
@@ -119,13 +119,13 @@ class DataCache:
     # Financials
     # ------------------------------------------------------------------
 
-    def get_financials(self, ticker: str) -> Optional[Financials]:
+    def get_financials(self, ticker: str, *, allow_expired: bool = False) -> Optional[Financials]:
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT data, updated_at FROM financials WHERE ticker = ?",
                 (ticker,),
             ).fetchone()
-        if row is None or self.is_expired(row[1]):
+        if row is None or (not allow_expired and self.is_expired(row[1])):
             return None
         return Financials.model_validate_json(row[0])
 
@@ -140,13 +140,13 @@ class DataCache:
     # Valuation
     # ------------------------------------------------------------------
 
-    def get_valuation(self, ticker: str) -> Optional[ValuationMetrics]:
+    def get_valuation(self, ticker: str, *, allow_expired: bool = False) -> Optional[ValuationMetrics]:
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT data, updated_at FROM valuations WHERE ticker = ?",
                 (ticker,),
             ).fetchone()
-        if row is None or self.is_expired(row[1]):
+        if row is None or (not allow_expired and self.is_expired(row[1])):
             return None
         return ValuationMetrics.model_validate_json(row[0])
 
@@ -161,13 +161,13 @@ class DataCache:
     # Analysis
     # ------------------------------------------------------------------
 
-    def get_analysis(self, ticker: str) -> Optional[CompanyAnalysis]:
+    def get_analysis(self, ticker: str, *, allow_expired: bool = False) -> Optional[CompanyAnalysis]:
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT data, updated_at FROM analyses WHERE ticker = ?",
                 (ticker,),
             ).fetchone()
-        if row is None or self.is_expired(row[1]):
+        if row is None or (not allow_expired and self.is_expired(row[1])):
             return None
         return CompanyAnalysis.model_validate_json(row[0])
 
@@ -182,13 +182,13 @@ class DataCache:
     # Stock lists
     # ------------------------------------------------------------------
 
-    def get_stock_list(self, market: str) -> Optional[List[Company]]:
+    def get_stock_list(self, market: str, *, allow_expired: bool = False) -> Optional[List[Company]]:
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT data, updated_at FROM stock_lists WHERE market = ?",
                 (market,),
             ).fetchone()
-        if row is None or self.is_expired(row[1]):
+        if row is None or (not allow_expired and self.is_expired(row[1])):
             return None
         raw_list: list = json.loads(row[0])
         return [Company.model_validate(item) for item in raw_list]

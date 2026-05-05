@@ -69,6 +69,9 @@ class TestMultiFactorScorer:
         assert r.value_score > 0
         assert r.quality_score > 0
         assert r.growth_score > 0
+        assert r.momentum_score > 0
+        assert r.synergy_score > 0
+        assert r.value_growth_score > 0
 
     def test_cheap_high_quality(self):
         """PE=5, PB=0.8, ROE=0.25 — produces valid scores."""
@@ -96,6 +99,10 @@ class TestRanking:
         assert ranked[-1].rank == 3
         assert ranked[0].composite_score >= ranked[1].composite_score
         assert ranked[1].composite_score >= ranked[2].composite_score
+        for result in ranked:
+            assert result.momentum_score > 0
+            assert result.synergy_score > 0
+            assert result.value_growth_score > 0
 
     def test_rank_assigns_sequential(self):
         scorer = MultiFactorScorer()

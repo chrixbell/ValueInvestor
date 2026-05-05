@@ -209,6 +209,20 @@ class TestAgentHelpers:
             def complete(self, system_prompt=None, user_prompt=None):
                 return f"```python\n{scorer_code}\n```\nNo changes needed."
 
+        class FakeEvalContext:
+            def __init__(self, **kwargs) -> None:
+                self.kwargs = kwargs
+
+            def evaluate_all_targets(self, scorer_module=None, scorer_path=None):
+                return {
+                    "1m": {"spearman_rho": 0.12, "hit_rate_top20": 0.5, "mean_excess_return": 0.01},
+                    "3m": {"spearman_rho": 0.23, "hit_rate_top20": 0.5, "mean_excess_return": 0.01},
+                    "6m": {"spearman_rho": 0.34, "hit_rate_top20": 0.5, "mean_excess_return": 0.01},
+                }
+
+            def quick_evaluate(self, scorer_module=None, scorer_path=None, sample_size=1000):
+                return {"1m": 0.11, "3m": 0.22, "6m": 0.33}
+
         monkeypatch.setenv("LLM_PROVIDER", "deepseek")
         monkeypatch.setenv("LLM_MODEL", "DeepSeek-V4-Flash")
         monkeypatch.setenv("LLM_BASE_URL", "https://api.deepseek.com/v1")
@@ -221,24 +235,11 @@ class TestAgentHelpers:
             "_create_parallel_clients",
             lambda: [FakeLLMClient()],
         )
-        monkeypatch.setattr(
-            agent,
-            "evaluate_scorer_all_targets",
-            lambda scorer_module=None, **kwargs: {
-                "1m": {"spearman_rho": 0.12, "hit_rate_top20": 0.5, "mean_excess_return": 0.01},
-                "3m": {"spearman_rho": 0.23, "hit_rate_top20": 0.5, "mean_excess_return": 0.01},
-                "6m": {"spearman_rho": 0.34, "hit_rate_top20": 0.5, "mean_excess_return": 0.01},
-            },
-        )
-        monkeypatch.setattr(
-            agent,
-            "quick_evaluate",
-            lambda scorer_module=None, sample_size=1000, **kwargs: {"1m": 0.11, "3m": 0.22, "6m": 0.33},
-        )
+        monkeypatch.setattr(agent, "ScorerEvaluationContext", FakeEvalContext)
         monkeypatch.setattr(agent, "_read_scorer", lambda: scorer_code)
         writes: list[str] = []
         monkeypatch.setattr(agent, "_write_scorer", lambda code: writes.append(code))
-        monkeypatch.setattr(agent, "_validate_scorer", lambda: True)
+        monkeypatch.setattr(agent, "_validate_scorer", lambda **kwargs: True)
 
         with patch("valueinvestor.analysis.llm_client.OpenAI", FakeOpenAI):
             agent.run_improvement_loop(max_iterations=1)
@@ -278,6 +279,148 @@ class TestAgentHelpers:
 
         assert _semantic_failure_theme(text) == "pe_safe_quality_raw_repair"
 
+    def test_semantic_failure_theme_blocks_protected_value_removals(self) -> None:
+        from valueinvestor.scorer_improver.agent import _semantic_failure_theme
+
+        assert (
+            _semantic_failure_theme("Removed the price × market_cap sub-factor from value scoring")
+            == "remove_price_market_cap_subfactor"
+        )
+        assert (
+            _semantic_failure_theme("Drop the price * PB interaction because it looks noisy")
+            == "remove_price_pb_subfactor"
+        )
+        assert (
+            _semantic_failure_theme("Delete the dividend-yield triangular sub-factor")
+            == "remove_dividend_yield_subfactor"
+        )
+        assert (
+            _semantic_failure_theme("Raised the ideal price * pb threshold in the log-score")
+            == "widen_price_pb_threshold"
+        )
+        assert (
+            _semantic_failure_theme("Switched the price × PB sub-factor scoring from logarithmic to linear")
+            == "price_pb_shape_retry"
+        )
+        assert (
+            _semantic_failure_theme("_log_score(ppb, best=4.0, worst=250.0)")
+            == "price_pb_shape_retry"
+        )
+        assert (
+            _semantic_failure_theme("Raised the quality ROE cap from 0.30 to 0.40")
+            == "raise_quality_roe_cap"
+        )
+        assert (
+            _semantic_failure_theme("Fix duplicate weighted_scores.append((0.0, EARNINGS_YIELD_WEIGHT))")
+            == "remove_earnings_yield_zero_append"
+        )
+        assert (
+            _semantic_failure_theme("Replaced min(value_score, quality_score) synergy term with geometric mean")
+            == "replace_synergy_min_retry"
+        )
+        assert (
+            _semantic_failure_theme("Increased the influence of the absolute growth score from 0.3 to 0.4")
+            == "growth_blend_weight_retry"
+        )
+        assert (
+            _semantic_failure_theme("Increased quality_score cross-sectional percentile component from 0.8 to 0.9")
+            == "quality_percentile_blend_retry"
+        )
+        assert _semantic_failure_theme("Reduced boost_alpha from 1.55 to 1.45") == "value_boost_alpha_retry"
+        assert (
+            _semantic_failure_theme("Added a gross-profit-yield (gross profit / market cap) value factor")
+            == "gross_profit_market_cap_yield_retry"
+        )
+        assert (
+            _semantic_failure_theme("Lowered the market-cap gate for the gross-profit-to-assets value sub-factor")
+            == "gross_profit_assets_retry"
+        )
+        assert (
+            _semantic_failure_theme("Replaced the linear scoring of asset turnover in _momentum_score")
+            == "asset_turnover_retry"
+        )
+        assert (
+            _semantic_failure_theme("Raised the best threshold of the operating-cash-flow yield")
+            == "ocf_yield_threshold_retry"
+        )
+        assert (
+            _semantic_failure_theme("Replaced the log‑scale scoring of operating‑cash‑flow yield")
+            == "ocf_yield_threshold_retry"
+        )
+        assert (
+            _semantic_failure_theme("Shifted the optimal EV/EBITDA from 8.0 to 9.0")
+            == "ev_ebitda_threshold_retry"
+        )
+        assert (
+            _semantic_failure_theme("Widened the PEG scoring reference window")
+            == "peg_threshold_retry"
+        )
+        assert (
+            _semantic_failure_theme("Increased the loss penalty scaling constant from 5.0 to 6.0")
+            == "loss_penalty_scaling_retry"
+        )
+        assert (
+            _semantic_failure_theme("The duplicate zero-score entry now uses a smaller weight")
+            == "earnings_yield_zero_weight_retry"
+        )
+        assert (
+            _semantic_failure_theme("Added a large-cap composite score bonus gate")
+            == "large_cap_composite_bonus_retry"
+        )
+        assert (
+            _semantic_failure_theme("Lowered the best threshold for the ROA value sub-factor from 0.15 to 0.12")
+            == "roa_value_threshold_retry"
+        )
+        assert (
+            _semantic_failure_theme("Added a large-cap post-percentile quality_score ROA bonus")
+            == "large_cap_quality_bonus_retry"
+        )
+        assert (
+            _semantic_failure_theme("Added a large-cap-gated direct ROE value sub-factor")
+            == "large_cap_direct_roe_value_retry"
+        )
+        assert (
+            _semantic_failure_theme(
+                "Lowered the market-cap gate for the liabilities-to-market-cap value sub-factor"
+            )
+            == "liabilities_market_cap_gate_retry"
+        )
+        assert (
+            _semantic_failure_theme("Replaced the linear scoring of roe_ey with a logarithmic shape")
+            == "roe_ev_ebitda_value_shape_retry"
+        )
+        assert (
+            _semantic_failure_theme("Added a fallback to pe_forward when PEG is unavailable")
+            == "growth_forward_pe_fallback_retry"
+        )
+        assert (
+            _semantic_failure_theme("Lowered the best threshold for the forward P/E log-score")
+            == "forward_pe_value_threshold_retry"
+        )
+        assert (
+            _semantic_failure_theme("Raised the forward_pe_improve linear_score best threshold")
+            == "forward_pe_value_threshold_retry"
+        )
+        assert (
+            _semantic_failure_theme("Added a value_score > 60 and quality_score > 60 composite_score bonus")
+            == "value_quality_composite_bonus_retry"
+        )
+
+    def test_semantic_failure_theme_ignores_unchanged_diff_context(self) -> None:
+        from valueinvestor.scorer_improver.agent import _semantic_failure_theme
+
+        text = """\
+--- old
++++ new
+@@ -442,2 +442,12 @@
+                     weighted_scores.append((0.0, CURRENT_RATIO_WEIGHT))
++        # ROE / PB - profitable book value
++        roe_pb = roe_val / pb_val
+Added a new value sub-factor ROE / PB that rewards profitability relative to book value.
+"""
+
+        assert _semantic_failure_theme(text) == ""
+
     def test_best_scorer_snapshot_round_trip(self, tmp_path: Path, monkeypatch) -> None:
         from valueinvestor.scorer_improver import agent
 
@@ -304,6 +447,34 @@ class TestAgentHelpers:
         assert meta["iteration"] == 42
         assert json.loads(meta_path.read_text(encoding="utf-8"))["spearman_rho_6m"] == 0.13
 
+    def test_cleanup_old_backups_preserves_tracked_files(self, tmp_path: Path, monkeypatch) -> None:
+        from valueinvestor.scorer_improver import agent
+
+        backup_dir = tmp_path / "backups"
+        backup_dir.mkdir()
+        tracked = backup_dir / "scorer_0000.py"
+        old_untracked = backup_dir / "scorer_0001.py"
+        new_untracked = backup_dir / "scorer_0002.py"
+        for path in (tracked, old_untracked, new_untracked):
+            path.write_text(path.name, encoding="utf-8")
+
+        monkeypatch.setattr(agent, "BACKUP_DIR", backup_dir)
+        monkeypatch.setattr(agent, "_MAX_BACKUPS", 1)
+        monkeypatch.setattr(agent, "_project_root", lambda: tmp_path)
+        monkeypatch.setattr(
+            agent.subprocess,
+            "run",
+            lambda *args, **kwargs: SimpleNamespace(
+                returncode=0,
+                stdout="backups/scorer_0000.py\n",
+            ),
+        )
+
+        assert agent._cleanup_old_backups() == 1
+        assert tracked.exists()
+        assert not old_untracked.exists()
+        assert new_untracked.exists()
+
     def test_best_scorer_snapshot_ignores_other_ground_truth(self, tmp_path: Path, monkeypatch) -> None:
         from valueinvestor.scorer_improver import agent
 
@@ -321,12 +492,41 @@ class TestAgentHelpers:
         assert agent._restore_best_scorer_snapshot("new-gt") is None
         assert scorer_path.read_text(encoding="utf-8") == "CURRENT = True\n"
 
+    def test_load_resume_baseline_uses_snapshot_without_mutating_worktree(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        from valueinvestor.scorer_improver import agent
+
+        scorer_path = tmp_path / "scorer.py"
+        best_path = tmp_path / "current_best_scorer.py"
+        meta_path = tmp_path / "current_best_scorer.json"
+        scorer_path.write_text("WORKTREE = True\n", encoding="utf-8")
+        best_path.write_text("BEST = True\n", encoding="utf-8")
+        meta_path.write_text(json.dumps({"ground_truth_id": "gt-current"}), encoding="utf-8")
+
+        monkeypatch.setattr(agent, "SCORER_PATH", scorer_path)
+        monkeypatch.setattr(agent, "BEST_SCORER_PATH", best_path)
+        monkeypatch.setattr(agent, "BEST_SCORER_META_PATH", meta_path)
+
+        meta, code, from_snapshot = agent._load_resume_baseline("gt-current")
+
+        assert from_snapshot is True
+        assert meta == {"ground_truth_id": "gt-current"}
+        assert code == "BEST = True\n"
+        assert scorer_path.read_text(encoding="utf-8") == "WORKTREE = True\n"
+
     def test_historical_snapshot_guard_only_saves_true_bests(self) -> None:
         from valueinvestor.scorer_improver.agent import _is_better_historical_snapshot
 
         best = {"1m": 0.11, "3m": 0.12, "6m": 0.13}
 
         assert _is_better_historical_snapshot(
+            {"1m": 0.1102, "3m": 0.119, "6m": 0.129},
+            best,
+        )
+        assert not _is_better_historical_snapshot(
             {"1m": 0.11001, "3m": 0.119, "6m": 0.129},
             best,
         )
@@ -424,7 +624,7 @@ class TestAgentHelpers:
         assert code == "def score():\n    return 4\n"
         assert "return 4" in diff_summary
 
-    def test_extract_proposal_code_falls_back_to_full_file(self) -> None:
+    def test_extract_proposal_code_rejects_full_file_fallback(self) -> None:
         from valueinvestor.scorer_improver.agent import _extract_proposal_code
 
         old = "def score():\n    return 1\n"
@@ -433,9 +633,9 @@ class TestAgentHelpers:
 
         code, explanation, diff_summary = _extract_proposal_code(response, old)
 
-        assert code == new.strip()
+        assert code is None
         assert "fallback" in explanation.lower()
-        assert "return 3" in diff_summary
+        assert diff_summary == ""
 
     def test_extract_explanation(self) -> None:
         from valueinvestor.scorer_improver.agent import _extract_explanation
@@ -579,6 +779,164 @@ class TestAgentHelpers:
 
         assert [r["iteration"] for r in _records_for_prompt(records, 10)] == [2]
 
+    def test_failure_guidance_summarizes_quick_reject_patterns(self) -> None:
+        from valueinvestor.scorer_improver.agent import _compute_failure_guidance
+
+        records = [
+            {
+                "kept": False,
+                "quick_reject_reason": "1m-only tradeoff",
+                "quick_material_improved_horizons": ["1m"],
+                "quick_material_degraded_horizons": ["3m", "6m"],
+            },
+            {
+                "kept": False,
+                "quick_reject_reason": "1m-only tradeoff",
+                "quick_material_improved_horizons": ["1m"],
+                "quick_material_degraded_horizons": ["6m"],
+            },
+        ]
+
+        guidance = _compute_failure_guidance(records)
+
+        assert "1m-only tradeoff" in guidance
+        assert "1m upside paired with 3m/6m damage" in guidance
+
+    def test_near_miss_guidance_targets_1m_repair(self) -> None:
+        from valueinvestor.scorer_improver.agent import _near_miss_guidance
+
+        records = [
+            {
+                "iteration": 13743,
+                "kept": False,
+                "near_miss": True,
+                "current_material_improved_horizons": ["3m", "6m"],
+                "current_material_degraded_horizons": ["1m"],
+                "current_delta_1m": -0.001176,
+                "current_delta_3m": 0.000453,
+                "current_delta_6m": 0.000106,
+                "diff_summary": "PB best threshold 20.0 -> 22.0",
+            },
+        ]
+
+        guidance = _near_miss_guidance(records)
+
+        assert "Near-miss repair objective" in guidance
+        assert "repairing 1m damage" in guidance
+        assert "#13743" in guidance
+        assert "Δ3m=+0.0005" in guidance
+
+    def test_failure_guidance_promotes_blocked_themes_to_hard_exclusions(self) -> None:
+        from valueinvestor.scorer_improver.agent import _blocked_failure_themes, _compute_failure_guidance
+
+        records = [
+            {
+                "kept": False,
+                "description": "Added FCF/TA value sub-factor",
+                "diff_summary": "fcf / total_assets",
+                "delta_1m": -0.01,
+                "delta_3m": -0.01,
+                "delta": -0.01,
+            },
+            {
+                "kept": False,
+                "description": "Added free cash flow to total assets yield",
+                "diff_summary": "free cash flow to total assets",
+                "delta_1m": -0.01,
+                "delta_3m": -0.01,
+                "delta": -0.01,
+            },
+            {
+                "kept": False,
+                "description": "Reward FCF/equity in value score",
+                "diff_summary": "fcf_equity_yield",
+                "delta_1m": -0.01,
+                "delta_3m": -0.01,
+                "delta": -0.01,
+            },
+        ]
+
+        assert _blocked_failure_themes(records) == ["fcf_assets_or_equity_retry"]
+        guidance = _compute_failure_guidance(records)
+        assert "Hard proposal exclusions" in guidance
+        assert "FCF/assets, FCF/equity, or FCF/debt retry variants" in guidance
+
+    def test_failure_guidance_uses_wider_blocked_theme_window(self) -> None:
+        from valueinvestor.scorer_improver.agent import _compute_failure_guidance
+
+        blocked_records = [
+            {
+                "kept": False,
+                "description": "Lowered the best threshold for forward P/E",
+                "diff_summary": "pe_forward best threshold",
+                "delta_1m": -0.01,
+                "delta_3m": -0.01,
+                "delta": -0.01,
+            },
+            {
+                "kept": False,
+                "description": "Raised the forward_pe_improve linear_score best threshold",
+                "diff_summary": "forward_pe_improve threshold",
+                "delta_1m": -0.01,
+                "delta_3m": -0.01,
+                "delta": -0.01,
+            },
+            {
+                "kept": False,
+                "description": "Adjusted forward-pe improvement threshold",
+                "diff_summary": "forward-pe improvement threshold",
+                "delta_1m": -0.01,
+                "delta_3m": -0.01,
+                "delta": -0.01,
+            },
+        ]
+
+        guidance = _compute_failure_guidance([], blocked_theme_records=blocked_records)
+
+        assert "Hard proposal exclusions" in guidance
+        assert "forward-PE value threshold" in guidance
+
+    def test_llm_complete_passes_request_timeout_when_supported(self) -> None:
+        from valueinvestor.scorer_improver.agent import _llm_complete
+
+        class FakeLLM:
+            def __init__(self) -> None:
+                self.timeout = None
+
+            def complete(self, system_prompt=None, user_prompt=None, max_tokens=None, timeout=None):
+                self.timeout = timeout
+                return "ok"
+
+        fake = FakeLLM()
+
+        assert _llm_complete(fake, "prompt", 10, request_timeout=2.5) == "ok"
+        assert fake.timeout == 2.5
+
+    def test_llm_complete_falls_back_for_test_doubles_without_timeout(self) -> None:
+        from valueinvestor.scorer_improver.agent import _llm_complete
+
+        class FakeLLM:
+            def complete(self, system_prompt=None, user_prompt=None, max_tokens=None):
+                return "ok"
+
+        assert _llm_complete(FakeLLM(), "prompt", 10, request_timeout=2.5) == "ok"
+
+    def test_llm_complete_empty_retry_stays_bounded(self) -> None:
+        from valueinvestor.scorer_improver import agent
+
+        class FakeLLM:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def complete(self, system_prompt=None, user_prompt=None, max_tokens=None, timeout=None):
+                self.calls.append(max_tokens)
+                return "" if len(self.calls) == 1 else "ok"
+
+        fake = FakeLLM()
+
+        assert agent._llm_complete(fake, "prompt", 6000) == "ok"
+        assert fake.calls == [6000, agent._MAX_REPAIR_TOKENS]
+
     def test_repeated_failed_theme_detects_pe_safe_repairs(self) -> None:
         from valueinvestor.scorer_improver.agent import _is_repeated_failed_theme
 
@@ -616,6 +974,353 @@ class TestAgentHelpers:
         )
 
         assert theme == "pe_safe_quality_raw_repair"
+
+    def test_repeated_failed_theme_detects_protected_value_removals(self) -> None:
+        from valueinvestor.scorer_improver.agent import _is_repeated_failed_theme
+
+        recent = [
+            {
+                "kept": False,
+                "description": "Removed price × market_cap from value score",
+                "diff_summary": "- PRICE_MARKET_CAP_WEIGHT",
+                "delta_1m": -0.01,
+                "delta_3m": -0.01,
+                "delta": -0.01,
+            },
+            {
+                "kept": False,
+                "description": "Drop price * market_cap because it overlaps",
+                "diff_summary": "- pmc = price * market_cap",
+                "delta_1m": -0.02,
+                "delta_3m": -0.01,
+                "delta": -0.01,
+            },
+            {
+                "kept": False,
+                "description": "Remove price_market_cap_weight sub-factor",
+                "diff_summary": "PRICE_MARKET_CAP_WEIGHT",
+                "delta_1m": -0.01,
+                "delta_3m": -0.01,
+                "delta": -0.01,
+            },
+        ]
+
+        theme = _is_repeated_failed_theme(
+            "- PRICE_MARKET_CAP_WEIGHT",
+            "Removed the price x market_cap sub-factor",
+            recent,
+        )
+
+        assert theme == "remove_price_market_cap_subfactor"
+
+    def test_repeated_failed_theme_detects_earnings_yield_zero_append_removal(self) -> None:
+        from valueinvestor.scorer_improver.agent import _is_repeated_failed_theme
+
+        recent = [
+            {
+                "kept": False,
+                "description": "Removed duplicate earnings yield zero append",
+                "diff_summary": "- weighted_scores.append((0.0, EARNINGS_YIELD_WEIGHT))",
+                "delta_1m": -0.02,
+                "delta_3m": -0.01,
+                "delta": -0.03,
+            },
+            {
+                "kept": False,
+                "description": "Delete redundant earnings_yield_weight zero branch",
+                "diff_summary": "- weighted_scores.append((0.0, EARNINGS_YIELD_WEIGHT))",
+                "delta_1m": -0.01,
+                "delta_3m": -0.01,
+                "delta": -0.01,
+            },
+            {
+                "kept": False,
+                "description": "Fix double earnings yield zero append",
+                "diff_summary": "EARNINGS_YIELD_WEIGHT duplicate",
+                "delta_1m": -0.01,
+                "delta_3m": -0.01,
+                "delta": -0.01,
+            },
+        ]
+
+        theme = _is_repeated_failed_theme(
+            "- weighted_scores.append((0.0, EARNINGS_YIELD_WEIGHT))",
+            "Remove duplicate earnings yield zero append",
+            recent,
+        )
+
+        assert theme == "remove_earnings_yield_zero_append"
+
+    def test_repeated_failed_theme_detects_fcf_assets_retries(self) -> None:
+        from valueinvestor.scorer_improver.agent import _is_repeated_failed_theme
+
+        recent = [
+            {
+                "kept": False,
+                "description": "Added FCF/TA value sub-factor",
+                "diff_summary": "FCF_TO_ASSETS_WEIGHT",
+                "delta_1m": -0.01,
+                "delta_3m": -0.01,
+                "delta": -0.01,
+            },
+            {
+                "kept": False,
+                "description": "Added free cash flow to total assets yield",
+                "diff_summary": "fcf / total_assets",
+                "delta_1m": -0.01,
+                "delta_3m": -0.01,
+                "delta": -0.01,
+            },
+            {
+                "kept": False,
+                "description": "Reward FCF/equity in value score",
+                "diff_summary": "fcf_equity_yield",
+                "delta_1m": -0.01,
+                "delta_3m": -0.01,
+                "delta": -0.01,
+            },
+        ]
+
+        theme = _is_repeated_failed_theme(
+            "fcf_ta = fcf / ta",
+            "Add a free cash flow to total assets value factor",
+            recent,
+        )
+
+        assert theme == "fcf_assets_or_equity_retry"
+
+    def test_repeated_failed_theme_detects_current_ratio_retries(self) -> None:
+        from valueinvestor.scorer_improver.agent import _is_repeated_failed_theme
+
+        recent = [
+            {
+                "kept": False,
+                "description": "Added current-ratio triangular bonus",
+                "diff_summary": "current_ratio",
+                "delta_1m": -0.01,
+                "delta_3m": -0.01,
+                "delta": -0.01,
+            },
+            {
+                "kept": False,
+                "description": "Large-cap gated current ratio factor",
+                "diff_summary": "CURRENT_RATIO_WEIGHT",
+                "delta_1m": -0.01,
+                "delta_3m": -0.01,
+                "delta": -0.01,
+            },
+            {
+                "kept": False,
+                "description": "Quality raw current ratio gate",
+                "diff_summary": "cr = result.financials.current_ratio",
+                "delta_1m": -0.01,
+                "delta_3m": -0.01,
+                "delta": -0.01,
+            },
+        ]
+
+        theme = _is_repeated_failed_theme(
+            "current_ratio = result.financials.current_ratio",
+            "Add a current ratio bonus",
+            recent,
+        )
+
+        assert theme == "current_ratio_retry"
+
+    def test_behavior_neutral_detects_tiny_full_eval_deltas(self) -> None:
+        from valueinvestor.scorer_improver.agent import _is_behavior_neutral
+
+        baseline = {"1m": 0.10, "3m": 0.20, "6m": 0.30}
+
+        assert _is_behavior_neutral({"1m": 0.10002, "3m": 0.19998, "6m": 0.30001}, baseline)
+        assert not _is_behavior_neutral({"1m": 0.1002, "3m": 0.20, "6m": 0.30}, baseline)
+
+    def test_agent_prompt_describes_current_pareto_acceptance_gate(self) -> None:
+        from valueinvestor.scorer_improver.agent import _AGENT_SYSTEM_PROMPT, _build_prompt
+
+        assert "ANY of the three horizons" not in _AGENT_SYSTEM_PROMPT
+        assert "clears the configured material" in _AGENT_SYSTEM_PROMPT
+        assert "avoiding material degradation" in _AGENT_SYSTEM_PROMPT
+        assert "complete replacement file" in _AGENT_SYSTEM_PROMPT
+
+        prompt = _build_prompt(
+            scorer_code="class MultiFactorScorer:\n    pass\n",
+            program_md="Status:\n{current_status}\n\nHistory:\n{experiment_history}\n",
+            experiment_history="No history",
+            baseline_rhos={"1m": 0.10, "3m": 0.20, "6m": 0.30},
+            best_rhos={"1m": 0.10, "3m": 0.20, "6m": 0.30},
+        )
+
+        assert "Acceptance gate: improve at least one horizon by more than 0.0001" in prompt
+        assert "Do not output markdown-only commentary" in prompt
+        assert "full replacement file" in prompt
+        assert "```python fence" in prompt
+
+    def test_default_weight_guard_accepts_full_six_factor_weights(self) -> None:
+        from valueinvestor.scorer_improver.agent import _default_weight_issues
+
+        code = """
+_DEFAULT_WEIGHTS = {
+    "value": 0.40,
+    "quality": 0.20,
+    "growth": 0.10,
+    "momentum": 0.10,
+    "synergy": 0.10,
+    "value_growth": 0.10,
+}
+"""
+
+        assert _default_weight_issues(code) == []
+
+    def test_default_weight_guard_rejects_partial_weights(self) -> None:
+        from valueinvestor.scorer_improver.agent import _default_weight_issues
+
+        code = """
+_DEFAULT_WEIGHTS = {
+    "value": 0.70,
+    "quality": 0.20,
+    "growth": 0.10,
+}
+"""
+
+        issues = _default_weight_issues(code)
+
+        assert any("momentum" in issue for issue in issues)
+        assert any("synergy" in issue for issue in issues)
+
+    def test_quick_reject_diagnostics_rejects_1m_only_tradeoff(self) -> None:
+        from valueinvestor.scorer_improver.agent import _quick_reject_diagnostics
+
+        quick_baseline = {"1m": 0.1350, "3m": 0.1410, "6m": 0.1690}
+        candidate = {"1m": 0.1370, "3m": 0.1370, "6m": 0.1660}
+
+        diagnostics = _quick_reject_diagnostics(candidate, quick_baseline)
+
+        assert diagnostics["reject"] is True
+        assert diagnostics["reason"] == "1m-only tradeoff"
+        assert diagnostics["material_improved_horizons"] == ["1m"]
+        assert diagnostics["material_degraded_horizons"] == ["3m", "6m"]
+
+    def test_quick_reject_diagnostics_keeps_multi_horizon_upside(self) -> None:
+        from valueinvestor.scorer_improver.agent import _quick_reject_diagnostics
+
+        quick_baseline = {"1m": 0.1350, "3m": 0.1410, "6m": 0.1690}
+        candidate = {"1m": 0.1352, "3m": 0.1418, "6m": 0.1701}
+
+        diagnostics = _quick_reject_diagnostics(candidate, quick_baseline)
+
+        assert diagnostics["reject"] is False
+        assert diagnostics["material_improved_horizons"] == ["3m", "6m"]
+
+    def test_quick_reject_diagnostics_rejects_severe_1m_tradeoff(self) -> None:
+        from valueinvestor.scorer_improver.agent import _quick_reject_diagnostics
+
+        quick_baseline = {"1m": 0.1368, "3m": 0.1436, "6m": 0.1724}
+        candidate = {"1m": 0.1345, "3m": 0.1458, "6m": 0.1721}
+
+        diagnostics = _quick_reject_diagnostics(candidate, quick_baseline)
+
+        assert diagnostics["reject"] is True
+        assert diagnostics["reason"] == "1m tradeoff"
+        assert diagnostics["material_improved_horizons"] == ["3m"]
+        assert "1m" in diagnostics["severe_degraded_horizons"]
+
+    def test_quick_reject_diagnostics_tolerates_sample_noise(self) -> None:
+        from valueinvestor.scorer_improver.agent import _quick_reject_diagnostics
+
+        quick_baseline = {"1m": 0.1350, "3m": 0.1410, "6m": 0.1690}
+        candidate = {"1m": 0.1351, "3m": 0.1407, "6m": 0.1688}
+
+        diagnostics = _quick_reject_diagnostics(candidate, quick_baseline)
+
+        assert diagnostics["reject"] is False
+        assert diagnostics["material_improved_horizons"] == []
+        assert diagnostics["material_degraded_horizons"] == []
+
+    def test_quick_reject_diagnostics_rejects_no_sample_upside(self) -> None:
+        from valueinvestor.scorer_improver.agent import _quick_reject_diagnostics
+
+        quick_baseline = {"1m": 0.1368, "3m": 0.1436, "6m": 0.1724}
+        candidate = {"1m": 0.1364, "3m": 0.1434, "6m": 0.1723}
+
+        diagnostics = _quick_reject_diagnostics(candidate, quick_baseline)
+
+        assert diagnostics["reject"] is True
+        assert diagnostics["reason"] == "no sample upside"
+        assert diagnostics["no_sample_upside"] is True
+        assert diagnostics["material_improved_horizons"] == []
+
+    def test_quick_reject_diagnostics_rejects_sample_noop(self) -> None:
+        from valueinvestor.scorer_improver.agent import _quick_reject_diagnostics
+
+        quick_baseline = {"1m": 0.1350, "3m": 0.1410, "6m": 0.1690}
+        candidate = {"1m": 0.1350, "3m": 0.1410, "6m": 0.1690}
+
+        diagnostics = _quick_reject_diagnostics(candidate, quick_baseline)
+
+        assert diagnostics["reject"] is True
+        assert diagnostics["reason"] == "behavior-neutral sample"
+        assert diagnostics["noop_sample"] is True
+
+    def test_acceptance_diagnostics_explains_target_tradeoff(self) -> None:
+        from valueinvestor.scorer_improver.agent import _acceptance_diagnostics
+
+        current = {"1m": 0.1315, "3m": 0.1355, "6m": 0.1663}
+        target = {"1m": 0.1347, "3m": 0.1355, "6m": 0.1663}
+        candidate = {"1m": 0.1307, "3m": 0.1360, "6m": 0.1665}
+
+        diagnostics = _acceptance_diagnostics(candidate, current, target)
+
+        assert diagnostics["accepted_horizons"] == []
+        assert diagnostics["current_improved_horizons"] == ["3m", "6m"]
+        assert diagnostics["target_improved_horizons"] == ["3m", "6m"]
+        assert diagnostics["reject_reason"] == "target utility tradeoff"
+        assert diagnostics["near_miss"] is True
+
+    def test_acceptance_diagnostics_accepts_current_pareto_despite_historical_target(self) -> None:
+        from valueinvestor.scorer_improver.agent import _acceptance_diagnostics
+
+        current = {"1m": 0.130593, "3m": 0.139496, "6m": 0.170561}
+        target = {"1m": 0.134683, "3m": 0.139496, "6m": 0.170561}
+        candidate = {"1m": 0.131434, "3m": 0.139771, "6m": 0.170960}
+
+        diagnostics = _acceptance_diagnostics(candidate, current, target)
+
+        assert diagnostics["accepted_horizons"] == ["1m", "3m", "6m"]
+        assert diagnostics["accepted_by"] == "current_material_pareto"
+        assert diagnostics["historical_reject_reason"] == "target utility tradeoff"
+        assert diagnostics["reject_reason"] == ""
+        assert diagnostics["near_miss"] is False
+
+    def test_acceptance_diagnostics_accepts_material_improvement_with_neutral_dip(self) -> None:
+        from valueinvestor.scorer_improver.agent import _acceptance_diagnostics
+
+        current = {"1m": 0.130593, "3m": 0.139496, "6m": 0.170561}
+        target = {"1m": 0.134683, "3m": 0.139496, "6m": 0.170561}
+        candidate = {"1m": 0.130790, "3m": 0.139946, "6m": 0.170533}
+
+        diagnostics = _acceptance_diagnostics(candidate, current, target)
+
+        assert diagnostics["accepted_horizons"] == ["1m", "3m"]
+        assert diagnostics["accepted_by"] == "current_material_pareto"
+        assert diagnostics["current_degraded_horizons"] == ["6m"]
+        assert diagnostics["current_material_degraded_horizons"] == []
+        assert diagnostics["historical_reject_reason"] == "target utility tradeoff"
+        assert diagnostics["reject_reason"] == ""
+        assert diagnostics["near_miss"] is False
+
+    def test_acceptance_diagnostics_rejects_tiny_noise_gain(self) -> None:
+        from valueinvestor.scorer_improver.agent import _acceptance_diagnostics
+
+        current = {"1m": 0.133937, "3m": 0.143385, "6m": 0.174097}
+        target = dict(current)
+        candidate = {"1m": 0.133918, "3m": 0.143421, "6m": 0.174177}
+
+        diagnostics = _acceptance_diagnostics(candidate, current, target)
+
+        assert diagnostics["accepted_horizons"] == []
+        assert diagnostics["current_material_improved_horizons"] == []
+        assert diagnostics["near_miss"] is True
 
     def test_complete_proposal_saves_invalid_debug_artifact(self, tmp_path, monkeypatch) -> None:
         from valueinvestor.scorer_improver import agent
@@ -707,6 +1412,20 @@ class TestAgentHelpers:
         candidate = {"1m": 0.100, "3m": 0.101, "6m": 0.103}
         assert _accepted_horizons(candidate, baseline) == ["3m", "6m"]
 
+    def test_accept_policy_tolerates_behavior_neutral_dip(self) -> None:
+        from valueinvestor.scorer_improver.agent import _accepted_horizons
+
+        baseline = {"1m": 0.10, "3m": 0.10, "6m": 0.10}
+        candidate = {"1m": 0.1002, "3m": 0.09997, "6m": 0.10}
+        assert _accepted_horizons(candidate, baseline) == ["1m"]
+
+    def test_accept_policy_rejects_only_behavior_neutral_movement(self) -> None:
+        from valueinvestor.scorer_improver.agent import _accepted_horizons
+
+        baseline = {"1m": 0.10, "3m": 0.10, "6m": 0.10}
+        candidate = {"1m": 0.10002, "3m": 0.10001, "6m": 0.09999}
+        assert _accepted_horizons(candidate, baseline) == []
+
 
 # ── Evaluator tests (with mocked ground truth) ──────────────────────────────
 
@@ -794,11 +1513,18 @@ class TestEvaluator:
                 result.composite_score = 42.0
                 return result
 
+            def rank(self, results):
+                seen["rank_called"] = True
+                for result in results:
+                    self.score(result)
+                return results
+
         with patch.object(evaluator.importlib, "reload", side_effect=lambda mod: mod):
             with patch("valueinvestor.screener.scorer.MultiFactorScorer", return_value=RecordingScorer()):
                 evaluator.evaluate_scorer(use_original_scores=False)
 
         assert seen["valuation"].ps_ratio is not None
+        assert seen["rank_called"] is True
         assert seen["valuation"].peg_ratio is not None
         assert seen["valuation"].dividend_yield is not None
         assert seen["financials"].revenue is not None
@@ -821,6 +1547,102 @@ class TestEvaluator:
         assert len(sampled) == 30
         assert set(counts) == {10}
         assert len(counts) == 3
+
+    def test_evaluation_context_reuses_loaded_frame_and_quick_sample(self, monkeypatch) -> None:
+        from valueinvestor.scorer_improver import evaluator
+        from valueinvestor.scorer_improver.evaluator import ScorerEvaluationContext
+
+        gt = self._make_gt()
+        load_calls = []
+        sample_calls = []
+
+        def fake_load(path=None, *, allow_legacy_schema=True):
+            load_calls.append((path, allow_legacy_schema))
+            return gt
+
+        def fake_sample(frame, sample_size):
+            sample_calls.append(sample_size)
+            return frame.head(12)
+
+        monkeypatch.setattr(evaluator, "_load_ground_truth", fake_load)
+        monkeypatch.setattr(evaluator, "_sample_by_snapshot", fake_sample)
+        monkeypatch.setattr(
+            evaluator,
+            "_evaluate_scorer_all_targets_frame",
+            lambda frame, *, scorer_module, scorer_path=None, snapshot_templates=None: {
+                "1m": {"spearman_rho": 0.1},
+                "3m": {"spearman_rho": 0.2},
+                "6m": {"spearman_rho": 0.3},
+            },
+        )
+        monkeypatch.setattr(
+            evaluator,
+            "_quick_evaluate_frame",
+            lambda frame, *, scorer_module, scorer_path=None, snapshot_templates=None: {
+                "1m": 0.1,
+                "3m": 0.2,
+                "6m": 0.3,
+            },
+        )
+
+        context = ScorerEvaluationContext(quick_sample_size=12)
+        context.evaluate_all_targets()
+        context.evaluate_all_targets()
+        context.quick_evaluate(sample_size=12)
+        context.quick_evaluate(sample_size=12)
+
+        assert len(load_calls) == 1
+        assert sample_calls == [12]
+
+    def test_evaluation_context_builds_snapshot_templates_once_per_cached_frame(self, monkeypatch) -> None:
+        from valueinvestor.scorer_improver import evaluator
+        from valueinvestor.scorer_improver.evaluator import ScorerEvaluationContext
+
+        gt = pd.DataFrame({
+            "ticker": ["AAA", "BBB", "AAA", "BBB"],
+            "snapshot_date": ["2024-01-01", "2024-01-01", "2024-02-01", "2024-02-01"],
+            "close": [10.0, 11.0, 12.0, 13.0],
+        })
+        template_calls = []
+
+        monkeypatch.setattr(
+            evaluator,
+            "_load_ground_truth",
+            lambda path=None, *, allow_legacy_schema=True: gt,
+        )
+        monkeypatch.setattr(
+            evaluator,
+            "_sample_by_snapshot",
+            lambda frame, sample_size: frame.head(2),
+        )
+
+        def fake_build(frame):
+            template_calls.append(tuple(frame.index))
+            return []
+
+        monkeypatch.setattr(evaluator, "_build_snapshot_templates", fake_build)
+        monkeypatch.setattr(
+            evaluator,
+            "_evaluate_scorer_all_targets_frame",
+            lambda frame, **kwargs: {
+                "1m": {"spearman_rho": 0.1},
+                "3m": {"spearman_rho": 0.2},
+                "6m": {"spearman_rho": 0.3},
+            },
+        )
+        monkeypatch.setattr(
+            evaluator,
+            "_quick_evaluate_frame",
+            lambda frame, **kwargs: {"1m": 0.1, "3m": 0.2, "6m": 0.3},
+        )
+
+        context = ScorerEvaluationContext(quick_sample_size=2)
+        context.evaluate_all_targets()
+        context.evaluate_all_targets()
+        context.quick_evaluate(sample_size=2)
+        context.quick_evaluate(sample_size=2)
+
+        assert template_calls == [(0, 1, 2, 3), (0, 1)]
 
 
 # ── Ground truth helper tests ───────────────────────────────────────────────

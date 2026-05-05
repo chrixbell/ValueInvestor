@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from valueinvestor.config import AppConfig, load_config
@@ -102,6 +104,33 @@ def test_llm_client_normalizes_deepseek_model_alias():
     client = LLMClient(config=cfg.llm)
     assert client.model == "deepseek-v4-flash"
     assert client._client.base_url == "https://api.deepseek.com/v1/"
+
+
+def test_llm_client_passes_per_request_timeout(monkeypatch):
+    created = {}
+
+    class FakeOpenAI:
+        def __init__(self, *, api_key, base_url=None, max_retries=0):
+            self.kwargs = None
+            self.chat = SimpleNamespace(
+                completions=SimpleNamespace(create=self._create)
+            )
+            created["client"] = self
+
+        def _create(self, **kwargs):
+            self.kwargs = kwargs
+            return SimpleNamespace(
+                usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+                choices=[SimpleNamespace(message=SimpleNamespace(content="done"))],
+            )
+
+    monkeypatch.setattr("valueinvestor.analysis.llm_client.OpenAI", FakeOpenAI)
+    cfg = AppConfig()
+    cfg.llm.api_key = "test_key"
+
+    client = LLMClient(config=cfg.llm)
+    assert client.complete("system", "user", timeout=3.5) == "done"
+    assert created["client"].kwargs["timeout"] == 3.5
 
 
 def test_llm_client_auth_error_message():

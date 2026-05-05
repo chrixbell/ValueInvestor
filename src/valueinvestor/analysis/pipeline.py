@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from valueinvestor.analysis.llm_client import LLMClient
 from valueinvestor.analysis.prompts import DIMENSION_PROMPTS, SYSTEM_PROMPT
@@ -21,6 +22,17 @@ from valueinvestor.data.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _analysis_timeout_seconds() -> Optional[float]:
+    """Return per-dimension LLM analysis timeout, or None when disabled."""
+    raw = os.environ.get("VALUEINVESTOR_ANALYSIS_TIMEOUT_SECONDS", "90").strip()
+    try:
+        timeout = float(raw)
+    except ValueError:
+        logger.warning("Invalid VALUEINVESTOR_ANALYSIS_TIMEOUT_SECONDS=%r; using 90s", raw)
+        timeout = 90.0
+    return timeout if timeout > 0 else None
 
 
 def _coerce_to_str(value) -> str:
@@ -49,6 +61,9 @@ def _screening_to_data(result: ScreeningResult) -> dict:
             "value_score": result.value_score,
             "quality_score": result.quality_score,
             "growth_score": result.growth_score,
+            "momentum_score": result.momentum_score,
+            "synergy_score": result.synergy_score,
+            "value_growth_score": result.value_growth_score,
         },
     }
 
@@ -61,10 +76,51 @@ class AnalysisPipeline:
         llm: LLMClient,
         cache: DataCache,
         config: AppConfig,
+        progress_callback: Optional[Callable[[str, str, str], None]] = None,
     ) -> None:
         self.llm = llm
         self.cache = cache
         self.config = config
+        self.progress_callback = progress_callback
+
+    def _emit_progress(self, ticker: str, company_name: str, status: str) -> None:
+        if self.progress_callback is None:
+            return
+        try:
+            self.progress_callback(ticker, company_name, status)
+        except Exception:
+            logger.debug("Analysis progress callback failed", exc_info=True)
+
+    def cached_analysis_for_result(
+        self,
+        screening_result: ScreeningResult,
+        *,
+        allow_expired: bool = False,
+    ) -> Optional[CompanyAnalysis]:
+        """Return cached analysis text with the latest screening result attached."""
+        cached = self.cache.get_analysis(
+            screening_result.company.ticker,
+            allow_expired=allow_expired,
+        )
+        if cached is None:
+            return None
+        return self._refresh_cached_analysis(cached, screening_result)
+
+    def _refresh_cached_analysis(
+        self,
+        cached: CompanyAnalysis,
+        screening_result: ScreeningResult,
+    ) -> CompanyAnalysis:
+        """Keep cached LLM text but replace stale score/rank data."""
+        refreshed = cached.model_copy(
+            update={
+                "company_name": screening_result.company.name,
+                "screening_result": screening_result,
+            }
+        )
+        if self.config.cache.enabled:
+            self.cache.set_analysis(refreshed)
+        return refreshed
 
     # ------------------------------------------------------------------
     # Single-company analysis
@@ -83,9 +139,11 @@ class AnalysisPipeline:
             cached = self.cache.get_analysis(ticker)
             if cached is not None:
                 logger.info("Using cached analysis for %s (%s)", ticker, company_name)
-                return cached
+                self._emit_progress(ticker, company_name, "cache hit")
+                return self._refresh_cached_analysis(cached, screening_result)
 
         logger.info("Starting LLM analysis for %s (%s)", ticker, company_name)
+        self._emit_progress(ticker, company_name, "analysis started")
         company_data = _screening_to_data(screening_result)
 
         dimensions: List[AnalysisDimension] = []
@@ -93,14 +151,17 @@ class AnalysisPipeline:
         key_milestones: Optional[List[str]] = None
 
         try:
+            request_timeout = _analysis_timeout_seconds()
             for dim_name, prompt_fn in DIMENSION_PROMPTS.items():
                 logger.info("  → dimension: %s", dim_name)
+                self._emit_progress(ticker, company_name, f"{dim_name} started")
                 user_prompt = prompt_fn(company_data)
 
                 raw = self.llm.complete(
                     system_prompt=SYSTEM_PROMPT,
                     user_prompt=user_prompt,
                     response_format="json",
+                    timeout=request_timeout,
                 )
 
                 try:
@@ -132,7 +193,9 @@ class AnalysisPipeline:
                 if dim_name == "recommendation":
                     portfolio_weight = parsed.get("portfolio_weight")
                     key_milestones = parsed.get("milestones")
+                self._emit_progress(ticker, company_name, f"{dim_name} finished")
         except LLMError as exc:
+            self._emit_progress(ticker, company_name, "analysis failed")
             raise AnalysisError(
                 f"LLM analysis failed for {ticker} ({company_name})"
             ) from exc
@@ -152,6 +215,7 @@ class AnalysisPipeline:
             self.cache.set_analysis(analysis)
             logger.info("Cached analysis for %s", ticker)
 
+        self._emit_progress(ticker, company_name, "analysis finished")
         return analysis
 
     # ------------------------------------------------------------------

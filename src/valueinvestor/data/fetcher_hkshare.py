@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import logging
 from datetime import date
-from typing import List, Optional
+from typing import Iterator, List, Optional
 
 import pandas as pd
 import yfinance as yf
@@ -48,19 +49,64 @@ def _safe_get(mapping: dict, key: str, default=None):
     return val
 
 
+@contextmanager
+def _quiet_yfinance_errors() -> Iterator[None]:
+    """Suppress noisy yfinance provider errors; callers log concise outcomes."""
+    yf_logger = logging.getLogger("yfinance")
+    previous_level = yf_logger.level
+    yf_logger.setLevel(logging.CRITICAL)
+    try:
+        yield
+    finally:
+        yf_logger.setLevel(previous_level)
+
+
 def _to_yf_ticker(code: str) -> str:
     """Ensure a ticker string ends with ``.HK``.
 
     Accepts ``"0700"``, ``"0700.HK"``, or ``"00700"`` and normalises to
     yfinance HK format.
     """
-    code = code.strip()
-    if code.upper().endswith(".HK"):
-        return code.upper()
+    code = code.strip().upper()
+    if code.endswith(".HK"):
+        code = code[:-3]
     # Strip any leading zeros beyond 4 digits (akshare sometimes returns 5-digit codes)
     digits = code.lstrip("0") or "0"
     digits = digits.zfill(4)
     return f"{digits}.HK"
+
+
+def _is_primary_hk_yf_ticker(ticker: str) -> bool:
+    """Return true for primary four-digit HK tickers supported by yfinance."""
+    code = ticker.strip().upper()
+    if code.endswith(".HK"):
+        code = code[:-3]
+    if not code.isdigit():
+        return False
+    digits = code.lstrip("0") or "0"
+    return len(digits) <= 4 and int(digits) > 0
+
+
+def _empty_valuation(ticker: str) -> ValuationMetrics:
+    """Build an explicit negative-cache valuation for unsupported/missing quotes."""
+    return ValuationMetrics(ticker=ticker, date=str(date.today()))
+
+
+def _has_any_valuation_data(valuation: ValuationMetrics) -> bool:
+    return any(
+        value is not None
+        for value in (
+            valuation.price,
+            valuation.pe_ratio,
+            valuation.pe_forward,
+            valuation.pb_ratio,
+            valuation.ps_ratio,
+            valuation.peg_ratio,
+            valuation.dividend_yield,
+            valuation.ev_to_ebitda,
+            valuation.market_cap_rmb,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +115,17 @@ def _to_yf_ticker(code: str) -> str:
 
 class HKShareFetcher:
     """Fetch Hong Kong-listed stock data using *yfinance* (and optionally *akshare*)."""
+
+    def filter_supported_companies(self, companies: List[Company]) -> List[Company]:
+        """Drop HK instruments that are not primary four-digit yfinance quotes."""
+        filtered = [c for c in companies if _is_primary_hk_yf_ticker(c.ticker)]
+        excluded = len(companies) - len(filtered)
+        if excluded:
+            logger.info(
+                "Excluded %d non-primary HK instruments from stock universe",
+                excluded,
+            )
+        return filtered
 
     # -----------------------------------------------------------------
     # Stock list
@@ -111,8 +168,9 @@ class HKShareFetcher:
     def _get_hk_stock_name(self, ticker: str) -> str:
         """Fetch company name for HK ticker from yfinance. Falls back to ticker if unavailable."""
         try:
-            stock = yf.Ticker(ticker)
-            info = stock.info if hasattr(stock, 'info') else {}
+            with _quiet_yfinance_errors():
+                stock = yf.Ticker(ticker)
+                info = stock.info if hasattr(stock, 'info') else {}
             name = info.get('shortName') or info.get('longName') or ticker
             return str(name).strip() if name else ticker
         except Exception:
@@ -148,7 +206,8 @@ class HKShareFetcher:
                     )
                 )
 
-            logger.info("Fetched %d HK companies via akshare", len(companies))
+            companies = self.filter_supported_companies(companies)
+            logger.info("Fetched %d supported HK companies via akshare", len(companies))
             return companies
 
         except Exception as exc:
@@ -170,11 +229,15 @@ class HKShareFetcher:
             or ``None`` if data is unavailable.
         """
         ticker = _to_yf_ticker(ticker)
+        if not _is_primary_hk_yf_ticker(ticker):
+            logger.info("Skipping unsupported HK instrument %s", ticker)
+            return None
         try:
-            yf_ticker = yf.Ticker(ticker)
-            income_stmt = yf_ticker.financials
-            balance = yf_ticker.balance_sheet
-            cashflow = yf_ticker.cashflow
+            with _quiet_yfinance_errors():
+                yf_ticker = yf.Ticker(ticker)
+                income_stmt = yf_ticker.financials
+                balance = yf_ticker.balance_sheet
+                cashflow = yf_ticker.cashflow
 
             if income_stmt is None or income_stmt.empty:
                 logger.warning("No income-statement data for %s", ticker)
@@ -262,11 +325,15 @@ class HKShareFetcher:
             A :class:`ValuationMetrics` instance, or ``None`` on failure.
         """
         ticker = _to_yf_ticker(ticker)
+        if not _is_primary_hk_yf_ticker(ticker):
+            logger.info("Skipping unsupported HK instrument %s", ticker)
+            return None
         try:
-            info: dict = yf.Ticker(ticker).info
+            with _quiet_yfinance_errors():
+                info: dict = yf.Ticker(ticker).info
             if not info:
                 logger.warning("Empty info dict for %s", ticker)
-                return None
+                return _empty_valuation(ticker)
 
             market_cap_hkd = _safe_get(info, "marketCap")
             market_cap_rmb = (
@@ -286,11 +353,14 @@ class HKShareFetcher:
                 ev_to_ebitda=_safe_get(info, "enterpriseToEbitda"),
                 market_cap_rmb=market_cap_rmb,
             )
+            if not _has_any_valuation_data(valuation):
+                logger.info("No usable Yahoo valuation data for %s", ticker)
+                return _empty_valuation(ticker)
             logger.debug("Fetched valuation for %s", ticker)
             return valuation
 
         except Exception as exc:
-            logger.error("Error fetching valuation for %s: %s", ticker, exc)
+            logger.debug("Error fetching valuation for %s: %s", ticker, exc)
             return None
 
     # -----------------------------------------------------------------
@@ -308,8 +378,12 @@ class HKShareFetcher:
             or ``None`` on failure.
         """
         ticker = _to_yf_ticker(ticker)
+        if not _is_primary_hk_yf_ticker(ticker):
+            logger.info("Skipping unsupported HK instrument %s", ticker)
+            return None
         try:
-            info: dict = yf.Ticker(ticker).info
+            with _quiet_yfinance_errors():
+                info: dict = yf.Ticker(ticker).info
             if not info:
                 logger.warning("Empty info dict for %s", ticker)
                 return None

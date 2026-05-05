@@ -12,9 +12,14 @@ Commands
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import json
 import logging
+import os
+import threading
+import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Iterator, Optional
 
 import typer
 from rich.console import Console
@@ -79,6 +84,118 @@ def _pct(value: Optional[float], fallback: str = "—") -> str:
     return f"{value * 100:.1f}%"
 
 
+def _scan_progress_interval_seconds() -> float:
+    """Return seconds between durable scan heartbeat lines; 0 disables them."""
+    raw = os.environ.get("VALUEINVESTOR_SCAN_PROGRESS_INTERVAL_SECONDS", "15").strip()
+    try:
+        interval = float(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid VALUEINVESTOR_SCAN_PROGRESS_INTERVAL_SECONDS=%r; using 15s",
+            raw,
+        )
+        return 15.0
+    return max(0.0, interval)
+
+
+@contextmanager
+def _scan_heartbeat(
+    label: str,
+    *,
+    interval_seconds: Optional[float] = None,
+) -> Iterator[Callable[[str], None]]:
+    """Emit periodic durable scan progress while a blocking operation runs."""
+    interval = (
+        _scan_progress_interval_seconds()
+        if interval_seconds is None
+        else max(0.0, interval_seconds)
+    )
+    started_at = time.monotonic()
+    current_label = label
+    label_lock = threading.Lock()
+    stop_event = threading.Event()
+
+    def update_label(next_label: str) -> None:
+        nonlocal current_label
+        with label_lock:
+            current_label = next_label
+
+    def read_label() -> str:
+        with label_lock:
+            return current_label
+
+    def run_heartbeat() -> None:
+        while not stop_event.wait(interval):
+            elapsed = time.monotonic() - started_at
+            console.print(
+                f"[dim]still running: {read_label()} ({elapsed:.0f}s elapsed)[/dim]"
+            )
+
+    thread: Optional[threading.Thread] = None
+    if interval > 0:
+        thread = threading.Thread(
+            target=run_heartbeat,
+            daemon=True,
+            name="scan-progress-heartbeat",
+        )
+        thread.start()
+
+    try:
+        yield update_label
+    finally:
+        stop_event.set()
+        if thread is not None:
+            thread.join(timeout=1)
+
+
+def _analysis_progress_callback(
+    prefix: str,
+    update_heartbeat: Callable[[str], None],
+) -> Callable[[str, str, str], None]:
+    def callback(ticker: str, company_name: str, status: str) -> None:
+        label = f"{prefix} {ticker} {company_name}: {status}"
+        update_heartbeat(label)
+        console.print(f"[dim]progress: {label}[/dim]")
+
+    return callback
+
+
+def _load_current_spearman_rhos() -> dict[str, float]:
+    """Read current scorer rho metadata without running scorer evaluation."""
+    meta_path = Path("data/trainer/current_best_scorer.json")
+    if not meta_path.exists():
+        return {}
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Could not read current scorer metadata from %s: %s", meta_path, exc)
+        return {}
+
+    rhos: dict[str, float] = {}
+    for horizon in ("1m", "3m", "6m"):
+        raw = meta.get(f"spearman_rho_{horizon}")
+        if raw is None:
+            continue
+        try:
+            rhos[horizon] = float(raw)
+        except (TypeError, ValueError):
+            logger.warning("Invalid %s rho in %s: %r", horizon, meta_path, raw)
+    return rhos
+
+
+def _screening_progress_callback(
+    prefix: str,
+    update_heartbeat: Callable[[str], None],
+) -> Callable[[str, bool], None]:
+    def callback(message: str, checkpoint: bool = True) -> None:
+        label = f"{prefix}: {message}"
+        update_heartbeat(label)
+        if checkpoint:
+            console.print(f"[dim]progress: {label}[/dim]")
+
+    return callback
+
+
 def _screening_table(results: list[ScreeningResult]) -> Table:
     """Build a Rich table from screening results."""
     table = Table(title="Screening Results", show_lines=False, expand=False)
@@ -104,18 +221,47 @@ def _screening_table(results: list[ScreeningResult]) -> Table:
     return table
 
 
+def _cached_analyses_for_results(
+    results: list[ScreeningResult],
+    cfg: AppConfig,
+    cache: DataCache,
+) -> list:
+    """Load cached LLM analyses and attach freshly screened score/rank data."""
+    from valueinvestor.analysis.pipeline import AnalysisPipeline
+
+    pipeline = AnalysisPipeline(llm=None, cache=cache, config=cfg)  # type: ignore[arg-type]
+    analyses = []
+    for sr in results:
+        analysis = pipeline.cached_analysis_for_result(sr, allow_expired=True)
+        if analysis is None:
+            err_console.print(
+                f"[yellow]Cached analysis missing for {sr.company.ticker}; skipping analysis text[/yellow]"
+            )
+            continue
+        analyses.append(analysis)
+    return analyses
+
+
 # ---------------------------------------------------------------------------
 # scan
 # ---------------------------------------------------------------------------
 
 
-def _run_multi_timeframe_scan(engine, cfg, cache, skip_analysis: bool) -> None:
+def _run_multi_timeframe_scan(
+    engine,
+    cfg,
+    cache,
+    skip_analysis: bool,
+    cached_analysis_only: bool = False,
+) -> None:
     """Run single-screen multi-timeframe pipeline and generate a Chinese report.
 
     Screens once using the same scoring algorithm for all horizons, then reports
     the current Spearman ρ for 1m/3m/6m forward returns alongside the results.
     """
     # ── Screen once ──────────────────────────────────────────────────
+    screening_started = time.monotonic()
+    console.print("[dim]progress: screening candidates started[/dim]")
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -124,10 +270,21 @@ def _run_multi_timeframe_scan(engine, cfg, cache, skip_analysis: bool) -> None:
     ) as progress:
         progress.add_task("Screening candidates…", total=None)
         try:
-            results = engine.run(top_n=cfg.screening.top_n)
+            with _scan_heartbeat("screening candidates") as update_heartbeat:
+                engine.progress_callback = _screening_progress_callback(
+                    "screening", update_heartbeat
+                )
+                try:
+                    results = engine.run(top_n=cfg.screening.top_n)
+                finally:
+                    engine.progress_callback = None
         except Exception as exc:
             err_console.print(f"[red]Screening failed:[/red] {exc}")
             raise typer.Exit(code=1) from exc
+    console.print(
+        f"[dim]progress: screening candidates finished "
+        f"({time.monotonic() - screening_started:.1f}s elapsed)[/dim]"
+    )
 
     if not results:
         console.print("[yellow]No candidates survived screening.[/yellow]")
@@ -141,6 +298,8 @@ def _run_multi_timeframe_scan(engine, cfg, cache, skip_analysis: bool) -> None:
     try:
         from valueinvestor.scorer_improver.evaluator import evaluate_scorer_all_targets
 
+        eval_started = time.monotonic()
+        console.print("[dim]progress: evaluating scorer rho started[/dim]")
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -148,7 +307,12 @@ def _run_multi_timeframe_scan(engine, cfg, cache, skip_analysis: bool) -> None:
             transient=True,
         ) as progress:
             progress.add_task("Evaluating ρ against ground truth…", total=None)
-            eval_results = evaluate_scorer_all_targets()
+            with _scan_heartbeat("evaluating scorer rho"):
+                eval_results = evaluate_scorer_all_targets()
+        console.print(
+            f"[dim]progress: evaluating scorer rho finished "
+            f"({time.monotonic() - eval_started:.1f}s elapsed)[/dim]"
+        )
         for h in ("1m", "3m", "6m"):
             spearman_rhos[h] = eval_results.get(h, {}).get("spearman_rho", None)
         console.print(
@@ -160,13 +324,17 @@ def _run_multi_timeframe_scan(engine, cfg, cache, skip_analysis: bool) -> None:
 
     # ── LLM analysis ─────────────────────────────────────────────────
     analyses = []
-    if not skip_analysis:
+    if cached_analysis_only:
+        analyses = _cached_analyses_for_results(results, cfg, cache)
+        console.print(
+            f"[green]✓[/green] Cached analyses refreshed — {len(analyses)}/{len(results)} matched"
+        )
+    elif not skip_analysis:
         try:
             from valueinvestor.analysis.llm_client import LLMClient
             from valueinvestor.analysis.pipeline import AnalysisPipeline
 
             llm = LLMClient(config=cfg.llm)
-            pipeline = AnalysisPipeline(llm=llm, cache=cache, config=cfg)
 
             with Progress(
                 SpinnerColumn(),
@@ -179,9 +347,26 @@ def _run_multi_timeframe_scan(engine, cfg, cache, skip_analysis: bool) -> None:
                 )
                 for idx, sr in enumerate(results, 1):
                     progress.update(task, description=f"Analyzing [{idx}/{len(results)}] {sr.company.ticker}…")
+                    prefix = f"analysis {idx}/{len(results)}"
+                    company_label = f"{prefix} {sr.company.ticker} {sr.company.name}"
+                    analysis_started = time.monotonic()
+                    console.print(f"[dim]progress: {company_label} started[/dim]")
                     try:
-                        analysis = pipeline.analyze_company(sr)
+                        with _scan_heartbeat(company_label) as update_heartbeat:
+                            pipeline = AnalysisPipeline(
+                                llm=llm,
+                                cache=cache,
+                                config=cfg,
+                                progress_callback=_analysis_progress_callback(
+                                    prefix, update_heartbeat
+                                ),
+                            )
+                            analysis = pipeline.analyze_company(sr)
                         analyses.append(analysis)
+                        console.print(
+                            f"[dim]progress: {company_label} finished "
+                            f"({time.monotonic() - analysis_started:.1f}s elapsed)[/dim]"
+                        )
                     except Exception:
                         err_console.print(f"[yellow]⚠ Analysis failed for {sr.company.ticker} — skipping[/yellow]")
                     progress.advance(task)
@@ -195,26 +380,40 @@ def _run_multi_timeframe_scan(engine, cfg, cache, skip_analysis: bool) -> None:
     from valueinvestor.analysis.pipeline import AnalysisPipeline as AP
     from valueinvestor.reports.md_generator import MultiTimeframeMarkdownReportGenerator
 
-    rpt_pipeline = AP(llm=None, cache=cache, config=cfg)  # type: ignore[arg-type]
-    report = rpt_pipeline.build_multi_timeframe_report(
-        results_by_horizon={"1m": results, "3m": results, "6m": results},
-        analyses=analyses,
-        config=cfg,
-        total_screened=engine.last_total_screened,
-        spearman_rhos=spearman_rhos,
-    )
+    report_started = time.monotonic()
+    console.print("[dim]progress: report generation started[/dim]")
+    with _scan_heartbeat("report generation"):
+        rpt_pipeline = AP(llm=None, cache=cache, config=cfg)  # type: ignore[arg-type]
+        report = rpt_pipeline.build_multi_timeframe_report(
+            results_by_horizon={"1m": results, "3m": results, "6m": results},
+            analyses=analyses,
+            config=cfg,
+            total_screened=engine.last_total_screened,
+            spearman_rhos=spearman_rhos,
+        )
 
-    md_gen = MultiTimeframeMarkdownReportGenerator()
-    md_path = md_gen.save(report, cfg.output.reports_dir)
+        md_gen = MultiTimeframeMarkdownReportGenerator()
+        md_path = md_gen.save(report, cfg.output.reports_dir)
+    console.print(
+        f"[dim]progress: report generation finished "
+        f"({time.monotonic() - report_started:.1f}s elapsed)[/dim]"
+    )
     console.print(f"\n[green]✓[/green] Report saved → {md_path}")
 
     if "pdf" in cfg.output.formats:
         try:
             from valueinvestor.reports.pdf_generator import PDFReportGenerator
 
-            pdf_gen = PDFReportGenerator()
-            pdf_path = pdf_gen.generate_from_multi_timeframe_report(
-                report, cfg.output.reports_dir
+            pdf_started = time.monotonic()
+            console.print("[dim]progress: PDF report generation started[/dim]")
+            with _scan_heartbeat("PDF report generation"):
+                pdf_gen = PDFReportGenerator()
+                pdf_path = pdf_gen.generate_from_multi_timeframe_report(
+                    report, cfg.output.reports_dir
+                )
+            console.print(
+                f"[dim]progress: PDF report generation finished "
+                f"({time.monotonic() - pdf_started:.1f}s elapsed)[/dim]"
             )
             console.print(f"[green]✓[/green] PDF saved → {pdf_path}")
         except Exception as exc:
@@ -228,6 +427,8 @@ def scan(
     skip_analysis: bool = typer.Option(False, "--skip-analysis", help="Skip LLM analysis step."),
     output_dir: Optional[str] = typer.Option(None, "--output-dir", "-o", help="Report output dir."),
     multi_timeframe: bool = typer.Option(False, "--multi-timeframe", help="Run screening for 1m/3m/6m horizons and generate Chinese multi-timeframe report."),
+    cache_only: bool = typer.Option(False, "--cache-only", help="Use cached market data only; never call external data fetchers."),
+    cached_analysis_only: bool = typer.Option(False, "--cached-analysis-only", help="Use cached LLM analyses only and refresh them with the latest screening scores."),
 ) -> None:
     """Full pipeline: fetch → screen → score → LLM analysis → generate reports."""
     cfg = _load_cfg(config)
@@ -240,12 +441,20 @@ def scan(
 
     from valueinvestor.screener.engine import ScreeningEngine
 
-    engine = ScreeningEngine(config=cfg, cache=cache)
+    engine = ScreeningEngine(config=cfg, cache=cache, cache_only=cache_only)
 
     if multi_timeframe:
-        _run_multi_timeframe_scan(engine, cfg, cache, skip_analysis)
+        _run_multi_timeframe_scan(
+            engine,
+            cfg,
+            cache,
+            skip_analysis,
+            cached_analysis_only=cached_analysis_only,
+        )
         return
 
+    screening_started = time.monotonic()
+    console.print("[dim]progress: fetching universe and screening candidates started[/dim]")
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -255,10 +464,23 @@ def scan(
         # Step 1 — fetch & screen
         progress.add_task("Fetching universe & screening candidates…", total=None)
         try:
-            results = engine.run(top_n=cfg.screening.top_n)
+            with _scan_heartbeat(
+                "fetching universe and screening candidates"
+            ) as update_heartbeat:
+                engine.progress_callback = _screening_progress_callback(
+                    "screening", update_heartbeat
+                )
+                try:
+                    results = engine.run(top_n=cfg.screening.top_n)
+                finally:
+                    engine.progress_callback = None
         except ValueInvestorError as exc:
             err_console.print(f"[red]Screening failed:[/red] {exc}")
             raise typer.Exit(code=1) from exc
+    console.print(
+        f"[dim]progress: fetching universe and screening candidates finished "
+        f"({time.monotonic() - screening_started:.1f}s elapsed)[/dim]"
+    )
 
     if not results:
         console.print("[yellow]No candidates survived screening.[/yellow]")
@@ -270,13 +492,17 @@ def scan(
     # Step 2 — LLM analysis (optional)
     analyses = []
     llm_usage: Optional[dict] = None
-    if not skip_analysis:
+    if cached_analysis_only:
+        analyses = _cached_analyses_for_results(results, cfg, cache)
+        console.print(
+            f"[green]✓[/green] Cached analyses refreshed — {len(analyses)}/{len(results)} matched"
+        )
+    elif not skip_analysis:
         try:
             from valueinvestor.analysis.llm_client import LLMClient
             from valueinvestor.analysis.pipeline import AnalysisPipeline
 
             llm = LLMClient(config=cfg.llm)
-            pipeline = AnalysisPipeline(llm=llm, cache=cache, config=cfg)
 
             with Progress(
                 SpinnerColumn(),
@@ -292,9 +518,26 @@ def scan(
                         task,
                         description=f"Analyzing [{idx}/{len(results)}] {sr.company.ticker}…",
                     )
+                    prefix = f"analysis {idx}/{len(results)}"
+                    company_label = f"{prefix} {sr.company.ticker} {sr.company.name}"
+                    analysis_started = time.monotonic()
+                    console.print(f"[dim]progress: {company_label} started[/dim]")
                     try:
-                        analysis = pipeline.analyze_company(sr)
+                        with _scan_heartbeat(company_label) as update_heartbeat:
+                            pipeline = AnalysisPipeline(
+                                llm=llm,
+                                cache=cache,
+                                config=cfg,
+                                progress_callback=_analysis_progress_callback(
+                                    prefix, update_heartbeat
+                                ),
+                            )
+                            analysis = pipeline.analyze_company(sr)
                         analyses.append(analysis)
+                        console.print(
+                            f"[dim]progress: {company_label} finished "
+                            f"({time.monotonic() - analysis_started:.1f}s elapsed)[/dim]"
+                        )
                     except ValueInvestorError:
                         err_console.print(
                             f"[yellow]⚠ Analysis failed for {sr.company.ticker} — skipping[/yellow]"
@@ -321,7 +564,12 @@ def scan(
             config=cfg,
         )
         report = temp_pipeline.build_report(analyses, cfg, total_screened=engine.last_total_screened)
+        current_rhos = _load_current_spearman_rhos()
+        if current_rhos:
+            report.config_summary["spearman_rhos"] = current_rhos
 
+        report_started = time.monotonic()
+        console.print("[dim]progress: report generation started[/dim]")
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -330,21 +578,26 @@ def scan(
         ) as progress:
             progress.add_task("Generating reports…", total=None)
 
-            if "md" in cfg.output.formats:
-                md_gen = MarkdownReportGenerator()
-                md_path = md_gen.save(report, cfg.output.reports_dir)
-                report_paths.append(md_path)
+            with _scan_heartbeat("report generation"):
+                if "md" in cfg.output.formats:
+                    md_gen = MarkdownReportGenerator()
+                    md_path = md_gen.save(report, cfg.output.reports_dir)
+                    report_paths.append(md_path)
 
-            if "pdf" in cfg.output.formats:
-                try:
-                    from valueinvestor.reports.pdf_generator import PDFReportGenerator
+                if "pdf" in cfg.output.formats:
+                    try:
+                        from valueinvestor.reports.pdf_generator import PDFReportGenerator
 
-                    pdf_gen = PDFReportGenerator()
-                    pdf_path = pdf_gen.generate_from_report(report, cfg.output.reports_dir)
-                    report_paths.append(pdf_path)
-                except Exception as exc:
-                    err_console.print(f"[yellow]PDF generation skipped:[/yellow] {exc}")
+                        pdf_gen = PDFReportGenerator()
+                        pdf_path = pdf_gen.generate_from_report(report, cfg.output.reports_dir)
+                        report_paths.append(pdf_path)
+                    except Exception as exc:
+                        err_console.print(f"[yellow]PDF generation skipped:[/yellow] {exc}")
 
+        console.print(
+            f"[dim]progress: report generation finished "
+            f"({time.monotonic() - report_started:.1f}s elapsed)[/dim]"
+        )
         console.print(f"[green]✓[/green] Reports generated — {len(report_paths)} file(s)")
 
     # Summary panel
@@ -378,6 +631,7 @@ def scan(
 def screen(
     config: str = typer.Option("config.yaml", "--config", "-c", help="Path to config YAML."),
     top_n: Optional[int] = typer.Option(None, "--top-n", "-n", help="Override screening.top_n."),
+    cache_only: bool = typer.Option(False, "--cache-only", help="Use cached market data only; never call external data fetchers."),
 ) -> None:
     """Run quantitative screening only (no LLM analysis)."""
     cfg = _load_cfg(config)
@@ -388,8 +642,10 @@ def screen(
 
     from valueinvestor.screener.engine import ScreeningEngine
 
-    engine = ScreeningEngine(config=cfg, cache=cache)
+    engine = ScreeningEngine(config=cfg, cache=cache, cache_only=cache_only)
 
+    screening_started = time.monotonic()
+    console.print("[dim]progress: fetching universe and screening candidates started[/dim]")
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -398,10 +654,23 @@ def screen(
     ) as progress:
         progress.add_task("Fetching universe & screening candidates…", total=None)
         try:
-            results = engine.run(top_n=cfg.screening.top_n)
+            with _scan_heartbeat(
+                "fetching universe and screening candidates"
+            ) as update_heartbeat:
+                engine.progress_callback = _screening_progress_callback(
+                    "screening", update_heartbeat
+                )
+                try:
+                    results = engine.run(top_n=cfg.screening.top_n)
+                finally:
+                    engine.progress_callback = None
         except ValueInvestorError as exc:
             err_console.print(f"[red]Screening failed:[/red] {exc}")
             raise typer.Exit(code=1) from exc
+    console.print(
+        f"[dim]progress: fetching universe and screening candidates finished "
+        f"({time.monotonic() - screening_started:.1f}s elapsed)[/dim]"
+    )
 
     if not results:
         console.print("[yellow]No candidates survived screening.[/yellow]")
@@ -551,6 +820,9 @@ def report(
 
     pipeline = AnalysisPipeline(llm=None, cache=cache, config=cfg)  # type: ignore[arg-type]
     inv_report = pipeline.build_report(cached_analyses, cfg)
+    current_rhos = _load_current_spearman_rhos()
+    if current_rhos:
+        inv_report.config_summary["spearman_rhos"] = current_rhos
 
     formats = (
         ["md", "pdf"] if fmt == "both" else [fmt]

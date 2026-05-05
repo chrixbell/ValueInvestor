@@ -203,6 +203,7 @@ class LLMClient:
         user_prompt: str,
         response_format: Optional[str] = None,
         max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> str:
         generation_kwargs: Dict[str, Any] = {"temperature": self.temperature}
         if response_format == "json":
@@ -210,6 +211,9 @@ class LLMClient:
         if max_tokens is not None:
             generation_kwargs["max_output_tokens"] = max_tokens
         generation_config = genai_types.GenerateContentConfig(**generation_kwargs)
+
+        if timeout is not None:
+            logger.debug("Per-request timeout is not supported by the Gemini client; relying on caller timeout.")
 
         # Combine system prompt and user prompt
         prompt = f"{system_prompt}\n\n{user_prompt}"
@@ -266,6 +270,7 @@ class LLMClient:
         user_prompt: str,
         response_format: Optional[str] = None,
         max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> str:
         """Send a chat completion request with retry and usage tracking.
 
@@ -284,7 +289,13 @@ class LLMClient:
             The assistant's response content.
         """
         if self.provider == "gemini":
-            return self._complete_gemini(system_prompt, user_prompt, response_format, max_tokens)
+            return self._complete_gemini(
+                system_prompt,
+                user_prompt,
+                response_format,
+                max_tokens,
+                timeout,
+            )
 
         # Handle local_llm and OpenAI-compatible APIs (OpenAI, DeepSeek, GitHub, OpenRouter, NVIDIA NIM, etc.)
         messages: list[Dict[str, str]] = [
@@ -301,6 +312,8 @@ class LLMClient:
             kwargs["response_format"] = {"type": "json_object"}
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
+        if timeout is not None and timeout > 0:
+            kwargs["timeout"] = timeout
 
         last_exception: Exception | None = None
         for attempt in range(1, self.max_retries + 1):
@@ -319,6 +332,17 @@ class LLMClient:
                     "Rate-limited by OpenAI (attempt %d/%d). Retrying in %ds …",
                     attempt,
                     self.max_retries,
+                    wait,
+                )
+                time.sleep(wait)
+            except (openai.APITimeoutError, openai.APIConnectionError) as exc:
+                last_exception = exc
+                wait = 2 ** attempt
+                logger.warning(
+                    "OpenAI connection/timeout error (attempt %d/%d): %s. Retrying in %ds …",
+                    attempt,
+                    self.max_retries,
+                    exc,
                     wait,
                 )
                 time.sleep(wait)
