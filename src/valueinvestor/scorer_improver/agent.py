@@ -64,7 +64,7 @@ _REQUIRED_DEFAULT_WEIGHT_KEYS = (
 )
 
 # Number of parallel LLM proposals per iteration (env-overridable)
-_N_PARALLEL = int(os.environ.get("IMPROVE_SCORER_PARALLEL", "1"))
+_N_PARALLEL = int(os.environ.get("IMPROVE_SCORER_PARALLEL", "2"))
 # Epsilon for quick-reject threshold
 _QUICK_REJECT_MARGIN = 0.02
 _QUICK_EVAL_SAMPLE_SIZE = int(os.environ.get("IMPROVE_SCORER_QUICK_SAMPLE_SIZE", "3000"))
@@ -101,12 +101,12 @@ _REPAIR_INVALID_PROPOSALS = os.environ.get("IMPROVE_SCORER_REPAIR_PROPOSALS", "t
 _SAVE_INVALID_PROPOSALS = os.environ.get("IMPROVE_SCORER_SAVE_INVALID_PROPOSALS", "true").lower() not in {
     "0", "false", "no", "off",
 }
-_PARALLEL_PROPOSAL_TIMEOUT_SECONDS = float(os.environ.get("IMPROVE_SCORER_PARALLEL_TIMEOUT_SECONDS", "90"))
+_PARALLEL_PROPOSAL_TIMEOUT_SECONDS = float(os.environ.get("IMPROVE_SCORER_PARALLEL_TIMEOUT_SECONDS", "120"))
 _PARALLEL_EARLY_STOP_AFTER_SECONDS = float(
-    os.environ.get("IMPROVE_SCORER_PARALLEL_EARLY_STOP_AFTER_SECONDS", "45")
+    os.environ.get("IMPROVE_SCORER_PARALLEL_EARLY_STOP_AFTER_SECONDS", "60")
 )
 _PARALLEL_COMPLETION_GRACE_SECONDS = float(
-    os.environ.get("IMPROVE_SCORER_PARALLEL_COMPLETION_GRACE_SECONDS", "8")
+    os.environ.get("IMPROVE_SCORER_PARALLEL_COMPLETION_GRACE_SECONDS", "10")
 )
 _PARALLEL_MIN_COMPLETED_PROPOSALS = int(os.environ.get("IMPROVE_SCORER_PARALLEL_MIN_COMPLETED", "1"))
 _LLM_REQUEST_TIMEOUT_SECONDS = float(
@@ -173,27 +173,25 @@ You will receive:
 Your task: propose ONE specific modification to scorer.py that you believe will
 improve the Spearman rank correlation (ρ) between composite_score and forward
 stock returns across **three time horizons simultaneously**: 1-month, 3-month,
-and 6-month. A change is kept only when it clears the configured material
-improvement threshold in at least one horizon versus the current baseline while
-avoiding material degradation in all other horizons. One-horizon tradeoffs,
-especially 1-month gains that damage 3-month or 6-month performance, are rejected.
+and 6-month.
 
 Rules:
-- Output a compact unified diff patch for src/valueinvestor/screener/scorer.py
-- Include ---/+++ file headers and at least one @@ hunk
-- Do not use ellipses, placeholders, or omitted context in the patch
-- Do not output a complete replacement file. Return only a ```diff fenced unified patch.
-- If you cannot produce a valid patch, output no proposal rather than prose or full-file code.
-- Keep the MultiFactorScorer class interface intact (score/rank methods)
-- Valid Python 3.9+ only
-- Handle None values gracefully
-- Be creative but grounded — use financial domain knowledge
-- Learn from past experiments: don't repeat failed approaches
-- Make ONE focused change per iteration (easier to attribute improvements)
-- Keep the patch as small as possible: change only the lines required
+- Propose a SINGLE focused modification per iteration.
+- Use SEARCH/REPLACE blocks for the code change. This is the most reliable format.
+- A SEARCH/REPLACE block must look exactly like this:
+<<<<<<< SEARCH
+[exact code from the file to be replaced]
+=======
+[new code to replace it with]
+>>>>>>> REPLACE
+- Keep the SEARCH block as small as possible while remaining unique.
+- Do not output a complete replacement file.
+- If you use a unified diff patch (---/+++/@@), it must apply cleanly.
+- Valid Python 3.9+ only. Handle None values gracefully.
+- Learn from past experiments: don't repeat failed approaches.
+- Keep the patch as small as possible: change only the lines required.
 
-Wrap your unified diff in ```diff ... ``` code fences.
-After the code, briefly explain what you changed and why (1-2 sentences).
+After the code block, briefly explain what you changed and why (1-2 sentences).
 """
 
 
@@ -782,16 +780,19 @@ def _build_prompt(
             truncated_code = scorer_code[:1500]
     else:
         context = context.replace("{experiment_history}", full_history)
-        truncated_code = _add_line_numbers(_strip_scorer_for_prompt(scorer_code))
+        # Use stripped scorer to save tokens, NO line numbers (they confuse LLMs with SEARCH/REPLACE)
+        truncated_code = _strip_scorer_for_prompt(scorer_code)
 
     return (
         f"## Program Context\n\n{context}\n\n"
-        f"## Current scorer.py (line numbers for accurate diffs)\n\n```python\n{truncated_code}\n```\n\n"
-        "Propose your improvement as one unified diff patch in ```diff ... ``` fences. "
-        "Do not output markdown-only commentary, a full replacement file, or a ```python fence. "
-        "The patch must include ---/+++ headers and at least one @@ hunk with exact context. "
-        "Use the line numbers shown above only to locate code; do not include those line-number prefixes in the patch. "
-        "If you cannot produce a clean patch, return an empty diff block so the trainer can skip it cheaply."
+        f"## Current scorer.py Source\n\n"
+        f"```python\n{truncated_code}\n```\n\n"
+        "## Instructions\n\n"
+        "- Propose ONE modification to improve the metrics above.\n"
+        "- Use a SEARCH/REPLACE block for the change. This is the most reliable format.\n"
+        "- The SEARCH section MUST match the existing code exactly (whitespace/indentation).\n"
+        "- Keep it brief and focused. Do not include prose before the code block.\n"
+        "- Alternatively, you may use a unified diff in ```diff fences.\n"
     )
 
 
@@ -1074,9 +1075,47 @@ def _try_apply_patch(base_code: str, patch_text: str) -> str | None:
     return _try_apply_patch_with_system_patch(base_code, patch_text)
 
 
+def _try_apply_search_replace(base_code: str, response: str) -> str | None:
+    """Try to apply aider-style search/replace blocks."""
+    import re
+    pattern = re.compile(
+        r"<<<<<<< SEARCH\s*\n(.*?)\n=======\s*\n(.*?)\n>>>>>>> REPLACE", re.DOTALL
+    )
+    matches = pattern.findall(response)
+    if not matches:
+        return None
+
+    result = base_code
+    applied_any = False
+    for search, replace in matches:
+        # Search/replace blocks often have slightly different leading/trailing whitespace
+        # if the LLM isn't careful. We try to be a bit flexible but prioritize exact match.
+        if search in result:
+            result = result.replace(search, replace, 1)
+            applied_any = True
+        else:
+            # Try matching while ignoring leading/trailing blank lines in the search block
+            search_stripped = search.strip("\r\n")
+            if search_stripped and search_stripped in result:
+                result = result.replace(search_stripped, replace.strip("\r\n"), 1)
+                applied_any = True
+            else:
+                logger.debug("Search block not found in base code:\n%s", search[:100])
+
+    return result if applied_any else None
+
+
 def _extract_proposal_code(response: str, original_code: str) -> tuple[Optional[str], str, str]:
-    """Extract proposal code from a unified diff response."""
+    """Extract proposal code from a unified diff or search/replace response."""
     explanation = _extract_explanation(response)
+
+    # 1. Try search/replace blocks first (very robust for LLMs)
+    patched_code = _try_apply_search_replace(original_code, response)
+    if patched_code is not None:
+        if patched_code != original_code:
+            return patched_code, explanation, _compute_diff_summary(original_code, patched_code)
+
+    # 2. Try unified diff patch
     patch_text = _extract_patch(response)
     if patch_text:
         patched_code = _try_apply_patch(original_code, patch_text)

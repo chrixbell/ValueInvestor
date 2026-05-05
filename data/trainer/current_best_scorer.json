@@ -1,8 +1,8 @@
 {
   "ground_truth_id": "ground_truth_current.parquet:6301505:1777309547652660375|eval=ranked-snapshot-v1",
-  "iteration": 14004,
-  "spearman_rho_1m": 0.13664,
-  "spearman_rho_3m": 0.145306,
-  "spearman_rho_6m": 0.176199,
-  "updated_at": "2026-05-05T03:03:10.424590"
+  "iteration": 14253,
+  "spearman_rho_1m": 0.13665,
+  "spearman_rho_3m": 0.14532,
+  "spearman_rho_6m": 0.17632,
+  "updated_at": "2026-05-05T14:31:06.918006"
 }

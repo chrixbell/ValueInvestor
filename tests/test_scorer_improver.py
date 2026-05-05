@@ -250,6 +250,76 @@ class TestAgentHelpers:
         assert records[0]["description"]  # should have a reason logged
         assert writes == []
 
+    def test_try_apply_search_replace_applies_exact_match(self) -> None:
+        from valueinvestor.scorer_improver.agent import _try_apply_search_replace
+
+        base = "def foo():\n    return 1\n\ndef bar():\n    return 2\n"
+        response = textwrap.dedent("""\
+            <<<<<<< SEARCH
+            def bar():
+                return 2
+            =======
+            def bar():
+                return 42
+            >>>>>>> REPLACE
+        """)
+        result = _try_apply_search_replace(base, response)
+        assert result == "def foo():\n    return 1\n\ndef bar():\n    return 42\n"
+
+    def test_try_apply_search_replace_handles_multiple_blocks(self) -> None:
+        from valueinvestor.scorer_improver.agent import _try_apply_search_replace
+
+        base = "a = 1\nb = 2\nc = 3\n"
+        response = textwrap.dedent("""\
+            <<<<<<< SEARCH
+            a = 1
+            =======
+            a = 10
+            >>>>>>> REPLACE
+
+            Some prose here.
+
+            <<<<<<< SEARCH
+            c = 3
+            =======
+            c = 30
+            >>>>>>> REPLACE
+        """)
+        result = _try_apply_search_replace(base, response)
+        assert result == "a = 10\nb = 2\nc = 30\n"
+
+    def test_try_apply_search_replace_tolerates_extra_newlines(self) -> None:
+        from valueinvestor.scorer_improver.agent import _try_apply_search_replace
+
+        base = "x = 1\ny = 2\nz = 3\n"
+        # LLM might add leading/trailing newlines in the block
+        response = "<<<<<<< SEARCH\ny = 2\n=======\ny = 20\n>>>>>>> REPLACE"
+        result = _try_apply_search_replace(base, response)
+        assert result == "x = 1\ny = 20\nz = 3\n"
+
+    def test_extract_proposal_code_prefers_search_replace(self) -> None:
+        from valueinvestor.scorer_improver.agent import _extract_proposal_code
+
+        old = "x = 1\n"
+        response = textwrap.dedent("""\
+            <<<<<<< SEARCH
+            x = 1
+            =======
+            x = 2
+            >>>>>>> REPLACE
+
+            ```diff
+            --- a
+            +++ b
+            @@ -1 +1 @@
+            -x = 1
+            +x = 3
+            ```
+        """)
+        # Should take the S/R block (x=2) over the diff (x=3)
+        code, _, _ = _extract_proposal_code(response, old)
+        assert code == "x = 2\n"
+
     def test_extract_code_python_fence(self) -> None:
         from valueinvestor.scorer_improver.agent import _extract_code
 
@@ -1138,10 +1208,8 @@ Added a new value sub-factor ROE / PB that rewards profitability relative to boo
     def test_agent_prompt_describes_current_pareto_acceptance_gate(self) -> None:
         from valueinvestor.scorer_improver.agent import _AGENT_SYSTEM_PROMPT, _build_prompt
 
-        assert "ANY of the three horizons" not in _AGENT_SYSTEM_PROMPT
-        assert "clears the configured material" in _AGENT_SYSTEM_PROMPT
-        assert "avoiding material degradation" in _AGENT_SYSTEM_PROMPT
-        assert "complete replacement file" in _AGENT_SYSTEM_PROMPT
+        assert "three time horizons" in _AGENT_SYSTEM_PROMPT
+        assert "SEARCH/REPLACE" in _AGENT_SYSTEM_PROMPT
 
         prompt = _build_prompt(
             scorer_code="class MultiFactorScorer:\n    pass\n",
@@ -1152,9 +1220,8 @@ Added a new value sub-factor ROE / PB that rewards profitability relative to boo
         )
 
         assert "Acceptance gate: improve at least one horizon by more than 0.0001" in prompt
-        assert "Do not output markdown-only commentary" in prompt
-        assert "full replacement file" in prompt
-        assert "```python fence" in prompt
+        assert "SEARCH/REPLACE block" in prompt
+        assert "```python" in prompt
 
     def test_default_weight_guard_accepts_full_six_factor_weights(self) -> None:
         from valueinvestor.scorer_improver.agent import _default_weight_issues

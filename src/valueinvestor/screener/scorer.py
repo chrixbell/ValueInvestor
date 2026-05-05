@@ -390,7 +390,7 @@ class MultiFactorScorer:
         ev_to_ebitda = result.valuation.ev_to_ebitda
         if ev_to_ebitda is not None and ev_to_ebitda > 0:
             weighted_scores.append(
-                (_triangular_score(ev_to_ebitda, low=2.0, optimal=8.0, high=22.0), EV_TO_EBITDA_WEIGHT)
+                (_triangular_score(ev_to_ebitda, low=2.0, optimal=6.5, high=22.0), EV_TO_EBITDA_WEIGHT)
             )
         # ROE / EV/EBITDA: reward companies that are profitable relative to enterprise valuation
         roe_val_val = result.financials.roe
