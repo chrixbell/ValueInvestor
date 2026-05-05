@@ -43,6 +43,9 @@ coverage.xml
 # Runtime data cache
 data/cache.db
 
+# Large data files
+data/trainer/*.parquet
+
 # Generated reports (regenerate with `valueinvestor report`)
 reports/*.md
 reports/*.pdf
