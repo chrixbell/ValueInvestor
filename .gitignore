@@ -50,6 +50,9 @@ data/trainer/*.parquet
 reports/*.md
 reports/*.pdf
 
+# Local cleanup archives
+backup/
+
 # Config may contain API keys — keep out of version control
 # (use `valueinvestor config init` to regenerate)
 config.yaml
