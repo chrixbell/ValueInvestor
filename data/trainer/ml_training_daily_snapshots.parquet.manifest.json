@@ -1,0 +1,45 @@
+{
+  "created_at": "2026-06-01T20:17:38.878794",
+  "end_date": "2025-07-07",
+  "feature_policy_version": "pit-asof-v4",
+  "feature_source_profile": {
+    "financials": {
+      "date_columns": {
+        "period": {
+          "max": "2025-12-31",
+          "min": "2024-06-30",
+          "valid": 1682
+        }
+      },
+      "exists": true,
+      "rows": 1682,
+      "tickers": 1682
+    },
+    "valuations": {
+      "date_columns": {
+        "date": {
+          "max": "2026-05-05",
+          "min": "2016-05-12",
+          "valid": 661218
+        }
+      },
+      "exists": true,
+      "rows": 661218,
+      "tickers": 7031
+    }
+  },
+  "output_path": "data/trainer/ml_training_daily_snapshots.parquet",
+  "row_count": 11821287,
+  "schema_version": "ml-snapshot-manifest-v1",
+  "snapshot_count": 2310,
+  "snapshot_frequency": "daily",
+  "source_fingerprints": {
+    "ashare_prices": "ashare_prices.parquet:133404287:1777995134036216005",
+    "financials": "financials.parquet:120682:1780316071749291115",
+    "ground_truth_code": "ground_truth.py:27994:1779010104389600535",
+    "hkshare_prices": "hkshare_prices.parquet:69828666:1777995648833735721",
+    "scorer": "scorer.py:25675:1779011070403751436",
+    "valuations": "valuations.parquet:7326073:1780316071676244423"
+  },
+  "start_date": "2016-05-25"
+}

@@ -30,6 +30,7 @@ CURRENT_GROUND_TRUTH_FILE = TRAINER_DIR / "ground_truth_current.parquet"
 # Rolling snapshot interval in days (~quarterly)
 SNAPSHOT_INTERVAL_DAYS = 90
 # Forward return horizons in calendar days (nearest price within ±15 days is used)
+FORWARD_HORIZON_1W_DAYS = 5     # ~1 trading week
 FORWARD_HORIZON_1M_DAYS = 30    # ~1 month
 FORWARD_HORIZON_3M_DAYS = 90    # ~3 months
 FORWARD_HORIZON_DAYS = 126      # ~6 months (unchanged, backward-compatible alias)
@@ -63,6 +64,7 @@ FINANCIAL_FEATURE_COLUMNS = (
 )
 
 RETURN_COLUMNS = (
+    "forward_return_1w",
     "forward_return_1m",
     "forward_return_3m",
     "forward_return_6m",
@@ -87,6 +89,16 @@ MINIMUM_GROUND_TRUTH_COLUMNS = (
     "close",
     "forward_return_6m",
 )
+
+FEATURE_DATE_COLUMNS = (
+    "date",
+    "report_date",
+    "period",
+    "fetched_at",
+    "updated_at",
+)
+VALUATION_ASOF_LAG_DAYS = 0
+FINANCIAL_ASOF_LAG_DAYS = 45
 
 
 _GT_CACHE: dict[str, pd.DataFrame] = {}
@@ -255,6 +267,94 @@ def _latest_feature_frame(
     return result[["ticker", *columns]]
 
 
+def _feature_date_series(df: pd.DataFrame) -> Optional[pd.Series]:
+    """Return the first usable date-like feature timestamp column."""
+    for col in FEATURE_DATE_COLUMNS:
+        if col not in df.columns:
+            continue
+        dates = pd.to_datetime(df[col], errors="coerce")
+        if dates.notna().any():
+            return dates.dt.normalize()
+    return None
+
+
+def asof_feature_frame(
+    df: pd.DataFrame,
+    columns: tuple[str, ...],
+    tickers: pd.Series,
+    snapshot_dates,
+    *,
+    lag_days: int = 0,
+) -> pd.DataFrame:
+    """Return feature rows known as of each ticker/snapshot date.
+
+    If the source frame has no usable date-like column, this falls back to the
+    legacy latest-row behavior.  If dates are present, future rows are never
+    used for historical snapshots.
+    """
+    if not isinstance(snapshot_dates, pd.Series):
+        snapshot_dates = pd.Series([snapshot_dates] * len(tickers), index=tickers.index)
+
+    result = pd.DataFrame({"ticker": tickers.reset_index(drop=True)})
+    for col in columns:
+        result[col] = None
+
+    if df.empty or "ticker" not in df.columns:
+        return result
+
+    feature_dates = _feature_date_series(df)
+    if feature_dates is None:
+        return _latest_feature_frame(df, columns, tickers)
+
+    available_cols = ["ticker", *[col for col in columns if col in df.columns]]
+    history = df[available_cols].copy()
+    history["ticker"] = history["ticker"].astype(str)
+    history["_feature_date"] = pd.to_datetime(feature_dates, errors="coerce").astype("datetime64[ns]")
+    history = history.dropna(subset=["ticker", "_feature_date"])
+    if history.empty:
+        return result
+
+    requests = pd.DataFrame({
+        "_row_id": range(len(tickers)),
+        "ticker": tickers.reset_index(drop=True).astype(str),
+        "_asof_date": pd.to_datetime(
+            snapshot_dates.reset_index(drop=True),
+            errors="coerce",
+        ).dt.normalize() - pd.Timedelta(days=lag_days),
+    })
+    requests["_asof_date"] = pd.to_datetime(
+        requests["_asof_date"],
+        errors="coerce",
+    ).astype("datetime64[ns]")
+    requests = requests.dropna(subset=["ticker", "_asof_date"])
+    if requests.empty:
+        return result
+
+    resolved: list[pd.DataFrame] = []
+    history_groups = {ticker: group for ticker, group in history.groupby("ticker", sort=False)}
+    for ticker, req_group in requests.groupby("ticker", sort=False):
+        hist_group = history_groups.get(ticker)
+        if hist_group is None or hist_group.empty:
+            continue
+        merged = pd.merge_asof(
+            req_group.sort_values("_asof_date", kind="mergesort"),
+            hist_group.sort_values("_feature_date", kind="mergesort"),
+            left_on="_asof_date",
+            right_on="_feature_date",
+            direction="backward",
+        )
+        resolved.append(merged)
+
+    if not resolved:
+        return result
+
+    merged = pd.concat(resolved, ignore_index=True).set_index("_row_id")
+    for col in columns:
+        if col in merged.columns:
+            result.loc[merged.index, col] = merged[col]
+    return result[["ticker", *columns]]
+
+
 def _build_snapshot_features(
     snapshot_date: date,
     prices_df: pd.DataFrame,
@@ -289,19 +389,25 @@ def _build_snapshot_features(
     features = window.loc[nearest_idx, ["ticker", "close"]].reset_index(drop=True)
     features["snapshot_date"] = snapshot_date
 
-    valuation_features = _latest_feature_frame(
+    snapshot_dates = pd.Series([snapshot_date] * len(features))
+    valuation_features = asof_feature_frame(
         val_df,
         VALUATION_FEATURE_COLUMNS,
         features["ticker"],
+        snapshot_dates,
+        lag_days=VALUATION_ASOF_LAG_DAYS,
     )
-    financial_features = _latest_feature_frame(
+    financial_features = asof_feature_frame(
         fin_df,
         FINANCIAL_FEATURE_COLUMNS,
         features["ticker"],
+        snapshot_dates,
+        lag_days=FINANCIAL_ASOF_LAG_DAYS,
     )
 
-    features = features.merge(valuation_features, on="ticker", how="left")
-    features = features.merge(financial_features, on="ticker", how="left")
+    features = features.reset_index(drop=True)
+    features = features.join(valuation_features.drop(columns=["ticker"]))
+    features = features.join(financial_features.drop(columns=["ticker"]))
     ordered_columns = [
         "ticker",
         "snapshot_date",
@@ -457,8 +563,9 @@ def build_ground_truth(force: bool = False, output_path: Path = GROUND_TRUTH_FIL
     val_df = pd.read_parquet(str(val_path)) if val_path.exists() else pd.DataFrame()
     fin_df = pd.read_parquet(str(fin_path)) if fin_path.exists() else pd.DataFrame()
 
-    # Compute forward returns for all 3 horizons
+    # Compute forward returns for all configured horizons.
     horizons = [
+        (FORWARD_HORIZON_1W_DAYS, "forward_return_1w"),
         (FORWARD_HORIZON_1M_DAYS, "forward_return_1m"),
         (FORWARD_HORIZON_3M_DAYS, "forward_return_3m"),
         (FORWARD_HORIZON_6M_DAYS, "forward_return_6m"),
@@ -570,7 +677,11 @@ def ensure_ground_truth_ready(
         logger.info("Ground truth is missing required columns (%s); rebuilding.", ", ".join(missing_minimum))
         return build_ground_truth(force=True, output_path=path)
 
-    missing_returns = [col for col in ("forward_return_1m", "forward_return_3m") if col not in columns]
+    missing_returns = [
+        col
+        for col in ("forward_return_1w", "forward_return_1m", "forward_return_3m")
+        if col not in columns
+    ]
     if missing_returns:
         return augment_ground_truth_with_horizons(force=True, path=path)
 
@@ -608,7 +719,7 @@ def ensure_current_ground_truth_ready(force: bool = False) -> Path:
 
 
 def augment_ground_truth_with_horizons(force: bool = False, path: Path = GROUND_TRUTH_FILE) -> Path:
-    """Add ``forward_return_1m`` and ``forward_return_3m`` columns to the
+    """Add short-horizon forward-return columns to the
     existing ground-truth parquet without rebuilding from scratch.
 
     This is a one-time migration for existing installations that only have the
@@ -623,12 +734,16 @@ def augment_ground_truth_with_horizons(force: bool = False, path: Path = GROUND_
     gt_df = pd.read_parquet(str(path))
 
     horizons_needed = []
-    for col, horizon_days in [("forward_return_1m", FORWARD_HORIZON_1M_DAYS), ("forward_return_3m", FORWARD_HORIZON_3M_DAYS)]:
+    for col, horizon_days in [
+        ("forward_return_1w", FORWARD_HORIZON_1W_DAYS),
+        ("forward_return_1m", FORWARD_HORIZON_1M_DAYS),
+        ("forward_return_3m", FORWARD_HORIZON_3M_DAYS),
+    ]:
         if col not in gt_df.columns or force:
             horizons_needed.append((col, horizon_days))
 
     if not horizons_needed:
-        logger.info("Ground truth already has 1m/3m columns — nothing to do.")
+        logger.info("Ground truth already has short-horizon columns — nothing to do.")
         return path
 
     # Load price data

@@ -1,0 +1,1527 @@
+active 6m ML ranker: data/trainer/ml_ranker_model.json 
+(backend=temporal_payload_blend, target=temporal_anchor, 
+trained_at=2026-06-06T22:25:11.278027)
+progress: fetching universe and screening candidates started
+progress: screening: step 1/6 fetching stock universe
+progress: screening: fetching a_share stock list
+  0%|          | 0/16 [00:00<?, ?it/s]  6%|▋         | 1/16 [00:00<00:03,  4.60it/s] 12%|█▎        | 2/16 [00:00<00:03,  4.34it/s] 19%|█▉        | 3/16 [00:00<00:02,  4.47it/s] 25%|██▌       | 4/16 [00:00<00:03,  3.89it/s] 31%|███▏      | 5/16 [00:01<00:03,  3.13it/s] 38%|███▊      | 6/16 [00:01<00:02,  3.58it/s] 44%|████▍     | 7/16 [00:01<00:02,  4.13it/s] 50%|█████     | 8/16 [00:02<00:01,  4.07it/s] 56%|█████▋    | 9/16 [00:02<00:01,  4.53it/s] 62%|██████▎   | 10/16 [00:02<00:01,  4.88it/s] 69%|██████▉   | 11/16 [00:02<00:01,  4.52it/s] 75%|███████▌  | 12/16 [00:02<00:00,  4.84it/s] 81%|████████▏ | 13/16 [00:02<00:00,  4.94it/s] 88%|████████▊ | 14/16 [00:03<00:00,  5.07it/s] 94%|█████████▍| 15/16 [00:03<00:00,  5.00it/s]100%|██████████| 16/16 [00:03<00:00,  4.68it/s]                                               progress: screening: a_share stock list fetched (5525 companies)
+progress: screening: fetching hk_share stock list
+still running: screening: fetching hk_share stock list (15s elapsed)
+akshare HK stock list unavailable: HTTPSConnectionPool(host='72.push2.eastmoney.com', port=443): Max retries exceeded with url: /api/qt/clist/get?pn=1&pz=100&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f12&fs=m%3A128+t%3A3%2Cm%3A128+t%3A4%2Cm%3A128+t%3A1%2Cm%3A128+t%3A2&fields=f1%2Cf2%2Cf3%2Cf4%2Cf5%2Cf6%2Cf7%2Cf8%2Cf9%2Cf10%2Cf12%2Cf13%2Cf14%2Cf15%2Cf16%2Cf17%2Cf18%2Cf20%2Cf21%2Cf23%2Cf24%2Cf25%2Cf22%2Cf11%2Cf62%2Cf128%2Cf136%2Cf115%2Cf152 (Caused by ProxyError('Unable to connect to proxy', RemoteDisconnected('Remote end closed connection without response')))
+still running: screening: fetching hk_share stock list (30s elapsed)
+still running: screening: fetching hk_share stock list (45s elapsed)
+still running: screening: fetching hk_share stock list (60s elapsed)
+still running: screening: fetching hk_share stock list (75s elapsed)
+progress: screening: hk_share stock list fetched (50 companies)
+progress: screening: step 1/6 complete: 5575 companies
+progress: screening: step 2/6 fetching valuation data
+progress: screening: A-share valuations: checking 5525 tickers
+still running: screening: A-share valuations: checking 5525 tickers (90s 
+elapsed)
+still running: screening: A-share valuations: checking 5525 tickers (105s 
+elapsed)
+still running: screening: A-share valuations: checking 5525 tickers (120s 
+elapsed)
+still running: screening: A-share valuations: checking 5525 tickers (135s 
+elapsed)
+progress: screening: HK valuations: fetching 50 tickers
+still running: screening: HK valuations 1/50: 0700.HK TENCENT (150s elapsed)
+progress: screening: HK valuations 1/50 processed; 5525 total valuations 
+available
+still running: screening: HK valuations 18/50: 0027.HK GALAXY ENT (165s elapsed)
+progress: screening: HK valuations 25/50 processed; 5548 total valuations 
+available
+still running: screening: HK valuations 37/50: 0968.HK XINYI SOLAR (180s 
+elapsed)
+progress: screening: HK valuations 50/50 processed; 5573 total valuations 
+available
+progress: screening: step 2/6 complete: 5573 valuations
+progress: screening: step 3/6 applying valuation pre-filter
+progress: screening: step 3/6 complete: 1003 / 5575 remain
+progress: screening: step 4/6 fetching financials for 1003 candidates
+progress: screening: financials 1/1003 processed; 1 financial records available
+still running: screening: financials 7/1003: 000088 盐 田 港 (195s elapsed)
+progress: screening: financials 25/1003 processed; 25 financial records 
+available
+still running: screening: financials 27/1003: 000531 穗恒运Ａ (210s elapsed)
+still running: screening: financials 47/1003: 000617 中油资本 (225s elapsed)
+progress: screening: financials 50/1003 processed; 50 financial records 
+available
+still running: screening: financials 70/1003: 000776 广发证券 (240s elapsed)
+progress: screening: financials 75/1003 processed; 75 financial records 
+available
+still running: screening: financials 94/1003: 000923 河钢资源 (255s elapsed)
+progress: screening: financials 100/1003 processed; 100 financial records 
+available
+still running: screening: financials 120/1003: 001311 多利科技 (270s elapsed)
+progress: screening: financials 125/1003 processed; 125 financial records 
+available
+still running: screening: financials 147/1003: 002061 浙江交科 (285s elapsed)
+progress: screening: financials 150/1003 processed; 150 financial records 
+available
+still running: screening: financials 174/1003: 002236 大华股份 (300s elapsed)
+progress: screening: financials 175/1003 processed; 175 financial records 
+available
+still running: screening: financials 196/1003: 002340 格林美 (315s elapsed)
+progress: screening: financials 200/1003 processed; 200 financial records 
+available
+still running: screening: financials 221/1003: 002500 山西证券 (330s elapsed)
+progress: screening: financials 225/1003 processed; 225 financial records 
+available
+still running: screening: financials 248/1003: 002602 世纪华通 (345s elapsed)
+progress: screening: financials 250/1003 processed; 250 financial records 
+available
+still running: screening: financials 275/1003: 002801 微光股份 (360s elapsed)
+progress: screening: financials 275/1003 processed; 275 financial records 
+available
+progress: screening: financials 300/1003 processed; 300 financial records 
+available
+still running: screening: financials 302/1003: 002950 奥美医疗 (375s elapsed)
+progress: screening: financials 325/1003 processed; 325 financial records 
+available
+still running: screening: financials 333/1003: 300140 节能环境 (390s elapsed)
+still running: screening: financials 349/1003: 300403 汉宇集团 (405s elapsed)
+progress: screening: financials 350/1003 processed; 350 financial records 
+available
+still running: screening: financials 375/1003: 300761 立华股份 (420s elapsed)
+progress: screening: financials 375/1003 processed; 375 financial records 
+available
+still running: screening: financials 400/1003: 301087 可孚医疗 (435s elapsed)
+progress: screening: financials 400/1003 processed; 400 financial records 
+available
+still running: screening: financials 421/1003: 301631 壹连科技 (450s elapsed)
+progress: screening: financials 425/1003 processed; 425 financial records 
+available
+still running: screening: financials 445/1003: 600035 楚天高速 (465s elapsed)
+progress: screening: financials 450/1003 processed; 450 financial records 
+available
+still running: screening: financials 468/1003: 600141 兴发集团 (480s elapsed)
+progress: screening: financials 475/1003 processed; 475 financial records 
+available
+still running: screening: financials 488/1003: 600267 海正药业 (495s elapsed)
+progress: screening: financials 500/1003 processed; 500 financial records 
+available
+still running: screening: financials 507/1003: 600348 华阳股份 (510s elapsed)
+progress: screening: financials 525/1003 processed; 525 financial records 
+available
+still running: screening: financials 530/1003: 600480 凌云股份 (525s elapsed)
+still running: screening: financials 549/1003: 600559 老白干酒 (540s elapsed)
+progress: screening: financials 550/1003 processed; 550 financial records 
+available
+still running: screening: financials 563/1003: 600618 氯碱化工 (555s elapsed)
+progress: screening: financials 575/1003 processed; 575 financial records 
+available
+still running: screening: financials 585/1003: 600739 辽宁成大 (570s elapsed)
+progress: screening: financials 600/1003 processed; 600 financial records 
+available
+still running: screening: financials 603/1003: 600835 上海机电 (585s elapsed)
+progress: screening: financials 625/1003 processed; 625 financial records 
+available
+still running: screening: financials 628/1003: 600919 江苏银行 (600s elapsed)
+progress: screening: financials 650/1003 processed; 650 financial records 
+available
+still running: screening: financials 656/1003: 601021 春秋航空 (615s elapsed)
+progress: screening: financials 675/1003 processed; 675 financial records 
+available
+still running: screening: financials 679/1003: 601166 兴业银行 (630s elapsed)
+progress: screening: financials 700/1003 processed; 700 financial records 
+available
+still running: screening: financials 705/1003: 601339 百隆东方 (645s elapsed)
+still running: screening: financials 722/1003: 601609 金田股份 (660s elapsed)
+progress: screening: financials 725/1003 processed; 725 financial records 
+available
+still running: screening: financials 744/1003: 601811 新华文轩 (675s elapsed)
+progress: screening: financials 750/1003 processed; 750 financial records 
+available
+still running: screening: financials 768/1003: 601918 新集能源 (690s elapsed)
+progress: screening: financials 775/1003 processed; 775 financial records 
+available
+still running: screening: financials 794/1003: 603055 台华新材 (705s elapsed)
+progress: screening: financials 800/1003 processed; 800 financial records 
+available
+still running: screening: financials 821/1003: 603227 雪峰科技 (720s elapsed)
+progress: screening: financials 825/1003 processed; 825 financial records 
+available
+still running: screening: financials 844/1003: 603352 至信股份 (735s elapsed)
+progress: screening: financials 850/1003 processed; 850 financial records 
+available
+still running: screening: financials 869/1003: 603589 口子窖 (750s elapsed)
+progress: screening: financials 875/1003 processed; 875 financial records 
+available
+still running: screening: financials 894/1003: 603871 嘉友国际 (765s elapsed)
+progress: screening: financials 900/1003 processed; 900 financial records 
+available
+still running: screening: financials 920/1003: 605305 中际联合 (780s elapsed)
+progress: screening: financials 925/1003 processed; 925 financial records 
+available
+still running: screening: financials 946/1003: 688332 中科蓝讯 (795s elapsed)
+progress: screening: financials 950/1003 processed; 950 financial records 
+available
+still running: screening: financials 965/1003: 0700.HK TENCENT (810s elapsed)
+still running: screening: financials 974/1003: 2628.HK CHINA LIFE (825s elapsed)
+progress: screening: financials 975/1003 processed; 975 financial records 
+available
+still running: screening: financials 983/1003: 0012.HK HENDERSON LAND (840s 
+elapsed)
+still running: screening: financials 992/1003: 0762.HK CHINA UNICOM (855s 
+elapsed)
+still running: screening: financials 999/1003: 1109.HK CHINA RES LAND (870s 
+elapsed)
+progress: screening: financials 1000/1003 processed; 1000 financial records 
+available
+progress: screening: financials 1003/1003 processed; 1003 financial records 
+available
+progress: screening: step 4/6 complete: 1003 financials
+progress: screening: step 5/6 applying full quantitative filters
+progress: screening: step 5/6 complete: 614 candidates
+progress: screening: step 6/6 scoring and ranking 614 candidates
+progress: screening: screening complete: returning top 50 of 614 candidates
+
+progress: fetching universe and screening candidates finished (880.2s elapsed)
+
+✓ Screening complete — 50 candidates
+
+                            Screening Results                             
+┏━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━┳━━━━━━┳━━━━━┳━━━━━━━┓
+┃ Rank ┃ Ticker  ┃ Name          ┃ Market   ┃ Score ┃   PE ┃  PB ┃   ROE ┃
+┡━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━╇━━━━━━╇━━━━━╇━━━━━━━┩
+│    1 │ 601899  │ 紫金矿业      │ a_share  │  99.8 │ 15.2 │ 4.0 │ 33.0% │
+│    2 │ 603193  │ 润本股份      │ a_share  │  99.7 │ 28.9 │ 4.0 │ 14.5% │
+│    3 │ 000425  │ 徐工机械      │ a_share  │  99.5 │ 16.7 │ 1.8 │ 11.0% │
+│    4 │ 600900  │ 长江电力      │ a_share  │  99.3 │ 19.6 │ 3.0 │ 15.9% │
+│    5 │ 1088.HK │ CHINA SHENHUA │ hk_share │  99.2 │ 15.4 │ 1.7 │ 12.9% │
+│    6 │ 000429  │ 粤高速Ａ      │ a_share  │  99.0 │ 16.0 │ 2.5 │ 16.8% │
+│    7 │ 601225  │ 陕西煤业      │ a_share  │  98.9 │ 15.7 │ 2.6 │ 17.9% │
+│    8 │ 603993  │ 洛阳钼业      │ a_share  │  98.7 │ 19.1 │ 4.4 │ 26.6% │
+│    9 │ 0883.HK │ CNOOC         │ hk_share │  98.5 │  8.9 │ 1.3 │ 15.2% │
+│   10 │ 000157  │ 中联重科      │ a_share  │  98.4 │ 13.4 │ 1.1 │  8.3% │
+│   11 │ 000338  │ 潍柴动力      │ a_share  │  98.2 │ 24.5 │ 2.8 │ 12.1% │
+│   12 │ 601058  │ XD赛轮轮      │ a_share  │  98.0 │ 11.5 │ 1.8 │ 17.0% │
+│   13 │ 600660  │ 福耀玻璃      │ a_share  │  97.9 │ 15.0 │ 3.6 │ 25.6% │
+│   14 │ 600282  │ 南钢股份      │ a_share  │  97.7 │ 10.7 │ 1.1 │ 10.7% │
+│   15 │ 601857  │ 中国石油      │ a_share  │  97.6 │ 12.3 │ 1.2 │ 10.1% │
+│   16 │ 601000  │ 唐山港        │ a_share  │  97.4 │ 12.8 │ 1.2 │  9.5% │
+│   17 │ 601088  │ 中国神华      │ a_share  │  97.2 │ 18.2 │ 2.2 │ 12.8% │
+│   18 │ 301498  │ 乖宝宠物      │ a_share  │  97.1 │ 24.9 │ 3.5 │ 15.3% │
+│   19 │ 601600  │ 中国铝业      │ a_share  │  96.9 │ 14.4 │ 2.3 │ 17.6% │
+│   20 │ 600380  │ 健康元        │ a_share  │  96.7 │ 13.6 │ 1.2 │  9.1% │
+│   21 │ 0857.HK │ PETROCHINA    │ hk_share │  96.6 │ 10.6 │ 1.0 │  9.9% │
+│   22 │ 601717  │ 中创智领      │ a_share  │  96.4 │  7.4 │ 1.3 │ 18.9% │
+│   23 │ 600938  │ 中国海油      │ a_share  │  96.3 │ 13.7 │ 2.0 │ 15.6% │
+│   24 │ 000682  │ 东方电子      │ a_share  │  96.1 │ 18.9 │ 2.8 │ 16.5% │
+│   25 │ 000333  │ 美的集团      │ a_share  │  95.9 │ 14.1 │ 2.7 │ 19.7% │
+│   26 │ 002379  │ 宏桥控股      │ a_share  │  95.8 │ 13.6 │ 4.6 │ 34.6% │
+│   27 │ 000729  │ 燕京啤酒      │ a_share  │  95.6 │ 20.0 │ 2.1 │ 11.1% │
+│   28 │ 002550  │ 千红制药      │ a_share  │  95.4 │ 18.9 │ 2.7 │ 15.2% │
+│   29 │ 600886  │ 国投电力      │ a_share  │  95.3 │ 15.0 │ 1.6 │ 11.3% │
+│   30 │ 002697  │ 红旗连锁      │ a_share  │  95.1 │ 13.5 │ 1.3 │ 10.4% │
+│   31 │ 600941  │ XD中国移      │ a_share  │  95.0 │ 15.3 │ 1.5 │  9.9% │
+│   32 │ 000598  │ 兴蓉环境      │ a_share  │  94.8 │ 10.2 │ 1.0 │ 10.6% │
+│   33 │ 600415  │ 小商品城      │ a_share  │  94.6 │ 15.3 │ 2.7 │ 17.5% │
+│   34 │ 002415  │ 海康威视      │ a_share  │  94.5 │ 20.2 │ 3.3 │ 17.3% │
+│   35 │ 600690  │ 海尔智家      │ a_share  │  94.3 │  9.6 │ 1.5 │ 17.0% │
+│   36 │ 600160  │ 巨化股份      │ a_share  │  94.1 │ 28.1 │ 4.9 │ 19.6% │
+│   37 │ 000739  │ 普洛药业      │ a_share  │  94.0 │ 20.9 │ 2.8 │ 13.2% │
+│   38 │ 601965  │ 中国汽研      │ a_share  │  93.8 │ 14.5 │ 1.9 │ 14.3% │
+│   39 │ 002311  │ 海大集团      │ a_share  │  93.7 │ 17.1 │ 2.9 │ 17.4% │
+│   40 │ 600873  │ 梅花生物      │ a_share  │  93.5 │  7.8 │ 1.6 │ 21.5% │
+│   41 │ 600285  │ 羚锐制药      │ a_share  │  93.3 │ 16.2 │ 3.4 │ 23.9% │
+│   42 │ 601518  │ 吉林高速      │ a_share  │  93.2 │ 12.3 │ 1.0 │  8.9% │
+│   43 │ 301004  │ 嘉益股份      │ a_share  │  93.0 │ 12.6 │ 3.1 │ 23.0% │
+│   44 │ 601898  │ 中煤能源      │ a_share  │  92.8 │ 12.5 │ 1.4 │ 11.4% │
+│   45 │ 000680  │ 山推股份      │ a_share  │  92.7 │ 13.5 │ 2.5 │ 21.0% │
+│   46 │ 601089  │ 福元医药      │ a_share  │  92.5 │ 17.1 │ 2.1 │ 13.0% │
+│   47 │ 002461  │ 珠江啤酒      │ a_share  │  92.4 │ 23.0 │ 1.9 │  8.4% │
+│   48 │ 600809  │ 山西汾酒      │ a_share  │  92.2 │ 12.2 │ 3.3 │ 33.5% │
+│   49 │ 0027.HK │ GALAXY ENT    │ hk_share │  92.0 │ 12.8 │ 1.6 │ 12.8% │
+│   50 │ 300012  │ 华测检测      │ a_share  │  91.9 │ 23.6 │ 3.1 │ 14.0% │
+└──────┴─────────┴───────────────┴──────────┴───────┴──────┴─────┴───────┘
+progress: analysis 1/50 601899 紫金矿业 started
+progress: analysis 1/50 601899 紫金矿业: analysis started
+progress: analysis 1/50 601899 紫金矿业: business_nature started
+still running: analysis 1/50 601899 紫金矿业: business_nature started (15s 
+elapsed)
+progress: analysis 1/50 601899 紫金矿业: business_nature finished
+progress: analysis 1/50 601899 紫金矿业: management started
+still running: analysis 1/50 601899 紫金矿业: management started (30s elapsed)
+progress: analysis 1/50 601899 紫金矿业: management finished
+progress: analysis 1/50 601899 紫金矿业: moat started
+still running: analysis 1/50 601899 紫金矿业: moat started (45s elapsed)
+progress: analysis 1/50 601899 紫金矿业: moat finished
+progress: analysis 1/50 601899 紫金矿业: market_narrative started
+still running: analysis 1/50 601899 紫金矿业: market_narrative started (60s 
+elapsed)
+still running: analysis 1/50 601899 紫金矿业: market_narrative started (75s 
+elapsed)
+still running: analysis 1/50 601899 紫金矿业: market_narrative started (90s 
+elapsed)
+progress: analysis 1/50 601899 紫金矿业: market_narrative finished
+progress: analysis 1/50 601899 紫金矿业: recommendation started
+still running: analysis 1/50 601899 紫金矿业: recommendation started (105s 
+elapsed)
+progress: analysis 1/50 601899 紫金矿业: recommendation finished
+progress: analysis 1/50 601899 紫金矿业: analysis finished
+progress: analysis 1/50 601899 紫金矿业 finished (115.6s elapsed)
+progress: analysis 2/50 603193 润本股份 started
+progress: analysis 2/50 603193 润本股份: analysis started
+progress: analysis 2/50 603193 润本股份: business_nature started
+still running: analysis 2/50 603193 润本股份: business_nature started (15s 
+elapsed)
+progress: analysis 2/50 603193 润本股份: business_nature finished
+progress: analysis 2/50 603193 润本股份: management started
+still running: analysis 2/50 603193 润本股份: management started (30s elapsed)
+still running: analysis 2/50 603193 润本股份: management started (45s elapsed)
+progress: analysis 2/50 603193 润本股份: management finished
+progress: analysis 2/50 603193 润本股份: moat started
+still running: analysis 2/50 603193 润本股份: moat started (60s elapsed)
+progress: analysis 2/50 603193 润本股份: moat finished
+progress: analysis 2/50 603193 润本股份: market_narrative started
+still running: analysis 2/50 603193 润本股份: market_narrative started (75s 
+elapsed)
+still running: analysis 2/50 603193 润本股份: market_narrative started (90s 
+elapsed)
+still running: analysis 2/50 603193 润本股份: market_narrative started (105s 
+elapsed)
+progress: analysis 2/50 603193 润本股份: market_narrative finished
+progress: analysis 2/50 603193 润本股份: recommendation started
+still running: analysis 2/50 603193 润本股份: recommendation started (120s 
+elapsed)
+still running: analysis 2/50 603193 润本股份: recommendation started (135s 
+elapsed)
+still running: analysis 2/50 603193 润本股份: recommendation started (150s 
+elapsed)
+progress: analysis 2/50 603193 润本股份: recommendation finished
+progress: analysis 2/50 603193 润本股份: analysis finished
+progress: analysis 2/50 603193 润本股份 finished (158.4s elapsed)
+progress: analysis 3/50 000425 徐工机械 started
+progress: analysis 3/50 000425 徐工机械: analysis started
+progress: analysis 3/50 000425 徐工机械: business_nature started
+progress: analysis 3/50 000425 徐工机械: business_nature finished
+progress: analysis 3/50 000425 徐工机械: management started
+still running: analysis 3/50 000425 徐工机械: management started (15s elapsed)
+progress: analysis 3/50 000425 徐工机械: management finished
+progress: analysis 3/50 000425 徐工机械: moat started
+still running: analysis 3/50 000425 徐工机械: moat started (30s elapsed)
+still running: analysis 3/50 000425 徐工机械: moat started (45s elapsed)
+progress: analysis 3/50 000425 徐工机械: moat finished
+progress: analysis 3/50 000425 徐工机械: market_narrative started
+still running: analysis 3/50 000425 徐工机械: market_narrative started (60s 
+elapsed)
+still running: analysis 3/50 000425 徐工机械: market_narrative started (75s 
+elapsed)
+progress: analysis 3/50 000425 徐工机械: market_narrative finished
+progress: analysis 3/50 000425 徐工机械: recommendation started
+still running: analysis 3/50 000425 徐工机械: recommendation started (90s 
+elapsed)
+still running: analysis 3/50 000425 徐工机械: recommendation started (105s 
+elapsed)
+progress: analysis 3/50 000425 徐工机械: recommendation finished
+progress: analysis 3/50 000425 徐工机械: analysis finished
+progress: analysis 3/50 000425 徐工机械 finished (113.3s elapsed)
+progress: analysis 4/50 600900 长江电力 started
+progress: analysis 4/50 600900 长江电力: analysis started
+progress: analysis 4/50 600900 长江电力: business_nature started
+still running: analysis 4/50 600900 长江电力: business_nature started (15s 
+elapsed)
+progress: analysis 4/50 600900 长江电力: business_nature finished
+progress: analysis 4/50 600900 长江电力: management started
+still running: analysis 4/50 600900 长江电力: management started (30s elapsed)
+progress: analysis 4/50 600900 长江电力: management finished
+progress: analysis 4/50 600900 长江电力: moat started
+still running: analysis 4/50 600900 长江电力: moat started (45s elapsed)
+progress: analysis 4/50 600900 长江电力: moat finished
+progress: analysis 4/50 600900 长江电力: market_narrative started
+still running: analysis 4/50 600900 长江电力: market_narrative started (60s 
+elapsed)
+still running: analysis 4/50 600900 长江电力: market_narrative started (75s 
+elapsed)
+progress: analysis 4/50 600900 长江电力: market_narrative finished
+progress: analysis 4/50 600900 长江电力: recommendation started
+still running: analysis 4/50 600900 长江电力: recommendation started (90s 
+elapsed)
+still running: analysis 4/50 600900 长江电力: recommendation started (105s 
+elapsed)
+progress: analysis 4/50 600900 长江电力: recommendation finished
+progress: analysis 4/50 600900 长江电力: analysis finished
+progress: analysis 4/50 600900 长江电力 finished (105.3s elapsed)
+progress: analysis 5/50 1088.HK CHINA SHENHUA started
+progress: analysis 5/50 1088.HK CHINA SHENHUA: analysis started
+progress: analysis 5/50 1088.HK CHINA SHENHUA: business_nature started
+still running: analysis 5/50 1088.HK CHINA SHENHUA: business_nature started (15s
+elapsed)
+progress: analysis 5/50 1088.HK CHINA SHENHUA: business_nature finished
+progress: analysis 5/50 1088.HK CHINA SHENHUA: management started
+still running: analysis 5/50 1088.HK CHINA SHENHUA: management started (30s 
+elapsed)
+progress: analysis 5/50 1088.HK CHINA SHENHUA: management finished
+progress: analysis 5/50 1088.HK CHINA SHENHUA: moat started
+still running: analysis 5/50 1088.HK CHINA SHENHUA: moat started (45s elapsed)
+progress: analysis 5/50 1088.HK CHINA SHENHUA: moat finished
+progress: analysis 5/50 1088.HK CHINA SHENHUA: market_narrative started
+still running: analysis 5/50 1088.HK CHINA SHENHUA: market_narrative started 
+(60s elapsed)
+still running: analysis 5/50 1088.HK CHINA SHENHUA: market_narrative started 
+(75s elapsed)
+progress: analysis 5/50 1088.HK CHINA SHENHUA: market_narrative finished
+progress: analysis 5/50 1088.HK CHINA SHENHUA: recommendation started
+still running: analysis 5/50 1088.HK CHINA SHENHUA: recommendation started (90s 
+elapsed)
+still running: analysis 5/50 1088.HK CHINA SHENHUA: recommendation started (105s
+elapsed)
+progress: analysis 5/50 1088.HK CHINA SHENHUA: recommendation finished
+progress: analysis 5/50 1088.HK CHINA SHENHUA: analysis finished
+progress: analysis 5/50 1088.HK CHINA SHENHUA finished (106.8s elapsed)
+progress: analysis 6/50 000429 粤高速Ａ started
+progress: analysis 6/50 000429 粤高速Ａ: analysis started
+progress: analysis 6/50 000429 粤高速Ａ: business_nature started
+still running: analysis 6/50 000429 粤高速Ａ: business_nature started (15s 
+elapsed)
+progress: analysis 6/50 000429 粤高速Ａ: business_nature finished
+progress: analysis 6/50 000429 粤高速Ａ: management started
+still running: analysis 6/50 000429 粤高速Ａ: management started (30s elapsed)
+still running: analysis 6/50 000429 粤高速Ａ: management started (45s elapsed)
+progress: analysis 6/50 000429 粤高速Ａ: management finished
+progress: analysis 6/50 000429 粤高速Ａ: moat started
+still running: analysis 6/50 000429 粤高速Ａ: moat started (60s elapsed)
+progress: analysis 6/50 000429 粤高速Ａ: moat finished
+progress: analysis 6/50 000429 粤高速Ａ: market_narrative started
+still running: analysis 6/50 000429 粤高速Ａ: market_narrative started (75s 
+elapsed)
+progress: analysis 6/50 000429 粤高速Ａ: market_narrative finished
+progress: analysis 6/50 000429 粤高速Ａ: recommendation started
+still running: analysis 6/50 000429 粤高速Ａ: recommendation started (90s 
+elapsed)
+still running: analysis 6/50 000429 粤高速Ａ: recommendation started (105s 
+elapsed)
+progress: analysis 6/50 000429 粤高速Ａ: recommendation finished
+progress: analysis 6/50 000429 粤高速Ａ: analysis finished
+progress: analysis 6/50 000429 粤高速Ａ finished (108.8s elapsed)
+progress: analysis 7/50 601225 陕西煤业 started
+progress: analysis 7/50 601225 陕西煤业: analysis started
+progress: analysis 7/50 601225 陕西煤业: business_nature started
+progress: analysis 7/50 601225 陕西煤业: business_nature finished
+progress: analysis 7/50 601225 陕西煤业: management started
+still running: analysis 7/50 601225 陕西煤业: management started (15s elapsed)
+still running: analysis 7/50 601225 陕西煤业: management started (30s elapsed)
+progress: analysis 7/50 601225 陕西煤业: management finished
+progress: analysis 7/50 601225 陕西煤业: moat started
+still running: analysis 7/50 601225 陕西煤业: moat started (45s elapsed)
+still running: analysis 7/50 601225 陕西煤业: moat started (60s elapsed)
+progress: analysis 7/50 601225 陕西煤业: moat finished
+progress: analysis 7/50 601225 陕西煤业: market_narrative started
+still running: analysis 7/50 601225 陕西煤业: market_narrative started (75s 
+elapsed)
+progress: analysis 7/50 601225 陕西煤业: market_narrative finished
+progress: analysis 7/50 601225 陕西煤业: recommendation started
+still running: analysis 7/50 601225 陕西煤业: recommendation started (90s 
+elapsed)
+still running: analysis 7/50 601225 陕西煤业: recommendation started (105s 
+elapsed)
+progress: analysis 7/50 601225 陕西煤业: recommendation finished
+progress: analysis 7/50 601225 陕西煤业: analysis finished
+progress: analysis 7/50 601225 陕西煤业 finished (109.8s elapsed)
+progress: analysis 8/50 603993 洛阳钼业 started
+progress: analysis 8/50 603993 洛阳钼业: analysis started
+progress: analysis 8/50 603993 洛阳钼业: business_nature started
+progress: analysis 8/50 603993 洛阳钼业: business_nature finished
+progress: analysis 8/50 603993 洛阳钼业: management started
+still running: analysis 8/50 603993 洛阳钼业: management started (15s elapsed)
+progress: analysis 8/50 603993 洛阳钼业: management finished
+progress: analysis 8/50 603993 洛阳钼业: moat started
+still running: analysis 8/50 603993 洛阳钼业: moat started (30s elapsed)
+still running: analysis 8/50 603993 洛阳钼业: moat started (45s elapsed)
+progress: analysis 8/50 603993 洛阳钼业: moat finished
+progress: analysis 8/50 603993 洛阳钼业: market_narrative started
+still running: analysis 8/50 603993 洛阳钼业: market_narrative started (60s 
+elapsed)
+still running: analysis 8/50 603993 洛阳钼业: market_narrative started (75s 
+elapsed)
+still running: analysis 8/50 603993 洛阳钼业: market_narrative started (90s 
+elapsed)
+progress: analysis 8/50 603993 洛阳钼业: market_narrative finished
+progress: analysis 8/50 603993 洛阳钼业: recommendation started
+still running: analysis 8/50 603993 洛阳钼业: recommendation started (105s 
+elapsed)
+progress: analysis 8/50 603993 洛阳钼业: recommendation finished
+progress: analysis 8/50 603993 洛阳钼业: analysis finished
+progress: analysis 8/50 603993 洛阳钼业 finished (118.3s elapsed)
+progress: analysis 9/50 0883.HK CNOOC started
+progress: analysis 9/50 0883.HK CNOOC: analysis started
+progress: analysis 9/50 0883.HK CNOOC: business_nature started
+progress: analysis 9/50 0883.HK CNOOC: business_nature finished
+progress: analysis 9/50 0883.HK CNOOC: management started
+still running: analysis 9/50 0883.HK CNOOC: management started (15s elapsed)
+progress: analysis 9/50 0883.HK CNOOC: management finished
+progress: analysis 9/50 0883.HK CNOOC: moat started
+still running: analysis 9/50 0883.HK CNOOC: moat started (30s elapsed)
+progress: analysis 9/50 0883.HK CNOOC: moat finished
+progress: analysis 9/50 0883.HK CNOOC: market_narrative started
+still running: analysis 9/50 0883.HK CNOOC: market_narrative started (45s 
+elapsed)
+still running: analysis 9/50 0883.HK CNOOC: market_narrative started (60s 
+elapsed)
+progress: analysis 9/50 0883.HK CNOOC: market_narrative finished
+progress: analysis 9/50 0883.HK CNOOC: recommendation started
+still running: analysis 9/50 0883.HK CNOOC: recommendation started (75s elapsed)
+still running: analysis 9/50 0883.HK CNOOC: recommendation started (90s elapsed)
+progress: analysis 9/50 0883.HK CNOOC: recommendation finished
+progress: analysis 9/50 0883.HK CNOOC: analysis finished
+progress: analysis 9/50 0883.HK CNOOC finished (97.0s elapsed)
+progress: analysis 10/50 000157 中联重科 started
+progress: analysis 10/50 000157 中联重科: analysis started
+progress: analysis 10/50 000157 中联重科: business_nature started
+progress: analysis 10/50 000157 中联重科: business_nature finished
+progress: analysis 10/50 000157 中联重科: management started
+still running: analysis 10/50 000157 中联重科: management started (15s elapsed)
+progress: analysis 10/50 000157 中联重科: management finished
+progress: analysis 10/50 000157 中联重科: moat started
+still running: analysis 10/50 000157 中联重科: moat started (30s elapsed)
+still running: analysis 10/50 000157 中联重科: moat started (45s elapsed)
+progress: analysis 10/50 000157 中联重科: moat finished
+progress: analysis 10/50 000157 中联重科: market_narrative started
+still running: analysis 10/50 000157 中联重科: market_narrative started (60s 
+elapsed)
+progress: analysis 10/50 000157 中联重科: market_narrative finished
+progress: analysis 10/50 000157 中联重科: recommendation started
+still running: analysis 10/50 000157 中联重科: recommendation started (75s 
+elapsed)
+still running: analysis 10/50 000157 中联重科: recommendation started (90s 
+elapsed)
+progress: analysis 10/50 000157 中联重科: recommendation finished
+progress: analysis 10/50 000157 中联重科: analysis finished
+progress: analysis 10/50 000157 中联重科 finished (96.2s elapsed)
+progress: analysis 11/50 000338 潍柴动力 started
+progress: analysis 11/50 000338 潍柴动力: analysis started
+progress: analysis 11/50 000338 潍柴动力: business_nature started
+still running: analysis 11/50 000338 潍柴动力: business_nature started (15s 
+elapsed)
+progress: analysis 11/50 000338 潍柴动力: business_nature finished
+progress: analysis 11/50 000338 潍柴动力: management started
+still running: analysis 11/50 000338 潍柴动力: management started (30s elapsed)
+still running: analysis 11/50 000338 潍柴动力: management started (45s elapsed)
+still running: analysis 11/50 000338 潍柴动力: management started (60s elapsed)
+progress: analysis 11/50 000338 潍柴动力: management finished
+progress: analysis 11/50 000338 潍柴动力: moat started
+still running: analysis 11/50 000338 潍柴动力: moat started (75s elapsed)
+still running: analysis 11/50 000338 潍柴动力: moat started (90s elapsed)
+progress: analysis 11/50 000338 潍柴动力: moat finished
+progress: analysis 11/50 000338 潍柴动力: market_narrative started
+still running: analysis 11/50 000338 潍柴动力: market_narrative started (105s 
+elapsed)
+progress: analysis 11/50 000338 潍柴动力: market_narrative finished
+progress: analysis 11/50 000338 潍柴动力: recommendation started
+still running: analysis 11/50 000338 潍柴动力: recommendation started (120s 
+elapsed)
+still running: analysis 11/50 000338 潍柴动力: recommendation started (135s 
+elapsed)
+still running: analysis 11/50 000338 潍柴动力: recommendation started (150s 
+elapsed)
+progress: analysis 11/50 000338 潍柴动力: recommendation finished
+progress: analysis 11/50 000338 潍柴动力: analysis finished
+progress: analysis 11/50 000338 潍柴动力 finished (156.6s elapsed)
+progress: analysis 12/50 601058 XD赛轮轮 started
+progress: analysis 12/50 601058 XD赛轮轮: analysis started
+progress: analysis 12/50 601058 XD赛轮轮: business_nature started
+progress: analysis 12/50 601058 XD赛轮轮: business_nature finished
+progress: analysis 12/50 601058 XD赛轮轮: management started
+still running: analysis 12/50 601058 XD赛轮轮: management started (15s elapsed)
+still running: analysis 12/50 601058 XD赛轮轮: management started (30s elapsed)
+progress: analysis 12/50 601058 XD赛轮轮: management finished
+progress: analysis 12/50 601058 XD赛轮轮: moat started
+still running: analysis 12/50 601058 XD赛轮轮: moat started (45s elapsed)
+still running: analysis 12/50 601058 XD赛轮轮: moat started (60s elapsed)
+progress: analysis 12/50 601058 XD赛轮轮: moat finished
+progress: analysis 12/50 601058 XD赛轮轮: market_narrative started
+still running: analysis 12/50 601058 XD赛轮轮: market_narrative started (75s 
+elapsed)
+progress: analysis 12/50 601058 XD赛轮轮: market_narrative finished
+progress: analysis 12/50 601058 XD赛轮轮: recommendation started
+still running: analysis 12/50 601058 XD赛轮轮: recommendation started (90s 
+elapsed)
+still running: analysis 12/50 601058 XD赛轮轮: recommendation started (105s 
+elapsed)
+progress: analysis 12/50 601058 XD赛轮轮: recommendation finished
+progress: analysis 12/50 601058 XD赛轮轮: analysis finished
+progress: analysis 12/50 601058 XD赛轮轮 finished (107.2s elapsed)
+progress: analysis 13/50 600660 福耀玻璃 started
+progress: analysis 13/50 600660 福耀玻璃: analysis started
+progress: analysis 13/50 600660 福耀玻璃: business_nature started
+progress: analysis 13/50 600660 福耀玻璃: business_nature finished
+progress: analysis 13/50 600660 福耀玻璃: management started
+still running: analysis 13/50 600660 福耀玻璃: management started (15s elapsed)
+still running: analysis 13/50 600660 福耀玻璃: management started (30s elapsed)
+progress: analysis 13/50 600660 福耀玻璃: management finished
+progress: analysis 13/50 600660 福耀玻璃: moat started
+still running: analysis 13/50 600660 福耀玻璃: moat started (45s elapsed)
+still running: analysis 13/50 600660 福耀玻璃: moat started (60s elapsed)
+progress: analysis 13/50 600660 福耀玻璃: moat finished
+progress: analysis 13/50 600660 福耀玻璃: market_narrative started
+still running: analysis 13/50 600660 福耀玻璃: market_narrative started (75s 
+elapsed)
+progress: analysis 13/50 600660 福耀玻璃: market_narrative finished
+progress: analysis 13/50 600660 福耀玻璃: recommendation started
+still running: analysis 13/50 600660 福耀玻璃: recommendation started (90s 
+elapsed)
+progress: analysis 13/50 600660 福耀玻璃: recommendation finished
+progress: analysis 13/50 600660 福耀玻璃: analysis finished
+progress: analysis 13/50 600660 福耀玻璃 finished (100.6s elapsed)
+progress: analysis 14/50 600282 南钢股份 started
+progress: analysis 14/50 600282 南钢股份: analysis started
+progress: analysis 14/50 600282 南钢股份: business_nature started
+progress: analysis 14/50 600282 南钢股份: business_nature finished
+progress: analysis 14/50 600282 南钢股份: management started
+still running: analysis 14/50 600282 南钢股份: management started (15s elapsed)
+still running: analysis 14/50 600282 南钢股份: management started (30s elapsed)
+still running: analysis 14/50 600282 南钢股份: management started (45s elapsed)
+still running: analysis 14/50 600282 南钢股份: management started (60s elapsed)
+progress: analysis 14/50 600282 南钢股份: management finished
+progress: analysis 14/50 600282 南钢股份: moat started
+still running: analysis 14/50 600282 南钢股份: moat started (75s elapsed)
+progress: analysis 14/50 600282 南钢股份: moat finished
+progress: analysis 14/50 600282 南钢股份: market_narrative started
+still running: analysis 14/50 600282 南钢股份: market_narrative started (90s 
+elapsed)
+still running: analysis 14/50 600282 南钢股份: market_narrative started (105s 
+elapsed)
+progress: analysis 14/50 600282 南钢股份: market_narrative finished
+progress: analysis 14/50 600282 南钢股份: recommendation started
+still running: analysis 14/50 600282 南钢股份: recommendation started (120s 
+elapsed)
+still running: analysis 14/50 600282 南钢股份: recommendation started (135s 
+elapsed)
+progress: analysis 14/50 600282 南钢股份: recommendation finished
+progress: analysis 14/50 600282 南钢股份: analysis finished
+progress: analysis 14/50 600282 南钢股份 finished (143.7s elapsed)
+progress: analysis 15/50 601857 中国石油 started
+progress: analysis 15/50 601857 中国石油: analysis started
+progress: analysis 15/50 601857 中国石油: business_nature started
+progress: analysis 15/50 601857 中国石油: business_nature finished
+progress: analysis 15/50 601857 中国石油: management started
+still running: analysis 15/50 601857 中国石油: management started (15s elapsed)
+still running: analysis 15/50 601857 中国石油: management started (30s elapsed)
+still running: analysis 15/50 601857 中国石油: management started (45s elapsed)
+progress: analysis 15/50 601857 中国石油: management finished
+progress: analysis 15/50 601857 中国石油: moat started
+still running: analysis 15/50 601857 中国石油: moat started (60s elapsed)
+progress: analysis 15/50 601857 中国石油: moat finished
+progress: analysis 15/50 601857 中国石油: market_narrative started
+still running: analysis 15/50 601857 中国石油: market_narrative started (75s 
+elapsed)
+progress: analysis 15/50 601857 中国石油: market_narrative finished
+progress: analysis 15/50 601857 中国石油: recommendation started
+still running: analysis 15/50 601857 中国石油: recommendation started (90s 
+elapsed)
+progress: analysis 15/50 601857 中国石油: recommendation finished
+progress: analysis 15/50 601857 中国石油: analysis finished
+progress: analysis 15/50 601857 中国石油 finished (104.6s elapsed)
+progress: analysis 16/50 601000 唐山港 started
+progress: analysis 16/50 601000 唐山港: analysis started
+progress: analysis 16/50 601000 唐山港: business_nature started
+still running: analysis 16/50 601000 唐山港: business_nature started (15s 
+elapsed)
+progress: analysis 16/50 601000 唐山港: business_nature finished
+progress: analysis 16/50 601000 唐山港: management started
+still running: analysis 16/50 601000 唐山港: management started (30s elapsed)
+progress: analysis 16/50 601000 唐山港: management finished
+progress: analysis 16/50 601000 唐山港: moat started
+still running: analysis 16/50 601000 唐山港: moat started (45s elapsed)
+still running: analysis 16/50 601000 唐山港: moat started (60s elapsed)
+progress: analysis 16/50 601000 唐山港: moat finished
+progress: analysis 16/50 601000 唐山港: market_narrative started
+still running: analysis 16/50 601000 唐山港: market_narrative started (75s 
+elapsed)
+progress: analysis 16/50 601000 唐山港: market_narrative finished
+progress: analysis 16/50 601000 唐山港: recommendation started
+still running: analysis 16/50 601000 唐山港: recommendation started (90s 
+elapsed)
+still running: analysis 16/50 601000 唐山港: recommendation started (105s 
+elapsed)
+progress: analysis 16/50 601000 唐山港: recommendation finished
+progress: analysis 16/50 601000 唐山港: analysis finished
+progress: analysis 16/50 601000 唐山港 finished (112.4s elapsed)
+progress: analysis 17/50 601088 中国神华 started
+progress: analysis 17/50 601088 中国神华: analysis started
+progress: analysis 17/50 601088 中国神华: business_nature started
+progress: analysis 17/50 601088 中国神华: business_nature finished
+progress: analysis 17/50 601088 中国神华: management started
+still running: analysis 17/50 601088 中国神华: management started (15s elapsed)
+still running: analysis 17/50 601088 中国神华: management started (30s elapsed)
+progress: analysis 17/50 601088 中国神华: management finished
+progress: analysis 17/50 601088 中国神华: moat started
+still running: analysis 17/50 601088 中国神华: moat started (45s elapsed)
+still running: analysis 17/50 601088 中国神华: moat started (60s elapsed)
+progress: analysis 17/50 601088 中国神华: moat finished
+progress: analysis 17/50 601088 中国神华: market_narrative started
+still running: analysis 17/50 601088 中国神华: market_narrative started (75s 
+elapsed)
+still running: analysis 17/50 601088 中国神华: market_narrative started (90s 
+elapsed)
+still running: analysis 17/50 601088 中国神华: market_narrative started (105s 
+elapsed)
+progress: analysis 17/50 601088 中国神华: market_narrative finished
+progress: analysis 17/50 601088 中国神华: recommendation started
+still running: analysis 17/50 601088 中国神华: recommendation started (120s 
+elapsed)
+progress: analysis 17/50 601088 中国神华: recommendation finished
+progress: analysis 17/50 601088 中国神华: analysis finished
+progress: analysis 17/50 601088 中国神华 finished (131.6s elapsed)
+progress: analysis 18/50 301498 乖宝宠物 started
+progress: analysis 18/50 301498 乖宝宠物: analysis started
+progress: analysis 18/50 301498 乖宝宠物: business_nature started
+progress: analysis 18/50 301498 乖宝宠物: business_nature finished
+progress: analysis 18/50 301498 乖宝宠物: management started
+still running: analysis 18/50 301498 乖宝宠物: management started (15s elapsed)
+still running: analysis 18/50 301498 乖宝宠物: management started (30s elapsed)
+progress: analysis 18/50 301498 乖宝宠物: management finished
+progress: analysis 18/50 301498 乖宝宠物: moat started
+still running: analysis 18/50 301498 乖宝宠物: moat started (45s elapsed)
+still running: analysis 18/50 301498 乖宝宠物: moat started (60s elapsed)
+progress: analysis 18/50 301498 乖宝宠物: moat finished
+progress: analysis 18/50 301498 乖宝宠物: market_narrative started
+still running: analysis 18/50 301498 乖宝宠物: market_narrative started (75s 
+elapsed)
+still running: analysis 18/50 301498 乖宝宠物: market_narrative started (90s 
+elapsed)
+progress: analysis 18/50 301498 乖宝宠物: market_narrative finished
+progress: analysis 18/50 301498 乖宝宠物: recommendation started
+still running: analysis 18/50 301498 乖宝宠物: recommendation started (105s 
+elapsed)
+progress: analysis 18/50 301498 乖宝宠物: recommendation finished
+progress: analysis 18/50 301498 乖宝宠物: analysis finished
+progress: analysis 18/50 301498 乖宝宠物 finished (118.1s elapsed)
+progress: analysis 19/50 601600 中国铝业 started
+progress: analysis 19/50 601600 中国铝业: analysis started
+progress: analysis 19/50 601600 中国铝业: business_nature started
+still running: analysis 19/50 601600 中国铝业: business_nature started (15s 
+elapsed)
+progress: analysis 19/50 601600 中国铝业: business_nature finished
+progress: analysis 19/50 601600 中国铝业: management started
+still running: analysis 19/50 601600 中国铝业: management started (30s elapsed)
+still running: analysis 19/50 601600 中国铝业: management started (45s elapsed)
+still running: analysis 19/50 601600 中国铝业: management started (60s elapsed)
+progress: analysis 19/50 601600 中国铝业: management finished
+progress: analysis 19/50 601600 中国铝业: moat started
+still running: analysis 19/50 601600 中国铝业: moat started (75s elapsed)
+still running: analysis 19/50 601600 中国铝业: moat started (90s elapsed)
+progress: analysis 19/50 601600 中国铝业: moat finished
+progress: analysis 19/50 601600 中国铝业: market_narrative started
+still running: analysis 19/50 601600 中国铝业: market_narrative started (105s 
+elapsed)
+still running: analysis 19/50 601600 中国铝业: market_narrative started (120s 
+elapsed)
+progress: analysis 19/50 601600 中国铝业: market_narrative finished
+progress: analysis 19/50 601600 中国铝业: recommendation started
+still running: analysis 19/50 601600 中国铝业: recommendation started (135s 
+elapsed)
+still running: analysis 19/50 601600 中国铝业: recommendation started (150s 
+elapsed)
+progress: analysis 19/50 601600 中国铝业: recommendation finished
+progress: analysis 19/50 601600 中国铝业: analysis finished
+progress: analysis 19/50 601600 中国铝业 finished (159.9s elapsed)
+progress: analysis 20/50 600380 健康元 started
+progress: analysis 20/50 600380 健康元: analysis started
+progress: analysis 20/50 600380 健康元: business_nature started
+progress: analysis 20/50 600380 健康元: business_nature finished
+progress: analysis 20/50 600380 健康元: management started
+still running: analysis 20/50 600380 健康元: management started (15s elapsed)
+still running: analysis 20/50 600380 健康元: management started (30s elapsed)
+progress: analysis 20/50 600380 健康元: management finished
+progress: analysis 20/50 600380 健康元: moat started
+still running: analysis 20/50 600380 健康元: moat started (45s elapsed)
+progress: analysis 20/50 600380 健康元: moat finished
+progress: analysis 20/50 600380 健康元: market_narrative started
+still running: analysis 20/50 600380 健康元: market_narrative started (60s 
+elapsed)
+still running: analysis 20/50 600380 健康元: market_narrative started (75s 
+elapsed)
+progress: analysis 20/50 600380 健康元: market_narrative finished
+progress: analysis 20/50 600380 健康元: recommendation started
+still running: analysis 20/50 600380 健康元: recommendation started (90s 
+elapsed)
+progress: analysis 20/50 600380 健康元: recommendation finished
+progress: analysis 20/50 600380 健康元: analysis finished
+progress: analysis 20/50 600380 健康元 finished (101.4s elapsed)
+progress: analysis 21/50 0857.HK PETROCHINA started
+progress: analysis 21/50 0857.HK PETROCHINA: analysis started
+progress: analysis 21/50 0857.HK PETROCHINA: business_nature started
+still running: analysis 21/50 0857.HK PETROCHINA: business_nature started (15s 
+elapsed)
+progress: analysis 21/50 0857.HK PETROCHINA: business_nature finished
+progress: analysis 21/50 0857.HK PETROCHINA: management started
+still running: analysis 21/50 0857.HK PETROCHINA: management started (30s 
+elapsed)
+still running: analysis 21/50 0857.HK PETROCHINA: management started (45s 
+elapsed)
+progress: analysis 21/50 0857.HK PETROCHINA: management finished
+progress: analysis 21/50 0857.HK PETROCHINA: moat started
+still running: analysis 21/50 0857.HK PETROCHINA: moat started (60s elapsed)
+still running: analysis 21/50 0857.HK PETROCHINA: moat started (75s elapsed)
+progress: analysis 21/50 0857.HK PETROCHINA: moat finished
+progress: analysis 21/50 0857.HK PETROCHINA: market_narrative started
+still running: analysis 21/50 0857.HK PETROCHINA: market_narrative started (90s 
+elapsed)
+still running: analysis 21/50 0857.HK PETROCHINA: market_narrative started (105s
+elapsed)
+progress: analysis 21/50 0857.HK PETROCHINA: market_narrative finished
+progress: analysis 21/50 0857.HK PETROCHINA: recommendation started
+still running: analysis 21/50 0857.HK PETROCHINA: recommendation started (120s 
+elapsed)
+still running: analysis 21/50 0857.HK PETROCHINA: recommendation started (135s 
+elapsed)
+progress: analysis 21/50 0857.HK PETROCHINA: recommendation finished
+progress: analysis 21/50 0857.HK PETROCHINA: analysis finished
+progress: analysis 21/50 0857.HK PETROCHINA finished (135.7s elapsed)
+progress: analysis 22/50 601717 中创智领 started
+progress: analysis 22/50 601717 中创智领: analysis started
+progress: analysis 22/50 601717 中创智领: business_nature started
+still running: analysis 22/50 601717 中创智领: business_nature started (15s 
+elapsed)
+progress: analysis 22/50 601717 中创智领: business_nature finished
+progress: analysis 22/50 601717 中创智领: management started
+still running: analysis 22/50 601717 中创智领: management started (30s elapsed)
+progress: analysis 22/50 601717 中创智领: management finished
+progress: analysis 22/50 601717 中创智领: moat started
+still running: analysis 22/50 601717 中创智领: moat started (45s elapsed)
+progress: analysis 22/50 601717 中创智领: moat finished
+progress: analysis 22/50 601717 中创智领: market_narrative started
+still running: analysis 22/50 601717 中创智领: market_narrative started (60s 
+elapsed)
+progress: analysis 22/50 601717 中创智领: market_narrative finished
+progress: analysis 22/50 601717 中创智领: recommendation started
+still running: analysis 22/50 601717 中创智领: recommendation started (75s 
+elapsed)
+still running: analysis 22/50 601717 中创智领: recommendation started (90s 
+elapsed)
+progress: analysis 22/50 601717 中创智领: recommendation finished
+progress: analysis 22/50 601717 中创智领: analysis finished
+progress: analysis 22/50 601717 中创智领 finished (93.2s elapsed)
+progress: analysis 23/50 600938 中国海油 started
+progress: analysis 23/50 600938 中国海油: analysis started
+progress: analysis 23/50 600938 中国海油: business_nature started
+progress: analysis 23/50 600938 中国海油: business_nature finished
+progress: analysis 23/50 600938 中国海油: management started
+still running: analysis 23/50 600938 中国海油: management started (15s elapsed)
+still running: analysis 23/50 600938 中国海油: management started (30s elapsed)
+progress: analysis 23/50 600938 中国海油: management finished
+progress: analysis 23/50 600938 中国海油: moat started
+still running: analysis 23/50 600938 中国海油: moat started (45s elapsed)
+progress: analysis 23/50 600938 中国海油: moat finished
+progress: analysis 23/50 600938 中国海油: market_narrative started
+still running: analysis 23/50 600938 中国海油: market_narrative started (60s 
+elapsed)
+still running: analysis 23/50 600938 中国海油: market_narrative started (75s 
+elapsed)
+still running: analysis 23/50 600938 中国海油: market_narrative started (90s 
+elapsed)
+progress: analysis 23/50 600938 中国海油: market_narrative finished
+progress: analysis 23/50 600938 中国海油: recommendation started
+still running: analysis 23/50 600938 中国海油: recommendation started (105s 
+elapsed)
+progress: analysis 23/50 600938 中国海油: recommendation finished
+progress: analysis 23/50 600938 中国海油: analysis finished
+progress: analysis 23/50 600938 中国海油 finished (117.3s elapsed)
+progress: analysis 24/50 000682 东方电子 started
+progress: analysis 24/50 000682 东方电子: analysis started
+progress: analysis 24/50 000682 东方电子: business_nature started
+progress: analysis 24/50 000682 东方电子: business_nature finished
+progress: analysis 24/50 000682 东方电子: management started
+still running: analysis 24/50 000682 东方电子: management started (15s elapsed)
+progress: analysis 24/50 000682 东方电子: management finished
+progress: analysis 24/50 000682 东方电子: moat started
+still running: analysis 24/50 000682 东方电子: moat started (30s elapsed)
+still running: analysis 24/50 000682 东方电子: moat started (45s elapsed)
+progress: analysis 24/50 000682 东方电子: moat finished
+progress: analysis 24/50 000682 东方电子: market_narrative started
+still running: analysis 24/50 000682 东方电子: market_narrative started (60s 
+elapsed)
+progress: analysis 24/50 000682 东方电子: market_narrative finished
+progress: analysis 24/50 000682 东方电子: recommendation started
+still running: analysis 24/50 000682 东方电子: recommendation started (75s 
+elapsed)
+still running: analysis 24/50 000682 东方电子: recommendation started (90s 
+elapsed)
+progress: analysis 24/50 000682 东方电子: recommendation finished
+progress: analysis 24/50 000682 东方电子: analysis finished
+progress: analysis 24/50 000682 东方电子 finished (100.8s elapsed)
+progress: analysis 25/50 000333 美的集团 started
+progress: analysis 25/50 000333 美的集团: analysis started
+progress: analysis 25/50 000333 美的集团: business_nature started
+still running: analysis 25/50 000333 美的集团: business_nature started (15s 
+elapsed)
+progress: analysis 25/50 000333 美的集团: business_nature finished
+progress: analysis 25/50 000333 美的集团: management started
+still running: analysis 25/50 000333 美的集团: management started (30s elapsed)
+still running: analysis 25/50 000333 美的集团: management started (45s elapsed)
+progress: analysis 25/50 000333 美的集团: management finished
+progress: analysis 25/50 000333 美的集团: moat started
+still running: analysis 25/50 000333 美的集团: moat started (60s elapsed)
+progress: analysis 25/50 000333 美的集团: moat finished
+progress: analysis 25/50 000333 美的集团: market_narrative started
+still running: analysis 25/50 000333 美的集团: market_narrative started (75s 
+elapsed)
+still running: analysis 25/50 000333 美的集团: market_narrative started (90s 
+elapsed)
+progress: analysis 25/50 000333 美的集团: market_narrative finished
+progress: analysis 25/50 000333 美的集团: recommendation started
+still running: analysis 25/50 000333 美的集团: recommendation started (105s 
+elapsed)
+progress: analysis 25/50 000333 美的集团: recommendation finished
+progress: analysis 25/50 000333 美的集团: analysis finished
+progress: analysis 25/50 000333 美的集团 finished (116.3s elapsed)
+progress: analysis 26/50 002379 宏桥控股 started
+progress: analysis 26/50 002379 宏桥控股: analysis started
+progress: analysis 26/50 002379 宏桥控股: business_nature started
+still running: analysis 26/50 002379 宏桥控股: business_nature started (15s 
+elapsed)
+progress: analysis 26/50 002379 宏桥控股: business_nature finished
+progress: analysis 26/50 002379 宏桥控股: management started
+still running: analysis 26/50 002379 宏桥控股: management started (30s elapsed)
+still running: analysis 26/50 002379 宏桥控股: management started (45s elapsed)
+still running: analysis 26/50 002379 宏桥控股: management started (60s elapsed)
+progress: analysis 26/50 002379 宏桥控股: management finished
+progress: analysis 26/50 002379 宏桥控股: moat started
+still running: analysis 26/50 002379 宏桥控股: moat started (75s elapsed)
+progress: analysis 26/50 002379 宏桥控股: moat finished
+progress: analysis 26/50 002379 宏桥控股: market_narrative started
+still running: analysis 26/50 002379 宏桥控股: market_narrative started (90s 
+elapsed)
+still running: analysis 26/50 002379 宏桥控股: market_narrative started (105s 
+elapsed)
+still running: analysis 26/50 002379 宏桥控股: market_narrative started (120s 
+elapsed)
+progress: analysis 26/50 002379 宏桥控股: market_narrative finished
+progress: analysis 26/50 002379 宏桥控股: recommendation started
+still running: analysis 26/50 002379 宏桥控股: recommendation started (135s 
+elapsed)
+still running: analysis 26/50 002379 宏桥控股: recommendation started (150s 
+elapsed)
+still running: analysis 26/50 002379 宏桥控股: recommendation started (165s 
+elapsed)
+progress: analysis 26/50 002379 宏桥控股: recommendation finished
+progress: analysis 26/50 002379 宏桥控股: analysis finished
+progress: analysis 26/50 002379 宏桥控股 finished (177.8s elapsed)
+progress: analysis 27/50 000729 燕京啤酒 started
+progress: analysis 27/50 000729 燕京啤酒: analysis started
+progress: analysis 27/50 000729 燕京啤酒: business_nature started
+progress: analysis 27/50 000729 燕京啤酒: business_nature finished
+progress: analysis 27/50 000729 燕京啤酒: management started
+still running: analysis 27/50 000729 燕京啤酒: management started (15s elapsed)
+still running: analysis 27/50 000729 燕京啤酒: management started (30s elapsed)
+progress: analysis 27/50 000729 燕京啤酒: management finished
+progress: analysis 27/50 000729 燕京啤酒: moat started
+still running: analysis 27/50 000729 燕京啤酒: moat started (45s elapsed)
+progress: analysis 27/50 000729 燕京啤酒: moat finished
+progress: analysis 27/50 000729 燕京啤酒: market_narrative started
+still running: analysis 27/50 000729 燕京啤酒: market_narrative started (60s 
+elapsed)
+still running: analysis 27/50 000729 燕京啤酒: market_narrative started (75s 
+elapsed)
+progress: analysis 27/50 000729 燕京啤酒: market_narrative finished
+progress: analysis 27/50 000729 燕京啤酒: recommendation started
+still running: analysis 27/50 000729 燕京啤酒: recommendation started (90s 
+elapsed)
+progress: analysis 27/50 000729 燕京啤酒: recommendation finished
+progress: analysis 27/50 000729 燕京啤酒: analysis finished
+progress: analysis 27/50 000729 燕京啤酒 finished (103.7s elapsed)
+progress: analysis 28/50 002550 千红制药 started
+progress: analysis 28/50 002550 千红制药: analysis started
+progress: analysis 28/50 002550 千红制药: business_nature started
+progress: analysis 28/50 002550 千红制药: business_nature finished
+progress: analysis 28/50 002550 千红制药: management started
+still running: analysis 28/50 002550 千红制药: management started (15s elapsed)
+still running: analysis 28/50 002550 千红制药: management started (30s elapsed)
+progress: analysis 28/50 002550 千红制药: management finished
+progress: analysis 28/50 002550 千红制药: moat started
+still running: analysis 28/50 002550 千红制药: moat started (45s elapsed)
+progress: analysis 28/50 002550 千红制药: moat finished
+progress: analysis 28/50 002550 千红制药: market_narrative started
+still running: analysis 28/50 002550 千红制药: market_narrative started (60s 
+elapsed)
+still running: analysis 28/50 002550 千红制药: market_narrative started (75s 
+elapsed)
+progress: analysis 28/50 002550 千红制药: market_narrative finished
+progress: analysis 28/50 002550 千红制药: recommendation started
+still running: analysis 28/50 002550 千红制药: recommendation started (90s 
+elapsed)
+still running: analysis 28/50 002550 千红制药: recommendation started (105s 
+elapsed)
+progress: analysis 28/50 002550 千红制药: recommendation finished
+progress: analysis 28/50 002550 千红制药: analysis finished
+progress: analysis 28/50 002550 千红制药 finished (112.0s elapsed)
+progress: analysis 29/50 600886 国投电力 started
+progress: analysis 29/50 600886 国投电力: analysis started
+progress: analysis 29/50 600886 国投电力: business_nature started
+progress: analysis 29/50 600886 国投电力: business_nature finished
+progress: analysis 29/50 600886 国投电力: management started
+still running: analysis 29/50 600886 国投电力: management started (15s elapsed)
+still running: analysis 29/50 600886 国投电力: management started (30s elapsed)
+progress: analysis 29/50 600886 国投电力: management finished
+progress: analysis 29/50 600886 国投电力: moat started
+still running: analysis 29/50 600886 国投电力: moat started (45s elapsed)
+progress: analysis 29/50 600886 国投电力: moat finished
+progress: analysis 29/50 600886 国投电力: market_narrative started
+still running: analysis 29/50 600886 国投电力: market_narrative started (60s 
+elapsed)
+progress: analysis 29/50 600886 国投电力: market_narrative finished
+progress: analysis 29/50 600886 国投电力: recommendation started
+still running: analysis 29/50 600886 国投电力: recommendation started (75s 
+elapsed)
+still running: analysis 29/50 600886 国投电力: recommendation started (90s 
+elapsed)
+progress: analysis 29/50 600886 国投电力: recommendation finished
+progress: analysis 29/50 600886 国投电力: analysis finished
+progress: analysis 29/50 600886 国投电力 finished (94.7s elapsed)
+progress: analysis 30/50 002697 红旗连锁 started
+progress: analysis 30/50 002697 红旗连锁: analysis started
+progress: analysis 30/50 002697 红旗连锁: business_nature started
+still running: analysis 30/50 002697 红旗连锁: business_nature started (15s 
+elapsed)
+progress: analysis 30/50 002697 红旗连锁: business_nature finished
+progress: analysis 30/50 002697 红旗连锁: management started
+still running: analysis 30/50 002697 红旗连锁: management started (30s elapsed)
+still running: analysis 30/50 002697 红旗连锁: management started (45s elapsed)
+progress: analysis 30/50 002697 红旗连锁: management finished
+progress: analysis 30/50 002697 红旗连锁: moat started
+still running: analysis 30/50 002697 红旗连锁: moat started (60s elapsed)
+progress: analysis 30/50 002697 红旗连锁: moat finished
+progress: analysis 30/50 002697 红旗连锁: market_narrative started
+still running: analysis 30/50 002697 红旗连锁: market_narrative started (75s 
+elapsed)
+progress: analysis 30/50 002697 红旗连锁: market_narrative finished
+progress: analysis 30/50 002697 红旗连锁: recommendation started
+still running: analysis 30/50 002697 红旗连锁: recommendation started (90s 
+elapsed)
+still running: analysis 30/50 002697 红旗连锁: recommendation started (105s 
+elapsed)
+progress: analysis 30/50 002697 红旗连锁: recommendation finished
+progress: analysis 30/50 002697 红旗连锁: analysis finished
+progress: analysis 30/50 002697 红旗连锁 finished (118.4s elapsed)
+progress: analysis 31/50 600941 XD中国移 started
+progress: analysis 31/50 600941 XD中国移: analysis started
+progress: analysis 31/50 600941 XD中国移: business_nature started
+still running: analysis 31/50 600941 XD中国移: business_nature started (15s 
+elapsed)
+progress: analysis 31/50 600941 XD中国移: business_nature finished
+progress: analysis 31/50 600941 XD中国移: management started
+still running: analysis 31/50 600941 XD中国移: management started (30s elapsed)
+progress: analysis 31/50 600941 XD中国移: management finished
+progress: analysis 31/50 600941 XD中国移: moat started
+still running: analysis 31/50 600941 XD中国移: moat started (45s elapsed)
+still running: analysis 31/50 600941 XD中国移: moat started (60s elapsed)
+progress: analysis 31/50 600941 XD中国移: moat finished
+progress: analysis 31/50 600941 XD中国移: market_narrative started
+still running: analysis 31/50 600941 XD中国移: market_narrative started (75s 
+elapsed)
+still running: analysis 31/50 600941 XD中国移: market_narrative started (90s 
+elapsed)
+progress: analysis 31/50 600941 XD中国移: market_narrative finished
+progress: analysis 31/50 600941 XD中国移: recommendation started
+still running: analysis 31/50 600941 XD中国移: recommendation started (105s 
+elapsed)
+progress: analysis 31/50 600941 XD中国移: recommendation finished
+progress: analysis 31/50 600941 XD中国移: analysis finished
+progress: analysis 31/50 600941 XD中国移 finished (112.3s elapsed)
+progress: analysis 32/50 000598 兴蓉环境 started
+progress: analysis 32/50 000598 兴蓉环境: analysis started
+progress: analysis 32/50 000598 兴蓉环境: business_nature started
+progress: analysis 32/50 000598 兴蓉环境: business_nature finished
+progress: analysis 32/50 000598 兴蓉环境: management started
+still running: analysis 32/50 000598 兴蓉环境: management started (15s elapsed)
+still running: analysis 32/50 000598 兴蓉环境: management started (30s elapsed)
+progress: analysis 32/50 000598 兴蓉环境: management finished
+progress: analysis 32/50 000598 兴蓉环境: moat started
+still running: analysis 32/50 000598 兴蓉环境: moat started (45s elapsed)
+progress: analysis 32/50 000598 兴蓉环境: moat finished
+progress: analysis 32/50 000598 兴蓉环境: market_narrative started
+still running: analysis 32/50 000598 兴蓉环境: market_narrative started (60s 
+elapsed)
+still running: analysis 32/50 000598 兴蓉环境: market_narrative started (75s 
+elapsed)
+progress: analysis 32/50 000598 兴蓉环境: market_narrative finished
+progress: analysis 32/50 000598 兴蓉环境: recommendation started
+still running: analysis 32/50 000598 兴蓉环境: recommendation started (90s 
+elapsed)
+progress: analysis 32/50 000598 兴蓉环境: recommendation finished
+progress: analysis 32/50 000598 兴蓉环境: analysis finished
+progress: analysis 32/50 000598 兴蓉环境 finished (99.6s elapsed)
+progress: analysis 33/50 600415 小商品城 started
+progress: analysis 33/50 600415 小商品城: analysis started
+progress: analysis 33/50 600415 小商品城: business_nature started
+progress: analysis 33/50 600415 小商品城: business_nature finished
+progress: analysis 33/50 600415 小商品城: management started
+still running: analysis 33/50 600415 小商品城: management started (15s elapsed)
+still running: analysis 33/50 600415 小商品城: management started (30s elapsed)
+progress: analysis 33/50 600415 小商品城: management finished
+progress: analysis 33/50 600415 小商品城: moat started
+still running: analysis 33/50 600415 小商品城: moat started (45s elapsed)
+progress: analysis 33/50 600415 小商品城: moat finished
+progress: analysis 33/50 600415 小商品城: market_narrative started
+still running: analysis 33/50 600415 小商品城: market_narrative started (60s 
+elapsed)
+still running: analysis 33/50 600415 小商品城: market_narrative started (75s 
+elapsed)
+progress: analysis 33/50 600415 小商品城: market_narrative finished
+progress: analysis 33/50 600415 小商品城: recommendation started
+still running: analysis 33/50 600415 小商品城: recommendation started (90s 
+elapsed)
+progress: analysis 33/50 600415 小商品城: recommendation finished
+progress: analysis 33/50 600415 小商品城: analysis finished
+progress: analysis 33/50 600415 小商品城 finished (96.1s elapsed)
+progress: analysis 34/50 002415 海康威视 started
+progress: analysis 34/50 002415 海康威视: analysis started
+progress: analysis 34/50 002415 海康威视: business_nature started
+progress: analysis 34/50 002415 海康威视: business_nature finished
+progress: analysis 34/50 002415 海康威视: management started
+still running: analysis 34/50 002415 海康威视: management started (15s elapsed)
+progress: analysis 34/50 002415 海康威视: management finished
+progress: analysis 34/50 002415 海康威视: moat started
+still running: analysis 34/50 002415 海康威视: moat started (30s elapsed)
+progress: analysis 34/50 002415 海康威视: moat finished
+progress: analysis 34/50 002415 海康威视: market_narrative started
+still running: analysis 34/50 002415 海康威视: market_narrative started (45s 
+elapsed)
+progress: analysis 34/50 002415 海康威视: market_narrative finished
+progress: analysis 34/50 002415 海康威视: recommendation started
+still running: analysis 34/50 002415 海康威视: recommendation started (60s 
+elapsed)
+still running: analysis 34/50 002415 海康威视: recommendation started (75s 
+elapsed)
+progress: analysis 34/50 002415 海康威视: recommendation finished
+progress: analysis 34/50 002415 海康威视: analysis finished
+progress: analysis 34/50 002415 海康威视 finished (80.2s elapsed)
+progress: analysis 35/50 600690 海尔智家 started
+progress: analysis 35/50 600690 海尔智家: analysis started
+progress: analysis 35/50 600690 海尔智家: business_nature started
+progress: analysis 35/50 600690 海尔智家: business_nature finished
+progress: analysis 35/50 600690 海尔智家: management started
+still running: analysis 35/50 600690 海尔智家: management started (15s elapsed)
+still running: analysis 35/50 600690 海尔智家: management started (30s elapsed)
+progress: analysis 35/50 600690 海尔智家: management finished
+progress: analysis 35/50 600690 海尔智家: moat started
+still running: analysis 35/50 600690 海尔智家: moat started (45s elapsed)
+still running: analysis 35/50 600690 海尔智家: moat started (60s elapsed)
+progress: analysis 35/50 600690 海尔智家: moat finished
+progress: analysis 35/50 600690 海尔智家: market_narrative started
+still running: analysis 35/50 600690 海尔智家: market_narrative started (75s 
+elapsed)
+still running: analysis 35/50 600690 海尔智家: market_narrative started (90s 
+elapsed)
+still running: analysis 35/50 600690 海尔智家: market_narrative started (105s 
+elapsed)
+still running: analysis 35/50 600690 海尔智家: market_narrative started (120s 
+elapsed)
+still running: analysis 35/50 600690 海尔智家: market_narrative started (135s 
+elapsed)
+still running: analysis 35/50 600690 海尔智家: market_narrative started (150s 
+elapsed)
+still running: analysis 35/50 600690 海尔智家: market_narrative started (165s 
+elapsed)
+still running: analysis 35/50 600690 海尔智家: market_narrative started (180s 
+elapsed)
+still running: analysis 35/50 600690 海尔智家: market_narrative started (195s 
+elapsed)
+still running: analysis 35/50 600690 海尔智家: market_narrative started (210s 
+elapsed)
+still running: analysis 35/50 600690 海尔智家: market_narrative started (225s 
+elapsed)
+progress: analysis 35/50 600690 海尔智家: market_narrative finished
+progress: analysis 35/50 600690 海尔智家: recommendation started
+still running: analysis 35/50 600690 海尔智家: recommendation started (240s 
+elapsed)
+progress: analysis 35/50 600690 海尔智家: recommendation finished
+progress: analysis 35/50 600690 海尔智家: analysis finished
+progress: analysis 35/50 600690 海尔智家 finished (252.0s elapsed)
+progress: analysis 36/50 600160 巨化股份 started
+progress: analysis 36/50 600160 巨化股份: analysis started
+progress: analysis 36/50 600160 巨化股份: business_nature started
+still running: analysis 36/50 600160 巨化股份: business_nature started (15s 
+elapsed)
+progress: analysis 36/50 600160 巨化股份: business_nature finished
+progress: analysis 36/50 600160 巨化股份: management started
+still running: analysis 36/50 600160 巨化股份: management started (30s elapsed)
+still running: analysis 36/50 600160 巨化股份: management started (45s elapsed)
+progress: analysis 36/50 600160 巨化股份: management finished
+progress: analysis 36/50 600160 巨化股份: moat started
+still running: analysis 36/50 600160 巨化股份: moat started (60s elapsed)
+progress: analysis 36/50 600160 巨化股份: moat finished
+progress: analysis 36/50 600160 巨化股份: market_narrative started
+still running: analysis 36/50 600160 巨化股份: market_narrative started (75s 
+elapsed)
+still running: analysis 36/50 600160 巨化股份: market_narrative started (90s 
+elapsed)
+progress: analysis 36/50 600160 巨化股份: market_narrative finished
+progress: analysis 36/50 600160 巨化股份: recommendation started
+still running: analysis 36/50 600160 巨化股份: recommendation started (105s 
+elapsed)
+still running: analysis 36/50 600160 巨化股份: recommendation started (120s 
+elapsed)
+progress: analysis 36/50 600160 巨化股份: recommendation finished
+progress: analysis 36/50 600160 巨化股份: analysis finished
+progress: analysis 36/50 600160 巨化股份 finished (122.6s elapsed)
+progress: analysis 37/50 000739 普洛药业 started
+progress: analysis 37/50 000739 普洛药业: analysis started
+progress: analysis 37/50 000739 普洛药业: business_nature started
+still running: analysis 37/50 000739 普洛药业: business_nature started (15s 
+elapsed)
+progress: analysis 37/50 000739 普洛药业: business_nature finished
+progress: analysis 37/50 000739 普洛药业: management started
+still running: analysis 37/50 000739 普洛药业: management started (30s elapsed)
+progress: analysis 37/50 000739 普洛药业: management finished
+progress: analysis 37/50 000739 普洛药业: moat started
+still running: analysis 37/50 000739 普洛药业: moat started (45s elapsed)
+still running: analysis 37/50 000739 普洛药业: moat started (60s elapsed)
+progress: analysis 37/50 000739 普洛药业: moat finished
+progress: analysis 37/50 000739 普洛药业: market_narrative started
+still running: analysis 37/50 000739 普洛药业: market_narrative started (75s 
+elapsed)
+progress: analysis 37/50 000739 普洛药业: market_narrative finished
+progress: analysis 37/50 000739 普洛药业: recommendation started
+still running: analysis 37/50 000739 普洛药业: recommendation started (90s 
+elapsed)
+still running: analysis 37/50 000739 普洛药业: recommendation started (105s 
+elapsed)
+progress: analysis 37/50 000739 普洛药业: recommendation finished
+progress: analysis 37/50 000739 普洛药业: analysis finished
+progress: analysis 37/50 000739 普洛药业 finished (115.7s elapsed)
+progress: analysis 38/50 601965 中国汽研 started
+progress: analysis 38/50 601965 中国汽研: analysis started
+progress: analysis 38/50 601965 中国汽研: business_nature started
+progress: analysis 38/50 601965 中国汽研: business_nature finished
+progress: analysis 38/50 601965 中国汽研: management started
+still running: analysis 38/50 601965 中国汽研: management started (15s elapsed)
+still running: analysis 38/50 601965 中国汽研: management started (30s elapsed)
+progress: analysis 38/50 601965 中国汽研: management finished
+progress: analysis 38/50 601965 中国汽研: moat started
+still running: analysis 38/50 601965 中国汽研: moat started (45s elapsed)
+progress: analysis 38/50 601965 中国汽研: moat finished
+progress: analysis 38/50 601965 中国汽研: market_narrative started
+still running: analysis 38/50 601965 中国汽研: market_narrative started (60s 
+elapsed)
+still running: analysis 38/50 601965 中国汽研: market_narrative started (75s 
+elapsed)
+progress: analysis 38/50 601965 中国汽研: market_narrative finished
+progress: analysis 38/50 601965 中国汽研: recommendation started
+still running: analysis 38/50 601965 中国汽研: recommendation started (90s 
+elapsed)
+progress: analysis 38/50 601965 中国汽研: recommendation finished
+progress: analysis 38/50 601965 中国汽研: analysis finished
+progress: analysis 38/50 601965 中国汽研 finished (94.0s elapsed)
+progress: analysis 39/50 002311 海大集团 started
+progress: analysis 39/50 002311 海大集团: analysis started
+progress: analysis 39/50 002311 海大集团: business_nature started
+still running: analysis 39/50 002311 海大集团: business_nature started (15s 
+elapsed)
+progress: analysis 39/50 002311 海大集团: business_nature finished
+progress: analysis 39/50 002311 海大集团: management started
+still running: analysis 39/50 002311 海大集团: management started (30s elapsed)
+progress: analysis 39/50 002311 海大集团: management finished
+progress: analysis 39/50 002311 海大集团: moat started
+still running: analysis 39/50 002311 海大集团: moat started (45s elapsed)
+still running: analysis 39/50 002311 海大集团: moat started (60s elapsed)
+progress: analysis 39/50 002311 海大集团: moat finished
+progress: analysis 39/50 002311 海大集团: market_narrative started
+still running: analysis 39/50 002311 海大集团: market_narrative started (75s 
+elapsed)
+progress: analysis 39/50 002311 海大集团: market_narrative finished
+progress: analysis 39/50 002311 海大集团: recommendation started
+still running: analysis 39/50 002311 海大集团: recommendation started (90s 
+elapsed)
+still running: analysis 39/50 002311 海大集团: recommendation started (105s 
+elapsed)
+progress: analysis 39/50 002311 海大集团: recommendation finished
+progress: analysis 39/50 002311 海大集团: analysis finished
+progress: analysis 39/50 002311 海大集团 finished (117.7s elapsed)
+progress: analysis 40/50 600873 梅花生物 started
+progress: analysis 40/50 600873 梅花生物: analysis started
+progress: analysis 40/50 600873 梅花生物: business_nature started
+progress: analysis 40/50 600873 梅花生物: business_nature finished
+progress: analysis 40/50 600873 梅花生物: management started
+still running: analysis 40/50 600873 梅花生物: management started (15s elapsed)
+still running: analysis 40/50 600873 梅花生物: management started (30s elapsed)
+progress: analysis 40/50 600873 梅花生物: management finished
+progress: analysis 40/50 600873 梅花生物: moat started
+progress: analysis 40/50 600873 梅花生物: moat finished
+progress: analysis 40/50 600873 梅花生物: market_narrative started
+still running: analysis 40/50 600873 梅花生物: market_narrative started (45s 
+elapsed)
+progress: analysis 40/50 600873 梅花生物: market_narrative finished
+progress: analysis 40/50 600873 梅花生物: recommendation started
+still running: analysis 40/50 600873 梅花生物: recommendation started (60s 
+elapsed)
+still running: analysis 40/50 600873 梅花生物: recommendation started (75s 
+elapsed)
+progress: analysis 40/50 600873 梅花生物: recommendation finished
+progress: analysis 40/50 600873 梅花生物: analysis finished
+progress: analysis 40/50 600873 梅花生物 finished (78.5s elapsed)
+progress: analysis 41/50 600285 羚锐制药 started
+progress: analysis 41/50 600285 羚锐制药: analysis started
+progress: analysis 41/50 600285 羚锐制药: business_nature started
+progress: analysis 41/50 600285 羚锐制药: business_nature finished
+progress: analysis 41/50 600285 羚锐制药: management started
+still running: analysis 41/50 600285 羚锐制药: management started (15s elapsed)
+still running: analysis 41/50 600285 羚锐制药: management started (30s elapsed)
+progress: analysis 41/50 600285 羚锐制药: management finished
+progress: analysis 41/50 600285 羚锐制药: moat started
+still running: analysis 41/50 600285 羚锐制药: moat started (45s elapsed)
+progress: analysis 41/50 600285 羚锐制药: moat finished
+progress: analysis 41/50 600285 羚锐制药: market_narrative started
+progress: analysis 41/50 600285 羚锐制药: market_narrative finished
+progress: analysis 41/50 600285 羚锐制药: recommendation started
+still running: analysis 41/50 600285 羚锐制药: recommendation started (60s 
+elapsed)
+progress: analysis 41/50 600285 羚锐制药: recommendation finished
+progress: analysis 41/50 600285 羚锐制药: analysis finished
+progress: analysis 41/50 600285 羚锐制药 finished (69.5s elapsed)
+progress: analysis 42/50 601518 吉林高速 started
+progress: analysis 42/50 601518 吉林高速: analysis started
+progress: analysis 42/50 601518 吉林高速: business_nature started
+progress: analysis 42/50 601518 吉林高速: business_nature finished
+progress: analysis 42/50 601518 吉林高速: management started
+still running: analysis 42/50 601518 吉林高速: management started (15s elapsed)
+progress: analysis 42/50 601518 吉林高速: management finished
+progress: analysis 42/50 601518 吉林高速: moat started
+still running: analysis 42/50 601518 吉林高速: moat started (30s elapsed)
+progress: analysis 42/50 601518 吉林高速: moat finished
+progress: analysis 42/50 601518 吉林高速: market_narrative started
+still running: analysis 42/50 601518 吉林高速: market_narrative started (45s 
+elapsed)
+still running: analysis 42/50 601518 吉林高速: market_narrative started (60s 
+elapsed)
+still running: analysis 42/50 601518 吉林高速: market_narrative started (75s 
+elapsed)
+progress: analysis 42/50 601518 吉林高速: market_narrative finished
+progress: analysis 42/50 601518 吉林高速: recommendation started
+still running: analysis 42/50 601518 吉林高速: recommendation started (90s 
+elapsed)
+progress: analysis 42/50 601518 吉林高速: recommendation finished
+progress: analysis 42/50 601518 吉林高速: analysis finished
+progress: analysis 42/50 601518 吉林高速 finished (98.3s elapsed)
+progress: analysis 43/50 301004 嘉益股份 started
+progress: analysis 43/50 301004 嘉益股份: analysis started
+progress: analysis 43/50 301004 嘉益股份: business_nature started
+still running: analysis 43/50 301004 嘉益股份: business_nature started (15s 
+elapsed)
+progress: analysis 43/50 301004 嘉益股份: business_nature finished
+progress: analysis 43/50 301004 嘉益股份: management started
+still running: analysis 43/50 301004 嘉益股份: management started (30s elapsed)
+progress: analysis 43/50 301004 嘉益股份: management finished
+progress: analysis 43/50 301004 嘉益股份: moat started
+still running: analysis 43/50 301004 嘉益股份: moat started (45s elapsed)
+progress: analysis 43/50 301004 嘉益股份: moat finished
+progress: analysis 43/50 301004 嘉益股份: market_narrative started
+still running: analysis 43/50 301004 嘉益股份: market_narrative started (60s 
+elapsed)
+still running: analysis 43/50 301004 嘉益股份: market_narrative started (75s 
+elapsed)
+progress: analysis 43/50 301004 嘉益股份: market_narrative finished
+progress: analysis 43/50 301004 嘉益股份: recommendation started
+still running: analysis 43/50 301004 嘉益股份: recommendation started (90s 
+elapsed)
+progress: analysis 43/50 301004 嘉益股份: recommendation finished
+progress: analysis 43/50 301004 嘉益股份: analysis finished
+progress: analysis 43/50 301004 嘉益股份 finished (102.6s elapsed)
+progress: analysis 44/50 601898 中煤能源 started
+progress: analysis 44/50 601898 中煤能源: analysis started
+progress: analysis 44/50 601898 中煤能源: business_nature started
+progress: analysis 44/50 601898 中煤能源: business_nature finished
+progress: analysis 44/50 601898 中煤能源: management started
+still running: analysis 44/50 601898 中煤能源: management started (15s elapsed)
+progress: analysis 44/50 601898 中煤能源: management finished
+progress: analysis 44/50 601898 中煤能源: moat started
+still running: analysis 44/50 601898 中煤能源: moat started (30s elapsed)
+progress: analysis 44/50 601898 中煤能源: moat finished
+progress: analysis 44/50 601898 中煤能源: market_narrative started
+still running: analysis 44/50 601898 中煤能源: market_narrative started (45s 
+elapsed)
+still running: analysis 44/50 601898 中煤能源: market_narrative started (60s 
+elapsed)
+progress: analysis 44/50 601898 中煤能源: market_narrative finished
+progress: analysis 44/50 601898 中煤能源: recommendation started
+progress: analysis 44/50 601898 中煤能源: recommendation finished
+progress: analysis 44/50 601898 中煤能源: analysis finished
+progress: analysis 44/50 601898 中煤能源 finished (73.5s elapsed)
+progress: analysis 45/50 000680 山推股份 started
+progress: analysis 45/50 000680 山推股份: analysis started
+progress: analysis 45/50 000680 山推股份: business_nature started
+progress: analysis 45/50 000680 山推股份: business_nature finished
+progress: analysis 45/50 000680 山推股份: management started
+still running: analysis 45/50 000680 山推股份: management started (15s elapsed)
+progress: analysis 45/50 000680 山推股份: management finished
+progress: analysis 45/50 000680 山推股份: moat started
+still running: analysis 45/50 000680 山推股份: moat started (30s elapsed)
+still running: analysis 45/50 000680 山推股份: moat started (45s elapsed)
+progress: analysis 45/50 000680 山推股份: moat finished
+progress: analysis 45/50 000680 山推股份: market_narrative started
+still running: analysis 45/50 000680 山推股份: market_narrative started (60s 
+elapsed)
+progress: analysis 45/50 000680 山推股份: market_narrative finished
+progress: analysis 45/50 000680 山推股份: recommendation started
+still running: analysis 45/50 000680 山推股份: recommendation started (75s 
+elapsed)
+still running: analysis 45/50 000680 山推股份: recommendation started (90s 
+elapsed)
+progress: analysis 45/50 000680 山推股份: recommendation finished
+progress: analysis 45/50 000680 山推股份: analysis finished
+progress: analysis 45/50 000680 山推股份 finished (91.5s elapsed)
+progress: analysis 46/50 601089 福元医药 started
+progress: analysis 46/50 601089 福元医药: analysis started
+progress: analysis 46/50 601089 福元医药: business_nature started
+progress: analysis 46/50 601089 福元医药: business_nature finished
+progress: analysis 46/50 601089 福元医药: management started
+still running: analysis 46/50 601089 福元医药: management started (15s elapsed)
+still running: analysis 46/50 601089 福元医药: management started (30s elapsed)
+still running: analysis 46/50 601089 福元医药: management started (45s elapsed)
+progress: analysis 46/50 601089 福元医药: management finished
+progress: analysis 46/50 601089 福元医药: moat started
+still running: analysis 46/50 601089 福元医药: moat started (60s elapsed)
+progress: analysis 46/50 601089 福元医药: moat finished
+progress: analysis 46/50 601089 福元医药: market_narrative started
+still running: analysis 46/50 601089 福元医药: market_narrative started (75s 
+elapsed)
+still running: analysis 46/50 601089 福元医药: market_narrative started (90s 
+elapsed)
+progress: analysis 46/50 601089 福元医药: market_narrative finished
+progress: analysis 46/50 601089 福元医药: recommendation started
+still running: analysis 46/50 601089 福元医药: recommendation started (105s 
+elapsed)
+still running: analysis 46/50 601089 福元医药: recommendation started (120s 
+elapsed)
+still running: analysis 46/50 601089 福元医药: recommendation started (135s 
+elapsed)
+progress: analysis 46/50 601089 福元医药: recommendation finished
+progress: analysis 46/50 601089 福元医药: analysis finished
+progress: analysis 46/50 601089 福元医药 finished (137.1s elapsed)
+progress: analysis 47/50 002461 珠江啤酒 started
+progress: analysis 47/50 002461 珠江啤酒: analysis started
+progress: analysis 47/50 002461 珠江啤酒: business_nature started
+still running: analysis 47/50 002461 珠江啤酒: business_nature started (15s 
+elapsed)
+progress: analysis 47/50 002461 珠江啤酒: business_nature finished
+progress: analysis 47/50 002461 珠江啤酒: management started
+still running: analysis 47/50 002461 珠江啤酒: management started (30s elapsed)
+progress: analysis 47/50 002461 珠江啤酒: management finished
+progress: analysis 47/50 002461 珠江啤酒: moat started
+still running: analysis 47/50 002461 珠江啤酒: moat started (45s elapsed)
+still running: analysis 47/50 002461 珠江啤酒: moat started (60s elapsed)
+progress: analysis 47/50 002461 珠江啤酒: moat finished
+progress: analysis 47/50 002461 珠江啤酒: market_narrative started
+still running: analysis 47/50 002461 珠江啤酒: market_narrative started (75s 
+elapsed)
+still running: analysis 47/50 002461 珠江啤酒: market_narrative started (90s 
+elapsed)
+progress: analysis 47/50 002461 珠江啤酒: market_narrative finished
+progress: analysis 47/50 002461 珠江啤酒: recommendation started
+still running: analysis 47/50 002461 珠江啤酒: recommendation started (105s 
+elapsed)
+still running: analysis 47/50 002461 珠江啤酒: recommendation started (120s 
+elapsed)
+still running: analysis 47/50 002461 珠江啤酒: recommendation started (135s 
+elapsed)
+progress: analysis 47/50 002461 珠江啤酒: recommendation finished
+progress: analysis 47/50 002461 珠江啤酒: analysis finished
+progress: analysis 47/50 002461 珠江啤酒 finished (136.0s elapsed)
+progress: analysis 48/50 600809 山西汾酒 started
+progress: analysis 48/50 600809 山西汾酒: analysis started
+progress: analysis 48/50 600809 山西汾酒: business_nature started
+progress: analysis 48/50 600809 山西汾酒: business_nature finished
+progress: analysis 48/50 600809 山西汾酒: management started
+still running: analysis 48/50 600809 山西汾酒: management started (15s elapsed)
+still running: analysis 48/50 600809 山西汾酒: management started (30s elapsed)
+progress: analysis 48/50 600809 山西汾酒: management finished
+progress: analysis 48/50 600809 山西汾酒: moat started
+still running: analysis 48/50 600809 山西汾酒: moat started (45s elapsed)
+progress: analysis 48/50 600809 山西汾酒: moat finished
+progress: analysis 48/50 600809 山西汾酒: market_narrative started
+still running: analysis 48/50 600809 山西汾酒: market_narrative started (60s 
+elapsed)
+progress: analysis 48/50 600809 山西汾酒: market_narrative finished
+progress: analysis 48/50 600809 山西汾酒: recommendation started
+still running: analysis 48/50 600809 山西汾酒: recommendation started (75s 
+elapsed)
+still running: analysis 48/50 600809 山西汾酒: recommendation started (90s 
+elapsed)
+progress: analysis 48/50 600809 山西汾酒: recommendation finished
+progress: analysis 48/50 600809 山西汾酒: analysis finished
+progress: analysis 48/50 600809 山西汾酒 finished (91.8s elapsed)
+progress: analysis 49/50 0027.HK GALAXY ENT started
+progress: analysis 49/50 0027.HK GALAXY ENT: analysis started
+progress: analysis 49/50 0027.HK GALAXY ENT: business_nature started
+still running: analysis 49/50 0027.HK GALAXY ENT: business_nature started (15s 
+elapsed)
+progress: analysis 49/50 0027.HK GALAXY ENT: business_nature finished
+progress: analysis 49/50 0027.HK GALAXY ENT: management started
+still running: analysis 49/50 0027.HK GALAXY ENT: management started (30s 
+elapsed)
+still running: analysis 49/50 0027.HK GALAXY ENT: management started (45s 
+elapsed)
+still running: analysis 49/50 0027.HK GALAXY ENT: management started (60s 
+elapsed)
+still running: analysis 49/50 0027.HK GALAXY ENT: management started (75s 
+elapsed)
+progress: analysis 49/50 0027.HK GALAXY ENT: management finished
+progress: analysis 49/50 0027.HK GALAXY ENT: moat started
+still running: analysis 49/50 0027.HK GALAXY ENT: moat started (90s elapsed)
+still running: analysis 49/50 0027.HK GALAXY ENT: moat started (105s elapsed)
+progress: analysis 49/50 0027.HK GALAXY ENT: moat finished
+progress: analysis 49/50 0027.HK GALAXY ENT: market_narrative started
+still running: analysis 49/50 0027.HK GALAXY ENT: market_narrative started (120s
+elapsed)
+progress: analysis 49/50 0027.HK GALAXY ENT: market_narrative finished
+progress: analysis 49/50 0027.HK GALAXY ENT: recommendation started
+still running: analysis 49/50 0027.HK GALAXY ENT: recommendation started (135s 
+elapsed)
+progress: analysis 49/50 0027.HK GALAXY ENT: recommendation finished
+progress: analysis 49/50 0027.HK GALAXY ENT: analysis finished
+progress: analysis 49/50 0027.HK GALAXY ENT finished (145.0s elapsed)
+progress: analysis 50/50 300012 华测检测 started
+progress: analysis 50/50 300012 华测检测: analysis started
+progress: analysis 50/50 300012 华测检测: business_nature started
+progress: analysis 50/50 300012 华测检测: business_nature finished
+progress: analysis 50/50 300012 华测检测: management started
+still running: analysis 50/50 300012 华测检测: management started (15s elapsed)
+still running: analysis 50/50 300012 华测检测: management started (30s elapsed)
+still running: analysis 50/50 300012 华测检测: management started (45s elapsed)
+progress: analysis 50/50 300012 华测检测: management finished
+progress: analysis 50/50 300012 华测检测: moat started
+still running: analysis 50/50 300012 华测检测: moat started (60s elapsed)
+still running: analysis 50/50 300012 华测检测: moat started (75s elapsed)
+progress: analysis 50/50 300012 华测检测: moat finished
+progress: analysis 50/50 300012 华测检测: market_narrative started
+still running: analysis 50/50 300012 华测检测: market_narrative started (90s 
+elapsed)
+still running: analysis 50/50 300012 华测检测: market_narrative started (105s 
+elapsed)
+still running: analysis 50/50 300012 华测检测: market_narrative started (120s 
+elapsed)
+progress: analysis 50/50 300012 华测检测: market_narrative finished
+progress: analysis 50/50 300012 华测检测: recommendation started
+still running: analysis 50/50 300012 华测检测: recommendation started (135s 
+elapsed)
+still running: analysis 50/50 300012 华测检测: recommendation started (150s 
+elapsed)
+still running: analysis 50/50 300012 华测检测: recommendation started (165s 
+elapsed)
+progress: analysis 50/50 300012 华测检测: recommendation finished
+progress: analysis 50/50 300012 华测检测: analysis finished
+progress: analysis 50/50 300012 华测检测 finished (172.5s elapsed)
+
+✓ LLM analysis complete — 50/50 succeeded
+progress: report generation started
+
+progress: report generation finished (4.8s elapsed)
+✓ Reports generated — 2 file(s)
+
+╭──────────────────────────────── Scan Summary ────────────────────────────────╮
+│ Candidates screened: 50                                                      │
+│ Analyses completed:  50                                                      │
+│                                                                              │
+│ Report files:                                                                │
+│   •                                                                          │
+│ reports/full_scan_6m_new_best_top50_20260606T143854Z/2026-06-07_china_value_ │
+│ report.md                                                                    │
+│   •                                                                          │
+│ reports/full_scan_6m_new_best_top50_20260606T143854Z/2026-06-07_china_value_ │
+│ report.pdf                                                                   │
+│                                                                              │
+│ LLM usage: 356,491 tokens · $2.6723 USD                                      │
+╰──────────────────────────────────────────────────────────────────────────────╯

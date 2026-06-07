@@ -2,10 +2,57 @@
 
 from __future__ import annotations
 
+import json
+import re
 from datetime import datetime
 from pathlib import Path
 
 from valueinvestor.data.models import CompanyAnalysis, InvestmentReport, MultiTimeframeReport
+
+
+_RAW_JSON_DIMENSION_RE = re.compile(
+    r'^\s*\{\s*"title"\s*:\s*"(?P<title>.*?)"\s*,\s*"content"\s*:\s*"(?P<content>.*)"\s*,\s*"confidence"\s*:',
+    re.DOTALL,
+)
+
+
+def _decode_raw_json_fragment(value: str) -> str:
+    return value.replace("\\n", "\n").replace('\\"', '"').strip()
+
+
+def _normalise_analysis_dimension_text(dim) -> tuple[str, str]:
+    """Recover title/content when a cached LLM fallback is JSON-shaped text."""
+    title = str(dim.title)
+    content = str(dim.content)
+    stripped = content.strip()
+    if not (stripped.startswith("{") and '"title"' in stripped and '"content"' in stripped):
+        return title, content
+
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        match = _RAW_JSON_DIMENSION_RE.match(stripped)
+        if not match:
+            return title, content
+        return (
+            _decode_raw_json_fragment(match.group("title")),
+            _decode_raw_json_fragment(match.group("content")),
+        )
+
+    if not isinstance(parsed, dict):
+        return title, content
+    parsed_title = parsed.get("title")
+    parsed_content = parsed.get("content")
+    if parsed_title is not None:
+        title = str(parsed_title).strip()
+    if parsed_content is not None:
+        content = str(parsed_content).strip()
+    return title, content
+
+
+def _render_analysis_dimension(dim) -> str:
+    title, content = _normalise_analysis_dimension_text(dim)
+    return f"#### {title}\n{content}\n"
 
 
 def _fmt_number(value: float | None, decimals: int = 1, suffix: str = "") -> str:
@@ -28,6 +75,17 @@ def _fmt_pct(value: float | None) -> str:
         return "—"
     display = value * 100.0 if abs(value) < 1.0 else value
     return f"{display:.1f}%"
+
+
+def _local_report_date(generated_at: str | None) -> str:
+    """Return a local calendar date for an ISO report timestamp."""
+    if not generated_at:
+        return "N/A"
+    try:
+        parsed = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+    except ValueError:
+        return generated_at[:10]
+    return parsed.astimezone().strftime("%Y-%m-%d")
 
 
 def _zh_financials_table(sr) -> str:
@@ -81,15 +139,114 @@ def _zh_disclaimer() -> str:
 def _rho_value_from_config(cfg: dict) -> float | None:
     """Return the current 6-month Spearman rho from a report config snapshot."""
     rhos = cfg.get("spearman_rhos")
+    candidates = []
+    if isinstance(rhos, dict):
+        candidates.append(rhos)
+
+    scorer_model = cfg.get("scorer_model")
+    if isinstance(scorer_model, dict):
+        nested_rhos = scorer_model.get("spearman_rhos")
+        if isinstance(nested_rhos, dict):
+            candidates.append(nested_rhos)
+        nested_metrics = scorer_model.get("metrics")
+        if isinstance(nested_metrics, dict):
+            candidates.append(nested_metrics)
+
+    for candidate in candidates:
+        rho = candidate.get("6m")
+        if isinstance(rho, dict):
+            rho = rho.get("spearman_rho")
+        if rho is None:
+            continue
+        try:
+            return float(rho)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _holdout_rho_value_from_config(cfg: dict) -> float | None:
+    scorer_model = _scorer_model_from_config(cfg)
+    rhos = scorer_model.get("holdout_spearman_rhos")
     if not isinstance(rhos, dict):
         return None
     rho = rhos.get("6m")
-    if rho is None:
-        return None
     try:
-        return float(rho)
+        return None if rho is None else float(rho)
     except (TypeError, ValueError):
         return None
+
+
+def _report_spearman_rhos(report: MultiTimeframeReport) -> dict[str, float]:
+    """Return the best available Spearman ρ snapshot for a report."""
+    rhos = report.spearman_rhos or {}
+    if isinstance(rhos, dict) and rhos:
+        resolved: dict[str, float] = {}
+        for horizon in ("1w", "1m", "3m", "6m"):
+            rho = rhos.get(horizon)
+            if rho is None:
+                continue
+            try:
+                resolved[horizon] = float(rho)
+            except (TypeError, ValueError):
+                continue
+        if resolved:
+            return resolved
+
+    cfg = report.config_summary or {}
+    scorer_model = cfg.get("scorer_model")
+    if isinstance(scorer_model, dict):
+        nested_rhos = scorer_model.get("spearman_rhos")
+        if isinstance(nested_rhos, dict) and nested_rhos:
+            return {
+                horizon: float(rho)
+                for horizon, rho in nested_rhos.items()
+                if horizon in ("1w", "1m", "3m", "6m") and rho is not None
+                and isinstance(rho, (int, float))
+            }
+        nested_metrics = scorer_model.get("metrics")
+        if isinstance(nested_metrics, dict):
+            resolved = {}
+            for horizon in ("1w", "1m", "3m", "6m"):
+                horizon_metrics = nested_metrics.get(horizon)
+                if not isinstance(horizon_metrics, dict):
+                    continue
+                rho = horizon_metrics.get("spearman_rho")
+                if rho is None:
+                    continue
+                try:
+                    resolved[horizon] = float(rho)
+                except (TypeError, ValueError):
+                    continue
+            if resolved:
+                return resolved
+    return {}
+
+
+def _scorer_model_from_config(cfg: dict) -> dict:
+    scorer_model = cfg.get("scorer_model")
+    return scorer_model if isinstance(scorer_model, dict) else {}
+
+
+def _uses_ml_ranker(cfg: dict) -> bool:
+    if _scorer_model_from_config(cfg).get("type") == "ml_ranker":
+        return True
+    scorer_models = cfg.get("scorer_models")
+    if not isinstance(scorer_models, dict):
+        return False
+    return any(
+        isinstance(model, dict) and model.get("type") == "ml_ranker"
+        for model in scorer_models.values()
+    )
+
+
+def _ml_ranker_label(cfg: dict) -> str:
+    scorer_model = _scorer_model_from_config(cfg)
+    backend = scorer_model.get("backend") or "local"
+    ensemble_size = scorer_model.get("ensemble_size")
+    if ensemble_size:
+        return f"{backend}, ensemble_size={ensemble_size}"
+    return str(backend)
 
 
 def _zh_upfront_model_notes(cfg: dict) -> str:
@@ -98,7 +255,22 @@ def _zh_upfront_model_notes(cfg: dict) -> str:
     if rho_6m is None:
         rho_current = "当前报告未附带可用的 6 个月 Spearman ρ 数值。"
     else:
-        rho_current = f"当前 6 个月 Spearman ρ = **{rho_6m:.4f}**，评级为 **{_rho_quality(rho_6m)}**。"
+        rho_current = (
+            f"当前 6 个月训练/全量回测 Spearman ρ = **{rho_6m:.4f}**，"
+            f"评级为 **{_rho_quality(rho_6m)}**。"
+        )
+    if _uses_ml_ranker(cfg):
+        score_note = (
+            f"当前启用本地 ML 排名器（{_ml_ranker_label(cfg)}）。综合评分是模型原始排序分数"
+            "在本轮候选中的 0–100 百分位；价值、质量、成长、动量等手工因子仍作为模型输入"
+            "和诊断项展示，但不再是最终分数的简单加权合成。"
+        )
+    else:
+        score_note = (
+            "综合评分是 0–100 的相对评分，用来比较同一轮筛选中公司基本面、估值、质量、成长、动量和因子均衡性的综合表现。"
+            "分数越高，表示该公司在模型历史回测框架下越接近未来 6 个月收益排序靠前的特征，"
+            "但这**不保证**任何单一股票未来上涨。"
+        )
 
     return (
         "## 报告使用前说明\n\n"
@@ -121,9 +293,7 @@ def _zh_upfront_model_notes(cfg: dict) -> str:
         "| **0.00–0.05** | 较弱：预测力非常有限 |\n"
         "| **低于 0.00** | 反向：评分与未来收益排序负相关 |\n\n"
         "### 3. 综合评分的含义\n\n"
-        "综合评分是 0–100 的相对评分，用来比较同一轮筛选中公司基本面、估值、质量、成长、动量和因子均衡性的综合表现。"
-        "分数越高，表示该公司在模型历史回测框架下越接近未来 6 个月收益排序靠前的特征，"
-        "但这**不保证**任何单一股票未来上涨。\n\n"
+        f"{score_note}\n\n"
         "| 综合评分范围 | 含义 |\n"
         "|--------------|------|\n"
         "| **60+** | 优秀：各项因子较均衡，是模型能筛出的强候选区间 |\n"
@@ -139,7 +309,22 @@ def _en_upfront_model_notes(cfg: dict) -> str:
     if rho_6m is None:
         rho_current = "No current 6-month Spearman rho value is attached to this report."
     else:
-        rho_current = f"Current 6-month Spearman rho = **{rho_6m:.4f}**."
+        rho_current = (
+            f"Current 6-month training/full-backtest Spearman rho = **{rho_6m:.4f}**."
+        )
+    if _uses_ml_ranker(cfg):
+        score_note = (
+            f"The active scorer is a local ML ranker ({_ml_ranker_label(cfg)}). "
+            "The final composite score is the 0-100 percentile of the model's raw rank score "
+            "within the current candidate set. The hand factor scores remain inputs and diagnostics, "
+            "but they are not the final score's direct weighted formula."
+        )
+    else:
+        score_note = (
+            "The composite score is a 0-100 relative score. Higher scores mean the company better "
+            "matches characteristics that historically ranked better over the following 6 months, "
+            "but this does not guarantee future performance."
+        )
 
     return (
         "## Before Using This Report\n\n"
@@ -152,9 +337,7 @@ def _en_upfront_model_notes(cfg: dict) -> str:
         "future 6-month return rankings. Its range is **-1 to +1**: +1 is perfectly aligned, "
         "0 is no monotonic ranking relationship, and -1 is perfectly reversed.\n\n"
         "### 3. Score Value\n\n"
-        "The composite score is a 0-100 relative score. Higher scores mean the company better "
-        "matches characteristics that historically ranked better over the following 6 months, "
-        "but this does not guarantee future performance.\n"
+        f"{score_note}\n"
     )
 
 
@@ -170,6 +353,7 @@ class MarkdownReportGenerator:
         # Determine output language (defaults to English)
         cfg = report.config_summary or {}
         self.output_language = cfg.get("output_language", "en")
+        self._ml_ranker_active = _uses_ml_ranker(cfg)
 
         parts: list[str] = [
             self._heading(report),
@@ -199,7 +383,7 @@ class MarkdownReportGenerator:
     # ------------------------------------------------------------------
 
     def _heading(self, report: InvestmentReport) -> str:
-        date_str = report.generated_at[:10] if report.generated_at else "N/A"
+        date_str = _local_report_date(report.generated_at)
         if self.output_language == "zh-CN":
             return (
                 f"# {report.title}\n"
@@ -308,9 +492,7 @@ class MarkdownReportGenerator:
 
         # LLM analysis dimensions
         for dim in ca.analyses:
-            # The LLM is instructed to produce JSON in Simplified Chinese when requested,
-            # so we just render titles/content as-is here.
-            parts.append(f"#### {dim.title}\n{dim.content}\n")
+            parts.append(_render_analysis_dimension(dim))
 
         # Key milestones
         if ca.key_milestones:
@@ -359,9 +541,21 @@ class MarkdownReportGenerator:
         lines.append("")
         return "\n".join(lines)
 
-    @staticmethod
-    def _score_breakdown_table(sr) -> str:
+    def _score_breakdown_table(self, sr) -> str:
         """Render the 6-factor score breakdown (Chinese)."""
+        if getattr(self, "_ml_ranker_active", False):
+            return (
+                "#### 评分明细\n"
+                "| 项目 | 含义 | 得分 |\n"
+                "|------|------|------|\n"
+                f"| **综合评分** | **ML 排名器百分位** | **{sr.composite_score:.1f}** |\n"
+                f"| 价值 (Value) | 模型输入/诊断项 | {sr.value_score:.1f} |\n"
+                f"| 质量 (Quality) | 模型输入/诊断项 | {sr.quality_score:.1f} |\n"
+                f"| 成长 (Growth) | 模型输入/诊断项 | {sr.growth_score:.1f} |\n"
+                f"| 动量 (Momentum) | 模型输入/诊断项 | {sr.momentum_score:.1f} |\n"
+                f"| 协同 (Synergy) | 模型输入/诊断项 | {sr.synergy_score:.1f} |\n"
+                f"| 价值-成长 (Value-Growth) | 模型输入/诊断项 | {sr.value_growth_score:.1f} |\n"
+            )
         return (
             "#### 评分明细\n"
             "| 因子 | 权重 | 得分 |\n"
@@ -375,9 +569,21 @@ class MarkdownReportGenerator:
             f"| **综合 (Composite)** | **100%** | **{sr.composite_score:.1f}** |\n"
         )
 
-    @staticmethod
-    def _score_breakdown_table_en(sr) -> str:
+    def _score_breakdown_table_en(self, sr) -> str:
         """Render the 6-factor score breakdown (English)."""
+        if getattr(self, "_ml_ranker_active", False):
+            return (
+                "#### Score Breakdown\n"
+                "| Item | Meaning | Score |\n"
+                "|------|---------|-------|\n"
+                f"| **Composite Score** | **ML ranker percentile** | **{sr.composite_score:.1f}** |\n"
+                f"| Value | Model input / diagnostic | {sr.value_score:.1f} |\n"
+                f"| Quality | Model input / diagnostic | {sr.quality_score:.1f} |\n"
+                f"| Growth | Model input / diagnostic | {sr.growth_score:.1f} |\n"
+                f"| Momentum | Model input / diagnostic | {sr.momentum_score:.1f} |\n"
+                f"| Synergy | Model input / diagnostic | {sr.synergy_score:.1f} |\n"
+                f"| Value-Growth | Model input / diagnostic | {sr.value_growth_score:.1f} |\n"
+            )
         return (
             "#### Score Breakdown\n"
             "| Factor | Weight | Score |\n"
@@ -419,10 +625,13 @@ class MarkdownReportGenerator:
 # ---------------------------------------------------------------------------
 
 _HORIZON_LABELS_ZH: dict = {
+    "1w": "1周",
     "1m": "1个月",
     "3m": "3个月",
     "6m": "6个月",
 }
+
+_TARGET_ORDER = ("1w", "6m", "1m", "3m")
 
 
 class MultiTimeframeMarkdownReportGenerator:
@@ -438,13 +647,27 @@ class MultiTimeframeMarkdownReportGenerator:
 
     def generate(self, report: MultiTimeframeReport) -> str:
         """Return the full Markdown string."""
+        self._ml_ranker_active = _uses_ml_ranker(report.config_summary or {})
+        self._spearman_rhos = _report_spearman_rhos(report)
+        target_order = self._target_order(report)
+        if self._is_combined_target_report(report, target_order):
+            sections = [
+                self._heading(report),
+                self._combined_summary(report, target_order),
+                self._combined_scoring_explanation(report, target_order),
+                self._combined_candidates_tables(report, target_order),
+                self._detailed_analyses(report),
+                self._disclaimer(),
+            ]
+            return "\n\n".join(sections)
+
         results = report.results_by_horizon.get("6m", []) or next(iter(report.results_by_horizon.values()), [])
         sections = [
             self._heading(report),
             self._summary(report, results),
             self._scoring_explanation(report),
         ]
-        sections.append(self._candidates_table(results))
+        sections.append(self._candidates_table(results, report.config_summary))
         sections.append(self._detailed_analyses(report))
         sections.append(self._disclaimer())
         return "\n\n".join(sections)
@@ -455,12 +678,33 @@ class MultiTimeframeMarkdownReportGenerator:
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
         date_str = datetime.now().strftime("%Y-%m-%d")
-        filepath = out / f"{date_str}_china_value_multi_timeframe.md"
+        target_order = self._target_order(report)
+        if len(target_order) > 1 and self._is_combined_target_report(report, target_order):
+            suffix = "dual_target"
+        elif target_order:
+            suffix = f"{target_order[0]}_target"
+        else:
+            suffix = "multi_timeframe"
+        filepath = out / f"{date_str}_china_value_{suffix}.md"
         filepath.write_text(md_content, encoding="utf-8")
         return str(filepath)
 
+    def _target_order(self, report: MultiTimeframeReport) -> list[str]:
+        keys = set(report.results_by_horizon)
+        ordered = [target for target in _TARGET_ORDER if target in keys]
+        ordered.extend(sorted(keys.difference(ordered)))
+        return ordered
+
+    def _is_combined_target_report(
+        self,
+        report: MultiTimeframeReport,
+        target_order: list[str],
+    ) -> bool:
+        cfg = report.config_summary or {}
+        return bool(target_order) and ("1w" in target_order or bool(cfg.get("scorer_models")))
+
     def _heading(self, report: MultiTimeframeReport) -> str:
-        date_str = report.generated_at[:10] if report.generated_at else "N/A"
+        date_str = _local_report_date(report.generated_at)
         return (
             f"# {report.title}\n"
             f"*生成时间: {date_str}*\n\n"
@@ -479,7 +723,7 @@ class MultiTimeframeMarkdownReportGenerator:
             f"- 个股分析覆盖: {len(report.company_analyses)} 只",
         ]
         # ρ summary — 6-month is the primary (Final) metric
-        rhos = report.spearman_rhos
+        rhos = getattr(self, "_spearman_rhos", {})
         if rhos:
             rho_6m = rhos.get("6m")
             if rho_6m is not None:
@@ -495,9 +739,89 @@ class MultiTimeframeMarkdownReportGenerator:
                 lines.append(f"- 各周期预测力: {' · '.join(parts)}")
         return "\n".join(lines)
 
+    def _combined_summary(self, report: MultiTimeframeReport, target_order: list[str]) -> str:
+        lines = [
+            "## 执行摘要\n",
+            f"- 筛选公司总数: {report.total_screened}",
+            f"- 个股分析覆盖: {len(report.company_analyses)} 只",
+        ]
+        for target in target_order:
+            label = _HORIZON_LABELS_ZH.get(target, target)
+            results = report.results_by_horizon.get(target, [])
+            rho = getattr(self, "_spearman_rhos", {}).get(target)
+            if rho is None:
+                lines.append(f"- {label}入选候选数: {len(results)} 只")
+            else:
+                lines.append(
+                    f"- {label}入选候选数: {len(results)} 只；"
+                    f"Spearman ρ={rho:.4f}（{_rho_quality(rho)}）"
+                )
+        return "\n".join(lines)
+
+    def _combined_scoring_explanation(
+        self,
+        report: MultiTimeframeReport,
+        target_order: list[str],
+    ) -> str:
+        rhos = getattr(self, "_spearman_rhos", {})
+        rho_lines = []
+        for target in target_order:
+            label = _HORIZON_LABELS_ZH.get(target, target)
+            rho = rhos.get(target)
+            if rho is None:
+                rho_lines.append(f"| {label} | 暂无数据 | — |")
+            else:
+                rho_lines.append(f"| {label} | {rho:.4f} | {_rho_quality(rho)} |")
+
+        return f"""## 评分算法说明
+
+### 本系统不是股票预测
+
+本报告中的评分和排名均不构成对未来股价的预测。两个榜单使用同一批筛选后的候选股票、同一套点时间财务/估值特征，但分别输入不同目标周期训练出的 ML 排名器。
+
+### Spearman ρ（秩相关系数）
+
+ρ 衡量模型评分排序与历史实际回报排序的一致性。1周模型使用 5 个交易日后的回报排序训练；6个月模型使用约 126 个自然日后的回报排序训练。
+
+| 评分目标 | Spearman ρ | 评级 |
+|----------|-----------|------|
+{chr(10).join(rho_lines)}
+
+### 综合评分（0–100）
+
+每个榜单的综合评分都是对应 ML 排名器原始排序分数在本轮候选集中的 0–100 百分位。价值、质量、成长、动量等手工因子仍作为模型输入和诊断项展示，但最终排名以对应目标模型的 ML 百分位为准。
+
+| 评分范围 | 含义 |
+|----------|------|
+| **80+** | 本轮候选中排名非常靠前 |
+| **60–80** | 本轮候选中排名靠前 |
+| **40–60** | 本轮候选中居中 |
+| **< 40** | 本轮候选中排名靠后 |
+
+> 分数是横截面相对分，不是上涨概率，也不是目标收益率。"""
+
+    def _combined_candidates_tables(
+        self,
+        report: MultiTimeframeReport,
+        target_order: list[str],
+    ) -> str:
+        sections = ["## 最佳投资标的\n"]
+        for target in target_order:
+            label = _HORIZON_LABELS_ZH.get(target, target)
+            sections.append(
+                self._candidates_table(
+                    report.results_by_horizon.get(target, []),
+                    report.config_summary,
+                    title=f"### {label}目标 Top 30",
+                    score_header=f"{label}ML百分位",
+                )
+            )
+        return "\n\n".join(sections)
+
     def _scoring_explanation(self, report: MultiTimeframeReport) -> str:
         """Explain ρ values, ρ interpretation, and score interpretation."""
-        rhos = report.spearman_rhos
+        rhos = getattr(self, "_spearman_rhos", {})
+        cfg = report.config_summary or {}
 
         # Build ρ status lines
         rho_lines = []
@@ -526,6 +850,61 @@ class MultiTimeframeMarkdownReportGenerator:
             )
         else:
             final_rho_section = ""
+
+        if _uses_ml_ranker(cfg):
+            score_section = f"""### 综合评分（0–100）
+
+当前报告启用本地 ML 排名器（{_ml_ranker_label(cfg)}）。综合评分不是手工因子的直接加权结果，而是：
+
+1. 先计算基础手工因子得分与财务/估值派生特征；
+2. 将这些特征输入当前最佳 ML 排名器，得到每只股票的原始排序分数；
+3. 按原始排序分数从低到高转换为本轮候选集内的 0–100 百分位分数。
+
+因此，报告中的价值、质量、成长、动量等因子仍然有用：它们解释模型看到的企业特征，也帮助定位候选股票的优势和短板。但最终排名以 ML 排名器输出的综合评分为准。
+
+| 评分范围 | 含义 |
+|----------|------|
+| **80+** | 本轮候选中排名非常靠前 |
+| **60–80** | 本轮候选中排名靠前 |
+| **40–60** | 本轮候选中居中 |
+| **< 40** | 本轮候选中排名靠后 |
+
+> 分数是横截面相对分，不是上涨概率，也不是目标收益率。"""
+        else:
+            score_section = """### 综合评分（0–100）
+
+综合评分由六个因子通过**加权调和平均**合成，权重严格对应 `scorer.py` 中的 `_DEFAULT_WEIGHTS`：
+
+| 因子 | 权重 | 计算方式 |
+|------|------|----------|
+| **价值 (Value)** | 40% | PE、PB、PS、股息率、EV/EBITDA、盈利收益率、FCF收益率等 20+ 项子指标的加权平均，经幂次提升 |
+| **质量 (Quality)** | 20% | `(ROE × 毛利率) / ((1 + sqrt(负债率)) × PE)` — 横截面百分位排名 |
+| **成长 (Growth)** | 10% | PEG 倒数 — 横截面百分位排名 |
+| **动量 (Momentum)** | 10% | 资产周转率（营收/总资产）— 效率指标 |
+| **协同 (Synergy)** | 10% | `min(价值得分, 质量得分)` — 奖励两者均衡 |
+| **价值-成长 (Value-Growth)** | 10% | `sqrt(价值得分 × 成长得分)` — 价值与成长的几何交互 |
+
+调和平均的特性是：**任何一项因子得分极低都会严重拖累综合评分**，因此高分股票必须在所有维度上均表现良好。
+综合评分还会乘以亏损惩罚系数（亏损企业按亏损/市值比例扣分）。
+
+| 评分范围 | 含义 |
+|----------|------|
+| **60+** | 优秀 — 各项因子均衡且突出，是筛选系统能产生的最佳候选 |
+| **50–60** | 良好 — 多数因子表现不错，综合吸引力较强 |
+| **40–50** | 中等 — 部分因子存在短板 |
+| **< 40** | 偏差 — 至少一项核心指标严重拖分 |"""
+
+        if _uses_ml_ranker(cfg):
+            score_tail = (
+                "> 评分越高，历史上对应 6 个月后的实际回报排名越倾向于靠前，"
+                "但**这不保证任何特定股票的未来表现**。"
+            )
+        else:
+            score_tail = (
+                "> 实际筛选结果通常在 50–65 分区间。100 分仅为理论最大值，现实中不存在\n"
+                "> 所有因子同时完美的股票。评分越高，历史上对应 6 个月后的实际回报排名\n"
+                "> 越倾向于靠前，但**这不保证任何特定股票的未来表现**。"
+            )
 
         return f"""## 评分算法说明
 
@@ -560,37 +939,23 @@ class MultiTimeframeMarkdownReportGenerator:
 |----------|-----------|------|
 {rho_table}
 
-### 综合评分（0–100）
+{score_section}
 
-综合评分由六个因子通过**加权调和平均**合成，权重严格对应 `scorer.py` 中的 `_DEFAULT_WEIGHTS`：
+{score_tail}"""
 
-| 因子 | 权重 | 计算方式 |
-|------|------|----------|
-| **价值 (Value)** | 40% | PE、PB、PS、股息率、EV/EBITDA、盈利收益率、FCF收益率等 20+ 项子指标的加权平均，经幂次提升 |
-| **质量 (Quality)** | 20% | `(ROE × 毛利率) / ((1 + sqrt(负债率)) × PE)` — 横截面百分位排名 |
-| **成长 (Growth)** | 10% | PEG 倒数 — 横截面百分位排名 |
-| **动量 (Momentum)** | 10% | 资产周转率（营收/总资产）— 效率指标 |
-| **协同 (Synergy)** | 10% | `min(价值得分, 质量得分)` — 奖励两者均衡 |
-| **价值-成长 (Value-Growth)** | 10% | `sqrt(价值得分 × 成长得分)` — 价值与成长的几何交互 |
-
-调和平均的特性是：**任何一项因子得分极低都会严重拖累综合评分**，因此高分股票必须在所有维度上均表现良好。
-综合评分还会乘以亏损惩罚系数（亏损企业按亏损/市值比例扣分）。
-
-| 评分范围 | 含义 |
-|----------|------|
-| **60+** | 优秀 — 各项因子均衡且突出，是筛选系统能产生的最佳候选 |
-| **50–60** | 良好 — 多数因子表现不错，综合吸引力较强 |
-| **40–50** | 中等 — 部分因子存在短板 |
-| **< 40** | 偏差 — 至少一项核心指标严重拖分 |
-
-> 实际筛选结果通常在 50–65 分区间。100 分仅为理论最大值，现实中不存在
-> 所有因子同时完美的股票。评分越高，历史上对应 6 个月后的实际回报排名
-> 越倾向于靠前，但**这不保证任何特定股票的未来表现**。"""
-
-    def _candidates_table(self, results: list) -> str:
+    def _candidates_table(
+        self,
+        results: list,
+        cfg: dict,
+        *,
+        title: str = "## 最佳投资标的",
+        score_header: str | None = None,
+    ) -> str:
+        if score_header is None:
+            score_header = "综合评分（ML百分位）" if _uses_ml_ranker(cfg) else "综合评分"
         lines = [
-            "## 最佳投资标的\n",
-            "| 排名 | 代码 | 公司 | 行业 | 综合评分 |",
+            f"{title}\n",
+            f"| 排名 | 代码 | 公司 | 行业 | {score_header} |",
             "|------|------|------|------|----------|",
         ]
         for sr in results:
@@ -621,7 +986,7 @@ class MultiTimeframeMarkdownReportGenerator:
         ]
 
         for dim in ca.analyses:
-            parts.append(f"#### {dim.title}\n{dim.content}\n")
+            parts.append(_render_analysis_dimension(dim))
 
         if ca.key_milestones:
             parts.append("**需要关注的关键里程碑：**")
@@ -632,9 +997,21 @@ class MultiTimeframeMarkdownReportGenerator:
         parts.append("---\n")
         return "\n".join(parts)
 
-    @staticmethod
-    def _score_breakdown_table(sr) -> str:
+    def _score_breakdown_table(self, sr) -> str:
         """Render the 6-factor score breakdown matching scorer.py structure."""
+        if getattr(self, "_ml_ranker_active", False):
+            return (
+                "#### 评分明细\n"
+                "| 项目 | 含义 | 得分 |\n"
+                "|------|------|------|\n"
+                f"| **综合评分** | **ML 排名器百分位** | **{sr.composite_score:.1f}** |\n"
+                f"| 价值 (Value) | 模型输入/诊断项 | {sr.value_score:.1f} |\n"
+                f"| 质量 (Quality) | 模型输入/诊断项 | {sr.quality_score:.1f} |\n"
+                f"| 成长 (Growth) | 模型输入/诊断项 | {sr.growth_score:.1f} |\n"
+                f"| 动量 (Momentum) | 模型输入/诊断项 | {sr.momentum_score:.1f} |\n"
+                f"| 协同 (Synergy) | 模型输入/诊断项 | {sr.synergy_score:.1f} |\n"
+                f"| 价值-成长 (Value-Growth) | 模型输入/诊断项 | {sr.value_growth_score:.1f} |\n"
+            )
         return (
             "#### 评分明细\n"
             "| 因子 | 权重 | 得分 |\n"

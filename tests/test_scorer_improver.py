@@ -6,12 +6,15 @@ Tests cover experiment_log, evaluator, agent, and ground_truth helpers.
 from __future__ import annotations
 
 import json
+import time
 import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pandas as pd
+import pytest
 
 
 # ── ExperimentLog tests ─────────────────────────────────────────────────────
@@ -137,6 +140,3616 @@ class TestExperimentLog:
 class TestAgentHelpers:
     """Tests for agent.py helper functions (code extraction, diff, etc.)."""
 
+    def test_ml_ranker_feature_schema_vector_length(self) -> None:
+        from valueinvestor.screener.ml_ranker import (
+            expected_feature_names,
+            feature_vector_from_values,
+        )
+
+        values = {
+            "close": 10.0,
+            "pe_ratio": 8.0,
+            "pb_ratio": 1.2,
+            "market_cap_rmb": 10_000_000_000.0,
+            "net_income": 100_000_000.0,
+            "total_assets": 1_000_000_000.0,
+            "gross_margin": 0.3,
+            "roe": 0.15,
+            "composite_score": 60.0,
+            "value_score": 65.0,
+            "quality_score": 55.0,
+            "growth_score": 50.0,
+        }
+
+        vector = feature_vector_from_values(values, "TEST", {})
+
+        assert len(vector) == len(expected_feature_names())
+
+    def test_ml_ranker_short_horizon_feature_schema_vector_length(self) -> None:
+        from valueinvestor.screener.ml_ranker import (
+            expected_feature_names,
+            feature_vector_from_values,
+        )
+
+        feature_names = expected_feature_names(include_short_horizon=True)
+        values = {
+            "close": 10.0,
+            "composite_score": 60.0,
+            "value_score": 65.0,
+            "quality_score": 55.0,
+            "growth_score": 50.0,
+            "price_return_5d": 0.03,
+            "relative_return_5d": 0.01,
+            "price_volatility_21d": 0.02,
+        }
+
+        vector = feature_vector_from_values(
+            values,
+            "TEST",
+            {},
+            feature_names=feature_names,
+        )
+
+        assert len(vector) == len(feature_names)
+        assert len(feature_names) > len(expected_feature_names())
+        assert vector[feature_names.index("price_return_5d")] == pytest.approx(0.03)
+        assert vector[feature_names.index("market_return_5d_miss")] == 1.0
+
+    def test_ml_ranker_expanded_feature_schema_includes_interactions_and_polynomial_terms(self) -> None:
+        from valueinvestor.screener.ml_ranker import (
+            expected_feature_names,
+            feature_vector_from_values,
+        )
+
+        feature_names = expected_feature_names(
+            include_short_horizon=True,
+            include_interactions=True,
+            include_polynomial=True,
+        )
+        vector = feature_vector_from_values(
+            {
+                "value_score": 2.0,
+                "quality_score": 3.0,
+                "growth_score": 5.0,
+                "roe": 0.2,
+                "net_income": 10.0,
+                "market_cap_rmb": 100.0,
+                "free_cash_flow": 4.0,
+                "relative_return_63d": 0.7,
+            },
+            "TEST",
+            {"TEST": {"ticker_rankmean_6m": 0.4}},
+            feature_names=feature_names,
+        )
+
+        assert "value_quality_score" in feature_names
+        assert vector[feature_names.index("value_quality_score")] == pytest.approx(6.0)
+        assert vector[
+            feature_names.index("ticker_rankmean_6m_relative_return_63d")
+        ] == pytest.approx(0.28)
+        assert "value_score_sq" in feature_names
+        assert vector[feature_names.index("value_score_sq")] == pytest.approx(4.0)
+        assert vector[feature_names.index("ticker_rankmean_6m_sq")] == pytest.approx(0.16)
+
+    def test_ml_ranker_loads_expanded_and_poly_artifact_schemas(self, tmp_path: Path) -> None:
+        from valueinvestor.screener.ml_ranker import (
+            MODEL_SCHEMA_VERSION,
+            clear_model_cache,
+            expected_feature_names,
+            load_model,
+        )
+
+        schemas = (
+            expected_feature_names(
+                include_short_horizon=True,
+                include_interactions=True,
+            ),
+            expected_feature_names(
+                include_short_horizon=True,
+                include_interactions=True,
+                include_polynomial=True,
+            ),
+        )
+        for index, feature_names in enumerate(schemas):
+            model_path = tmp_path / f"model_{index}.json"
+            model_path.write_text(
+                json.dumps({
+                    "schema_version": MODEL_SCHEMA_VERSION,
+                    "feature_names": feature_names,
+                    "clip_low": [-100.0] * len(feature_names),
+                    "clip_high": [100.0] * len(feature_names),
+                    "mean": [0.0] * len(feature_names),
+                    "scale": [1.0] * len(feature_names),
+                    "coef": [0.0] * len(feature_names),
+                    "intercept": 0.0,
+                    "ticker_priors": {},
+                    "metadata": {},
+                }),
+                encoding="utf-8",
+            )
+
+            clear_model_cache()
+            model = load_model(model_path)
+
+            assert model is not None
+            assert len(model.feature_names) == len(feature_names)
+
+        clear_model_cache()
+
+    def test_ml_ranker_cross_sectional_schema_scores_with_snapshot_ranks(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from valueinvestor.data.models import (
+            Company,
+            Financials,
+            Market,
+            ScreeningResult,
+            ValuationMetrics,
+        )
+        from valueinvestor.screener.ml_ranker import (
+            MODEL_SCHEMA_VERSION,
+            clear_model_cache,
+            expected_feature_names,
+            score_results_with_ml_ranker,
+        )
+
+        feature_names = expected_feature_names(
+            include_short_horizon=True,
+            include_interactions=True,
+            include_polynomial=True,
+            include_cross_sectional=True,
+        )
+        coef = [0.0] * len(feature_names)
+        coef[feature_names.index("cs_rank_value_score")] = 1.0
+        model_path = tmp_path / "model_cs.json"
+        model_path.write_text(
+            json.dumps({
+                "schema_version": MODEL_SCHEMA_VERSION,
+                "feature_names": feature_names,
+                "clip_low": [-100.0] * len(feature_names),
+                "clip_high": [100.0] * len(feature_names),
+                "mean": [0.0] * len(feature_names),
+                "scale": [1.0] * len(feature_names),
+                "coef": coef,
+                "intercept": 0.0,
+                "ticker_priors": {},
+                "metadata": {},
+            }),
+            encoding="utf-8",
+        )
+        results = [
+            ScreeningResult(
+                company=Company(ticker="LOW", name="L", market=Market.A_SHARE),
+                financials=Financials(ticker="LOW", period="snapshot"),
+                valuation=ValuationMetrics(ticker="LOW", date="snapshot", price=1.0),
+                value_score=10.0,
+                composite_score=50.0,
+            ),
+            ScreeningResult(
+                company=Company(ticker="HIGH", name="H", market=Market.A_SHARE),
+                financials=Financials(ticker="HIGH", period="snapshot"),
+                valuation=ValuationMetrics(ticker="HIGH", date="snapshot", price=1.0),
+                value_score=90.0,
+                composite_score=50.0,
+            ),
+        ]
+
+        clear_model_cache()
+        assert score_results_with_ml_ranker(results, model_path=model_path)
+
+        assert results[1].composite_score > results[0].composite_score
+        clear_model_cache()
+
+    def test_ml_ranker_target_rank_1w_market_ranks_within_market(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _target_rank_by_snapshot_market
+
+        df = pd.DataFrame({
+            "snapshot_date": [pd.Timestamp("2024-01-01")] * 4,
+            "ticker": ["AAA", "BBB", "0700.HK", "0005.HK"],
+            "forward_return_1w": [0.10, 0.20, -0.10, 0.50],
+        })
+
+        target = _target_rank_by_snapshot_market(df, "forward_return_1w")
+
+        assert target.iloc[0] == pytest.approx(-1.0 / 3.0)
+        assert target.iloc[1] == pytest.approx(1.0 / 3.0)
+        assert target.iloc[2] == pytest.approx(-1.0 / 3.0)
+        assert target.iloc[3] == pytest.approx(1.0 / 3.0)
+
+    def test_ml_ranker_training_cross_sectional_features_rank_by_snapshot_and_market(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import build_feature_matrix
+
+        frame = pd.DataFrame({
+            "ticker": ["AAA", "BBB", "0700.HK", "AAA"],
+            "snapshot_date": [
+                "2024-01-01",
+                "2024-01-01",
+                "2024-01-01",
+                "2024-01-02",
+            ],
+            "value_score": [10.0, 20.0, 30.0, 40.0],
+        })
+
+        matrix = build_feature_matrix(
+            frame,
+            {},
+            feature_names=[
+                "cs_rank_value_score",
+                "market_cs_rank_value_score",
+            ],
+        )
+
+        assert matrix[:, 0].tolist() == pytest.approx([-0.5, 0.0, 0.5, 0.0])
+        assert matrix[:, 1].tolist() == pytest.approx([-0.5, 0.5, 0.0, 0.0])
+
+    def test_ml_ranker_cross_sectional_prior_interaction_features(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import build_feature_matrix
+        from valueinvestor.screener.ml_ranker import expected_feature_names
+
+        frame = pd.DataFrame({
+            "ticker": ["AAA", "BBB", "CCC"],
+            "snapshot_date": ["2024-01-01", "2024-01-01", "2024-01-01"],
+            "value_score": [10.0, 20.0, 30.0],
+        })
+        feature_names = [
+            "cs_rank_value_score",
+            "cs_rank_ticker_rankmean_6m",
+            "csx_value_ticker_rankmean_6m",
+        ]
+
+        matrix = build_feature_matrix(
+            frame,
+            {
+                "AAA": {"ticker_rankmean_6m": 0.0},
+                "BBB": {"ticker_rankmean_6m": 1.0},
+                "CCC": {"ticker_rankmean_6m": 2.0},
+            },
+            feature_names=feature_names,
+        )
+
+        assert "csx_value_ticker_rankmean_6m" in expected_feature_names(
+            include_short_horizon=True,
+            include_interactions=True,
+            include_polynomial=True,
+            include_cross_sectional=True,
+            include_cross_sectional_interactions=True,
+        )
+        assert matrix[:, 0].tolist() == pytest.approx([-0.5, 0.0, 0.5])
+        assert matrix[:, 1].tolist() == pytest.approx([-0.5, 0.0, 0.5])
+        assert matrix[:, 2].tolist() == pytest.approx([0.25, 0.0, 0.25])
+
+    def test_ml_ranker_scores_cross_sectional_interaction_artifact(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from valueinvestor.data.models import (
+            Company,
+            Financials,
+            Market,
+            ScreeningResult,
+            ValuationMetrics,
+        )
+        from valueinvestor.screener.ml_ranker import (
+            MODEL_SCHEMA_VERSION,
+            clear_model_cache,
+            expected_feature_names,
+            score_results_with_ml_ranker,
+        )
+
+        feature_names = expected_feature_names(
+            include_short_horizon=True,
+            include_interactions=True,
+            include_polynomial=True,
+            include_cross_sectional=True,
+            include_cross_sectional_interactions=True,
+        )
+        coef = [0.0] * len(feature_names)
+        coef[feature_names.index("csx_value_ticker_rankmean_6m")] = 1.0
+        model_path = tmp_path / "model_csx.json"
+        model_path.write_text(
+            json.dumps({
+                "schema_version": MODEL_SCHEMA_VERSION,
+                "feature_names": feature_names,
+                "clip_low": [-100.0] * len(feature_names),
+                "clip_high": [100.0] * len(feature_names),
+                "mean": [0.0] * len(feature_names),
+                "scale": [1.0] * len(feature_names),
+                "coef": coef,
+                "intercept": 0.0,
+                "ticker_priors": {
+                    "LOW": {"ticker_rankmean_6m": 0.0},
+                    "MID": {"ticker_rankmean_6m": 1.0},
+                    "HIGH": {"ticker_rankmean_6m": 2.0},
+                },
+                "metadata": {},
+            }),
+            encoding="utf-8",
+        )
+        results = [
+            ScreeningResult(
+                company=Company(ticker="LOW", name="L", market=Market.A_SHARE),
+                financials=Financials(ticker="LOW", period="snapshot"),
+                valuation=ValuationMetrics(ticker="LOW", date="snapshot", price=1.0),
+                value_score=10.0,
+                composite_score=50.0,
+            ),
+            ScreeningResult(
+                company=Company(ticker="MID", name="M", market=Market.A_SHARE),
+                financials=Financials(ticker="MID", period="snapshot"),
+                valuation=ValuationMetrics(ticker="MID", date="snapshot", price=1.0),
+                value_score=20.0,
+                composite_score=50.0,
+            ),
+            ScreeningResult(
+                company=Company(ticker="HIGH", name="H", market=Market.A_SHARE),
+                financials=Financials(ticker="HIGH", period="snapshot"),
+                valuation=ValuationMetrics(ticker="HIGH", date="snapshot", price=1.0),
+                value_score=30.0,
+                composite_score=50.0,
+            ),
+        ]
+
+        clear_model_cache()
+        assert score_results_with_ml_ranker(results, model_path=model_path)
+
+        assert results[0].composite_score > results[1].composite_score
+        assert results[2].composite_score > results[1].composite_score
+        clear_model_cache()
+
+    def test_recent_positive_year_start_selects_latest_improving_gate_year(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _recent_positive_year_start
+
+        diagnostics = {
+            "year": [
+                {"label": "2023", "deltas": {"6m": -0.2}},
+                {"label": "2024", "deltas": {"6m": -0.1}},
+                {"label": "2025", "deltas": {"6m": 0.04}},
+            ]
+        }
+
+        assert _recent_positive_year_start(
+            diagnostics,
+            gate_start="2023-07-07",
+            primary_horizon="6m",
+        ) == "2025-01-01"
+
+    def test_recent_positive_year_market_route_selects_only_improving_markets(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import (
+            _recent_positive_year_market_route,
+        )
+
+        rows = []
+        candidate_predictions = []
+        incumbent_predictions = []
+        for snapshot_idx, snapshot_date in enumerate(pd.date_range("2025-01-01", periods=4, freq="MS")):
+            for stock_idx in range(10):
+                rows.append({
+                    "ticker": f"600{snapshot_idx}{stock_idx:02d}",
+                    "snapshot_date": snapshot_date.date().isoformat(),
+                    "forward_return_6m": float(stock_idx),
+                })
+                candidate_predictions.append(float(stock_idx))
+                incumbent_predictions.append(float(9 - stock_idx))
+            for stock_idx in range(10):
+                rows.append({
+                    "ticker": f"{stock_idx:04d}.HK",
+                    "snapshot_date": snapshot_date.date().isoformat(),
+                    "forward_return_6m": float(stock_idx),
+                })
+                candidate_predictions.append(float(9 - stock_idx))
+                incumbent_predictions.append(float(stock_idx))
+
+        route = _recent_positive_year_market_route(
+            pd.DataFrame(rows),
+            np.asarray(candidate_predictions, dtype="float64"),
+            np.asarray(incumbent_predictions, dtype="float64"),
+            gate_start="2024-07-07",
+            primary_horizon="6m",
+        )
+
+        assert route == ("2025-01-01", {"ashare": 1.0})
+
+    def test_recent_positive_window_market_route_selects_best_recent_start(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import (
+            _recent_positive_window_market_route,
+        )
+
+        rows = []
+        candidate_predictions = []
+        incumbent_predictions = []
+        for snapshot_date in pd.date_range("2025-01-01", periods=6, freq="MS"):
+            candidate_good = snapshot_date >= pd.Timestamp("2025-03-01")
+            for stock_idx in range(10):
+                rows.append({
+                    "ticker": f"600{snapshot_date.month:02d}{stock_idx:02d}",
+                    "snapshot_date": snapshot_date.date().isoformat(),
+                    "forward_return_6m": float(stock_idx),
+                })
+                candidate_predictions.append(float(stock_idx if candidate_good else 9 - stock_idx))
+                incumbent_predictions.append(float(9 - stock_idx if candidate_good else stock_idx))
+            for stock_idx in range(10):
+                rows.append({
+                    "ticker": f"{stock_idx:04d}.HK",
+                    "snapshot_date": snapshot_date.date().isoformat(),
+                    "forward_return_6m": float(stock_idx),
+                })
+                candidate_predictions.append(float(9 - stock_idx))
+                incumbent_predictions.append(float(stock_idx))
+
+        route = _recent_positive_window_market_route(
+            pd.DataFrame(rows),
+            np.asarray(candidate_predictions, dtype="float64"),
+            np.asarray(incumbent_predictions, dtype="float64"),
+            gate_start="2024-12-15",
+            primary_horizon="6m",
+            min_snapshots=2,
+        )
+
+        assert route == ("2025-03-01", {"ashare": 1.0})
+
+    def test_recent_positive_window_market_route_can_select_partial_weight(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import (
+            _recent_positive_window_market_route,
+        )
+
+        rows = []
+        candidate_predictions = []
+        incumbent_predictions = []
+        returns = [float(value) for value in range(10)]
+        incumbent = [0.0, 1.0, 3.0, 4.0, 2.0, 5.0, 6.0, 8.0, 9.0, 7.0]
+        candidate = [0.0, 2.0, 1.0, 4.0, 3.0, 5.0, 7.0, 6.0, 9.0, 8.0]
+        for snapshot_date in pd.date_range("2025-01-01", periods=4, freq="MS"):
+            for stock_idx, forward_return in enumerate(returns):
+                rows.append({
+                    "ticker": f"600{snapshot_date.month:02d}{stock_idx:02d}",
+                    "snapshot_date": snapshot_date.date().isoformat(),
+                    "forward_return_6m": forward_return,
+                })
+                candidate_predictions.append(candidate[stock_idx])
+                incumbent_predictions.append(incumbent[stock_idx])
+
+        route = _recent_positive_window_market_route(
+            pd.DataFrame(rows),
+            np.asarray(candidate_predictions, dtype="float64"),
+            np.asarray(incumbent_predictions, dtype="float64"),
+            gate_start="2024-12-15",
+            primary_horizon="6m",
+            min_snapshots=2,
+        )
+
+        assert route == ("2025-01-01", {"ashare": 0.5})
+
+    def test_recent_positive_window_segment_route_selects_cap_bucket(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import (
+            _recent_positive_window_segment_route,
+        )
+
+        rows = []
+        candidate_predictions = []
+        incumbent_predictions = []
+        for snapshot_date in pd.date_range("2025-01-01", periods=4, freq="MS"):
+            for stock_idx in range(10):
+                rows.append({
+                    "ticker": f"600{snapshot_date.month:02d}{stock_idx:02d}",
+                    "snapshot_date": snapshot_date.date().isoformat(),
+                    "market_cap_rmb": 5_000_000_000.0,
+                    "forward_return_6m": float(stock_idx),
+                })
+                candidate_predictions.append(float(stock_idx))
+                incumbent_predictions.append(float(9 - stock_idx))
+            for stock_idx in range(10):
+                rows.append({
+                    "ticker": f"601{snapshot_date.month:02d}{stock_idx:02d}",
+                    "snapshot_date": snapshot_date.date().isoformat(),
+                    "market_cap_rmb": 80_000_000_000.0,
+                    "forward_return_6m": float(stock_idx),
+                })
+                candidate_predictions.append(float(9 - stock_idx))
+                incumbent_predictions.append(float(stock_idx))
+
+        route = _recent_positive_window_segment_route(
+            pd.DataFrame(rows),
+            np.asarray(candidate_predictions, dtype="float64"),
+            np.asarray(incumbent_predictions, dtype="float64"),
+            gate_start="2024-12-15",
+            primary_horizon="6m",
+            min_snapshots=2,
+        )
+
+        assert route is not None
+        recent_start, routes = route
+        assert recent_start == "2025-01-01"
+        assert routes == [
+            {
+                "start_date": "2025-01-01",
+                "market": "ashare",
+                "cap_bucket": "small",
+                "candidate_weight": 1.0,
+            }
+        ]
+
+    def test_segment_routes_can_require_top20_excess_non_degradation(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import (
+            _positive_segment_route,
+            _recent_positive_window_segment_route,
+        )
+
+        rows = []
+        candidate_predictions = []
+        incumbent_predictions = []
+        incumbent_pattern = [float(9 - idx) for idx in range(10)] + [
+            float(39 - idx) for idx in range(10, 30)
+        ]
+        candidate_pattern = [float(idx) for idx in range(30)]
+        candidate_pattern[0] = 100.0
+        candidate_pattern[29] = 5.0
+
+        for snapshot_date in pd.date_range("2025-01-01", periods=4, freq="MS"):
+            for stock_idx in range(30):
+                rows.append({
+                    "ticker": f"600{snapshot_date.month:02d}{stock_idx:02d}",
+                    "snapshot_date": snapshot_date.date().isoformat(),
+                    "market_cap_rmb": 5_000_000_000.0,
+                    "forward_return_6m": float(stock_idx),
+                })
+                candidate_predictions.append(candidate_pattern[stock_idx])
+                incumbent_predictions.append(incumbent_pattern[stock_idx])
+
+        frame = pd.DataFrame(rows)
+        candidate_array = np.asarray(candidate_predictions, dtype="float64")
+        incumbent_array = np.asarray(incumbent_predictions, dtype="float64")
+
+        assert _positive_segment_route(
+            frame,
+            candidate_array,
+            incumbent_array,
+            primary_horizon="6m",
+            min_snapshots=2,
+        ) is not None
+        assert _positive_segment_route(
+            frame,
+            candidate_array,
+            incumbent_array,
+            primary_horizon="6m",
+            min_snapshots=2,
+            require_primary_top20_excess_non_degradation=True,
+        ) is None
+        assert _recent_positive_window_segment_route(
+            frame,
+            candidate_array,
+            incumbent_array,
+            gate_start="2024-12-15",
+            primary_horizon="6m",
+            min_snapshots=2,
+        ) is not None
+        assert _recent_positive_window_segment_route(
+            frame,
+            candidate_array,
+            incumbent_array,
+            gate_start="2024-12-15",
+            primary_horizon="6m",
+            min_snapshots=2,
+            require_primary_top20_excess_non_degradation=True,
+        ) is None
+
+    def test_price_valuation_skeleton_estimates_market_cap_from_current_shares(
+        self,
+        monkeypatch,
+    ) -> None:
+        from valueinvestor.scorer_improver import data_prep
+
+        monkeypatch.setattr(
+            data_prep,
+            "_current_market_cap_share_estimates",
+            lambda: {"AAA": 1_000_000.0},
+        )
+        prices = pd.DataFrame({
+            "ticker": ["AAA", "BBB"],
+            "date": ["2025-01-02", "2025-01-02"],
+            "close": [10.0, 20.0],
+        })
+
+        valuations = data_prep._price_valuation_skeleton(
+            prices,
+            start=pd.Timestamp("2025-01-01").date(),
+            end=pd.Timestamp("2025-01-31").date(),
+        )
+
+        aaa = valuations.loc[valuations["ticker"] == "AAA"].iloc[0]
+        bbb = valuations.loc[valuations["ticker"] == "BBB"].iloc[0]
+        assert aaa["market_cap_rmb"] == pytest.approx(10_000_000.0)
+        assert pd.isna(bbb["market_cap_rmb"])
+
+
+    def test_ml_ranker_scores_results_from_artifact(self, tmp_path: Path) -> None:
+        from valueinvestor.data.models import (
+            Company,
+            Financials,
+            Market,
+            ScreeningResult,
+            ValuationMetrics,
+        )
+        from valueinvestor.screener.ml_ranker import (
+            MODEL_SCHEMA_VERSION,
+            clear_model_cache,
+            expected_feature_names,
+            score_results_with_ml_ranker,
+        )
+
+        feature_names = expected_feature_names()
+        coef = [0.0] * len(feature_names)
+        coef[feature_names.index("ticker_rankmean_6m")] = 1.0
+        model_path = tmp_path / "model.json"
+        model_path.write_text(
+            json.dumps({
+                "schema_version": MODEL_SCHEMA_VERSION,
+                "feature_names": feature_names,
+                "clip_low": [-100.0] * len(feature_names),
+                "clip_high": [100.0] * len(feature_names),
+                "mean": [0.0] * len(feature_names),
+                "scale": [1.0] * len(feature_names),
+                "coef": coef,
+                "intercept": 0.0,
+                "ticker_priors": {
+                    "AAA": {"ticker_rankmean_6m": 0.8},
+                    "BBB": {"ticker_rankmean_6m": -0.8},
+                },
+                "metadata": {},
+            }),
+            encoding="utf-8",
+        )
+        results = [
+            ScreeningResult(
+                company=Company(ticker="BBB", name="B", market=Market.A_SHARE),
+                financials=Financials(ticker="BBB", period="snapshot"),
+                valuation=ValuationMetrics(ticker="BBB", date="snapshot", price=1.0),
+                composite_score=50.0,
+            ),
+            ScreeningResult(
+                company=Company(ticker="AAA", name="A", market=Market.A_SHARE),
+                financials=Financials(ticker="AAA", period="snapshot"),
+                valuation=ValuationMetrics(ticker="AAA", date="snapshot", price=1.0),
+                composite_score=50.0,
+            ),
+        ]
+
+        clear_model_cache()
+        applied = score_results_with_ml_ranker(results, model_path=model_path)
+        clear_model_cache()
+
+        assert applied is True
+        assert results[1].composite_score > results[0].composite_score
+
+    def test_ml_ranker_scores_market_payload_member_artifact(self, tmp_path: Path) -> None:
+        from valueinvestor.data.models import (
+            Company,
+            Financials,
+            Market,
+            ScreeningResult,
+            ValuationMetrics,
+        )
+        from valueinvestor.screener.ml_ranker import (
+            MODEL_SCHEMA_VERSION,
+            clear_model_cache,
+            expected_feature_names,
+            score_results_with_ml_ranker,
+        )
+
+        feature_names = expected_feature_names()
+
+        def child_payload(intercept: float) -> dict[str, object]:
+            return {
+                "schema_version": MODEL_SCHEMA_VERSION,
+                "feature_names": feature_names,
+                "clip_low": [-100.0] * len(feature_names),
+                "clip_high": [100.0] * len(feature_names),
+                "mean": [0.0] * len(feature_names),
+                "scale": [1.0] * len(feature_names),
+                "coef": [0.0] * len(feature_names),
+                "intercept": intercept,
+                "ticker_priors": {},
+                "metadata": {},
+            }
+
+        model_path = tmp_path / "market_payload_model.json"
+        model_path.write_text(
+            json.dumps({
+                "schema_version": MODEL_SCHEMA_VERSION,
+                "feature_names": [],
+                "ticker_priors": {},
+                "metadata": {},
+                "market_payload_members": [
+                    {
+                        "market_weights": {"ashare": 0.0, "hk": 1.0},
+                        "payload": child_payload(10.0),
+                    },
+                    {
+                        "market_weights": {"ashare": 1.0, "hk": 0.0},
+                        "payload": child_payload(20.0),
+                    },
+                ],
+            }),
+            encoding="utf-8",
+        )
+        results = [
+            ScreeningResult(
+                company=Company(ticker="0700.HK", name="T", market=Market.HK_SHARE),
+                financials=Financials(ticker="0700.HK", period="snapshot"),
+                valuation=ValuationMetrics(ticker="0700.HK", date="snapshot", price=1.0),
+                composite_score=50.0,
+            ),
+            ScreeningResult(
+                company=Company(ticker="AAA", name="A", market=Market.A_SHARE),
+                financials=Financials(ticker="AAA", period="snapshot"),
+                valuation=ValuationMetrics(ticker="AAA", date="snapshot", price=1.0),
+                composite_score=50.0,
+            ),
+        ]
+
+        clear_model_cache()
+        applied = score_results_with_ml_ranker(results, model_path=model_path)
+        clear_model_cache()
+
+        assert applied is True
+        assert results[1].composite_score > results[0].composite_score
+
+    def test_ml_ranker_scores_conditional_segment_artifact(self, tmp_path: Path) -> None:
+        from valueinvestor.data.models import (
+            Company,
+            Financials,
+            Market,
+            ScreeningResult,
+            ValuationMetrics,
+        )
+        from valueinvestor.screener.ml_ranker import (
+            MODEL_SCHEMA_VERSION,
+            clear_model_cache,
+            expected_feature_names,
+            score_results_with_ml_ranker,
+        )
+
+        feature_names = expected_feature_names()
+        candidate_coef = [0.0] * len(feature_names)
+        candidate_coef[feature_names.index("value_score")] = 1.0
+
+        def child_payload(coef: list[float]) -> dict[str, object]:
+            return {
+                "schema_version": MODEL_SCHEMA_VERSION,
+                "feature_names": feature_names,
+                "clip_low": [-100.0] * len(feature_names),
+                "clip_high": [100.0] * len(feature_names),
+                "mean": [0.0] * len(feature_names),
+                "scale": [1.0] * len(feature_names),
+                "coef": coef,
+                "intercept": 0.0,
+                "ticker_priors": {},
+                "metadata": {},
+            }
+
+        model_path = tmp_path / "conditional_model.json"
+        model_path.write_text(
+            json.dumps({
+                "schema_version": MODEL_SCHEMA_VERSION,
+                "feature_names": [],
+                "ticker_priors": {},
+                "metadata": {},
+                "conditional_blend": {
+                    "base_payload": child_payload([0.0] * len(feature_names)),
+                    "candidate_payload": child_payload(candidate_coef),
+                    "routes": [
+                        {
+                            "market": "ashare",
+                            "cap_bucket": "small",
+                            "board_bucket": "other",
+                            "listing_bucket": "unknown",
+                            "candidate_weight": 1.0,
+                        }
+                    ],
+                },
+            }),
+            encoding="utf-8",
+        )
+        results = [
+            ScreeningResult(
+                company=Company(ticker="SMALL", name="S", market=Market.A_SHARE),
+                financials=Financials(ticker="SMALL", period="snapshot"),
+                valuation=ValuationMetrics(
+                    ticker="SMALL",
+                    date="2026-01-01",
+                    price=1.0,
+                    market_cap_rmb=5_000_000_000.0,
+                ),
+                value_score=25.0,
+                composite_score=50.0,
+            ),
+            ScreeningResult(
+                company=Company(ticker="LARGE", name="L", market=Market.A_SHARE),
+                financials=Financials(ticker="LARGE", period="snapshot"),
+                valuation=ValuationMetrics(
+                    ticker="LARGE",
+                    date="2026-01-01",
+                    price=1.0,
+                    market_cap_rmb=80_000_000_000.0,
+                ),
+                value_score=25.0,
+                composite_score=50.0,
+            ),
+        ]
+
+        clear_model_cache()
+        applied = score_results_with_ml_ranker(results, model_path=model_path)
+        clear_model_cache()
+
+        assert applied is True
+        assert results[0]._ml_ranker_raw_score == pytest.approx(25.0)
+        assert results[1]._ml_ranker_raw_score == pytest.approx(0.0)
+        assert results[0].composite_score > results[1].composite_score
+
+    def test_ml_ranker_scores_results_from_ensemble_artifact(self, tmp_path: Path) -> None:
+        from valueinvestor.data.models import (
+            Company,
+            Financials,
+            Market,
+            ScreeningResult,
+            ValuationMetrics,
+        )
+        from valueinvestor.screener.ml_ranker import (
+            MODEL_SCHEMA_VERSION,
+            clear_model_cache,
+            expected_feature_names,
+            score_results_with_ml_ranker,
+        )
+
+        feature_names = expected_feature_names()
+        coef_a = [0.0] * len(feature_names)
+        coef_b = [0.0] * len(feature_names)
+        coef_a[feature_names.index("ticker_rankmean_6m")] = 1.0
+        coef_b[feature_names.index("ticker_rankmean_6m")] = 0.5
+        model_path = tmp_path / "model.json"
+        model_path.write_text(
+            json.dumps({
+                "schema_version": MODEL_SCHEMA_VERSION,
+                "feature_names": feature_names,
+                "models": [
+                    {
+                        "clip_low": [-100.0] * len(feature_names),
+                        "clip_high": [100.0] * len(feature_names),
+                        "mean": [0.0] * len(feature_names),
+                        "scale": [1.0] * len(feature_names),
+                        "coef": coef_a,
+                        "intercept": 0.0,
+                    },
+                    {
+                        "clip_low": [-100.0] * len(feature_names),
+                        "clip_high": [100.0] * len(feature_names),
+                        "mean": [0.0] * len(feature_names),
+                        "scale": [1.0] * len(feature_names),
+                        "coef": coef_b,
+                        "intercept": 0.0,
+                    },
+                ],
+                "ticker_priors": {
+                    "AAA": {"ticker_rankmean_6m": 0.8},
+                    "BBB": {"ticker_rankmean_6m": -0.8},
+                },
+                "metadata": {},
+            }),
+            encoding="utf-8",
+        )
+        results = [
+            ScreeningResult(
+                company=Company(ticker="BBB", name="B", market=Market.A_SHARE),
+                financials=Financials(ticker="BBB", period="snapshot"),
+                valuation=ValuationMetrics(ticker="BBB", date="snapshot", price=1.0),
+                composite_score=50.0,
+            ),
+            ScreeningResult(
+                company=Company(ticker="AAA", name="A", market=Market.A_SHARE),
+                financials=Financials(ticker="AAA", period="snapshot"),
+                valuation=ValuationMetrics(ticker="AAA", date="snapshot", price=1.0),
+                composite_score=50.0,
+            ),
+        ]
+
+        clear_model_cache()
+        applied = score_results_with_ml_ranker(results, model_path=model_path)
+        clear_model_cache()
+
+        assert applied is True
+        assert results[0]._ml_ranker_raw_score == pytest.approx(-0.6)
+        assert results[1]._ml_ranker_raw_score == pytest.approx(0.6)
+        assert results[1].composite_score > results[0].composite_score
+
+    def test_ml_ranker_scores_temporal_artifact_by_valuation_date(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from valueinvestor.data.models import (
+            Company,
+            Financials,
+            Market,
+            ScreeningResult,
+            ValuationMetrics,
+        )
+        from valueinvestor.screener.ml_ranker import (
+            MODEL_SCHEMA_VERSION,
+            clear_model_cache,
+            expected_feature_names,
+            score_results_with_ml_ranker,
+        )
+
+        feature_names = expected_feature_names()
+        early_coef = [0.0] * len(feature_names)
+        recent_coef = [0.0] * len(feature_names)
+        early_coef[feature_names.index("close")] = 1.0
+        recent_coef[feature_names.index("close")] = 10.0
+
+        def linear_payload(coef: list[float]) -> dict[str, object]:
+            return {
+                "schema_version": MODEL_SCHEMA_VERSION,
+                "feature_names": feature_names,
+                "clip_low": [-100.0] * len(feature_names),
+                "clip_high": [100.0] * len(feature_names),
+                "mean": [0.0] * len(feature_names),
+                "scale": [1.0] * len(feature_names),
+                "coef": coef,
+                "intercept": 0.0,
+                "ticker_priors": {},
+                "metadata": {},
+            }
+
+        model_path = tmp_path / "model.json"
+        model_path.write_text(
+            json.dumps({
+                "schema_version": MODEL_SCHEMA_VERSION,
+                "feature_names": [],
+                "temporal_payload_members": [
+                    {"end_date": "2023-07-07", "payload": linear_payload(early_coef)},
+                    {"start_date": "2023-07-07", "payload": linear_payload(recent_coef)},
+                ],
+                "ticker_priors": {},
+                "metadata": {"target_horizon": "6m"},
+            }),
+            encoding="utf-8",
+        )
+        results = [
+            ScreeningResult(
+                company=Company(ticker="AAA", name="A", market=Market.A_SHARE),
+                financials=Financials(ticker="AAA", period="snapshot"),
+                valuation=ValuationMetrics(
+                    ticker="AAA",
+                    date="2023-06-30",
+                    price=2.0,
+                ),
+                composite_score=50.0,
+            ),
+            ScreeningResult(
+                company=Company(ticker="BBB", name="B", market=Market.A_SHARE),
+                financials=Financials(ticker="BBB", period="snapshot"),
+                valuation=ValuationMetrics(
+                    ticker="BBB",
+                    date="2023-07-07",
+                    price=3.0,
+                ),
+                composite_score=50.0,
+            ),
+        ]
+
+        clear_model_cache()
+        applied = score_results_with_ml_ranker(results, model_path=model_path)
+        clear_model_cache()
+
+        assert applied is True
+        assert results[0]._ml_ranker_raw_score == pytest.approx(2.0)
+        assert results[1]._ml_ranker_raw_score == pytest.approx(30.0)
+
+    def test_ml_ranker_routes_market_specific_ensemble_models(self, tmp_path: Path) -> None:
+        from valueinvestor.data.models import (
+            Company,
+            Financials,
+            Market,
+            ScreeningResult,
+            ValuationMetrics,
+        )
+        from valueinvestor.screener.ml_ranker import (
+            MODEL_SCHEMA_VERSION,
+            clear_model_cache,
+            expected_feature_names,
+            score_results_with_ml_ranker,
+        )
+
+        feature_names = expected_feature_names()
+        coef_a = [0.0] * len(feature_names)
+        coef_hk = [0.0] * len(feature_names)
+        coef_a[feature_names.index("ticker_rankmean_6m")] = 1.0
+        coef_hk[feature_names.index("ticker_rankmean_6m")] = -1.0
+        model_path = tmp_path / "model.json"
+        model_path.write_text(
+            json.dumps({
+                "schema_version": MODEL_SCHEMA_VERSION,
+                "feature_names": feature_names,
+                "models": [
+                    {
+                        "clip_low": [-100.0] * len(feature_names),
+                        "clip_high": [100.0] * len(feature_names),
+                        "mean": [0.0] * len(feature_names),
+                        "scale": [1.0] * len(feature_names),
+                        "coef": coef_a,
+                        "intercept": 0.0,
+                        "market": "ashare",
+                    },
+                    {
+                        "clip_low": [-100.0] * len(feature_names),
+                        "clip_high": [100.0] * len(feature_names),
+                        "mean": [0.0] * len(feature_names),
+                        "scale": [1.0] * len(feature_names),
+                        "coef": coef_hk,
+                        "intercept": 0.0,
+                        "market": "hk",
+                    },
+                ],
+                "ticker_priors": {
+                    "AAA": {"ticker_rankmean_6m": 0.8},
+                    "0700.HK": {"ticker_rankmean_6m": 0.8},
+                },
+                "metadata": {},
+            }),
+            encoding="utf-8",
+        )
+        results = [
+            ScreeningResult(
+                company=Company(ticker="AAA", name="A", market=Market.A_SHARE),
+                financials=Financials(ticker="AAA", period="snapshot"),
+                valuation=ValuationMetrics(ticker="AAA", date="snapshot", price=1.0),
+                composite_score=50.0,
+            ),
+            ScreeningResult(
+                company=Company(ticker="0700.HK", name="T", market=Market.HK_SHARE),
+                financials=Financials(ticker="0700.HK", period="snapshot"),
+                valuation=ValuationMetrics(ticker="0700.HK", date="snapshot", price=1.0),
+                composite_score=50.0,
+            ),
+        ]
+
+        clear_model_cache()
+        applied = score_results_with_ml_ranker(results, model_path=model_path)
+        clear_model_cache()
+
+        assert applied is True
+        assert results[0]._ml_ranker_raw_score == pytest.approx(0.8)
+        assert results[1]._ml_ranker_raw_score == pytest.approx(-0.8)
+
+    def test_ml_ranker_routes_cap_segment_ensemble_models(self, tmp_path: Path) -> None:
+        from valueinvestor.data.models import (
+            Company,
+            Financials,
+            Market,
+            ScreeningResult,
+            ValuationMetrics,
+        )
+        from valueinvestor.screener.ml_ranker import (
+            MODEL_SCHEMA_VERSION,
+            clear_model_cache,
+            expected_feature_names,
+            score_results_with_ml_ranker,
+        )
+
+        feature_names = expected_feature_names()
+        model_path = tmp_path / "segment_model.json"
+        base_model = {
+            "clip_low": [-100.0] * len(feature_names),
+            "clip_high": [100.0] * len(feature_names),
+            "mean": [0.0] * len(feature_names),
+            "scale": [1.0] * len(feature_names),
+            "coef": [0.0] * len(feature_names),
+            "market": "ashare",
+        }
+        model_path.write_text(
+            json.dumps({
+                "schema_version": MODEL_SCHEMA_VERSION,
+                "feature_names": feature_names,
+                "models": [
+                    {**base_model, "intercept": 1.0, "cap_bucket": "small"},
+                    {**base_model, "intercept": 10.0, "cap_bucket": "large"},
+                ],
+                "ticker_priors": {},
+                "metadata": {},
+            }),
+            encoding="utf-8",
+        )
+        results = [
+            ScreeningResult(
+                company=Company(ticker="SMALL", name="S", market=Market.A_SHARE),
+                financials=Financials(ticker="SMALL", period="snapshot"),
+                valuation=ValuationMetrics(
+                    ticker="SMALL",
+                    date="snapshot",
+                    price=1.0,
+                    market_cap_rmb=5_000_000_000.0,
+                ),
+                composite_score=50.0,
+            ),
+            ScreeningResult(
+                company=Company(ticker="LARGE", name="L", market=Market.A_SHARE),
+                financials=Financials(ticker="LARGE", period="snapshot"),
+                valuation=ValuationMetrics(
+                    ticker="LARGE",
+                    date="snapshot",
+                    price=1.0,
+                    market_cap_rmb=80_000_000_000.0,
+                ),
+                composite_score=50.0,
+            ),
+        ]
+
+        clear_model_cache()
+        applied = score_results_with_ml_ranker(results, model_path=model_path)
+        clear_model_cache()
+
+        assert applied is True
+        assert results[0]._ml_ranker_raw_score == pytest.approx(1.0)
+        assert results[1]._ml_ranker_raw_score == pytest.approx(10.0)
+
+    def test_ml_ranker_routes_board_segment_ensemble_models(self, tmp_path: Path) -> None:
+        from valueinvestor.data.models import (
+            Company,
+            Financials,
+            Market,
+            ScreeningResult,
+            ValuationMetrics,
+        )
+        from valueinvestor.screener.ml_ranker import (
+            MODEL_SCHEMA_VERSION,
+            clear_model_cache,
+            expected_feature_names,
+            score_results_with_ml_ranker,
+        )
+
+        feature_names = expected_feature_names()
+        base_model = {
+            "clip_low": [-100.0] * len(feature_names),
+            "clip_high": [100.0] * len(feature_names),
+            "mean": [0.0] * len(feature_names),
+            "scale": [1.0] * len(feature_names),
+            "coef": [0.0] * len(feature_names),
+            "market": "ashare",
+            "cap_bucket": "large",
+        }
+        model_path = tmp_path / "board_segment_model.json"
+        model_path.write_text(
+            json.dumps({
+                "schema_version": MODEL_SCHEMA_VERSION,
+                "feature_names": feature_names,
+                "models": [
+                    {
+                        **base_model,
+                        "intercept": 1.0,
+                        "board_bucket": "sh_main",
+                        "listing_bucket": "600",
+                    },
+                    {
+                        **base_model,
+                        "intercept": 10.0,
+                        "board_bucket": "star",
+                        "listing_bucket": "688",
+                    },
+                ],
+                "ticker_priors": {},
+                "metadata": {},
+            }),
+            encoding="utf-8",
+        )
+        results = [
+            ScreeningResult(
+                company=Company(ticker="600000", name="S", market=Market.A_SHARE),
+                financials=Financials(ticker="600000", period="snapshot"),
+                valuation=ValuationMetrics(
+                    ticker="600000",
+                    date="snapshot",
+                    price=1.0,
+                    market_cap_rmb=80_000_000_000.0,
+                ),
+                composite_score=50.0,
+            ),
+            ScreeningResult(
+                company=Company(ticker="688000", name="L", market=Market.A_SHARE),
+                financials=Financials(ticker="688000", period="snapshot"),
+                valuation=ValuationMetrics(
+                    ticker="688000",
+                    date="snapshot",
+                    price=1.0,
+                    market_cap_rmb=80_000_000_000.0,
+                ),
+                composite_score=50.0,
+            ),
+        ]
+
+        clear_model_cache()
+        applied = score_results_with_ml_ranker(results, model_path=model_path)
+        clear_model_cache()
+
+        assert applied is True
+        assert results[0]._ml_ranker_raw_score == pytest.approx(1.0)
+        assert results[1]._ml_ranker_raw_score == pytest.approx(10.0)
+
+    def test_ml_ranker_respects_weighted_ensemble_artifact(self, tmp_path: Path) -> None:
+        from valueinvestor.data.models import (
+            Company,
+            Financials,
+            Market,
+            ScreeningResult,
+            ValuationMetrics,
+        )
+        from valueinvestor.screener.ml_ranker import (
+            MODEL_SCHEMA_VERSION,
+            clear_model_cache,
+            expected_feature_names,
+            score_results_with_ml_ranker,
+        )
+
+        feature_names = expected_feature_names()
+        coef_a = [0.0] * len(feature_names)
+        coef_b = [0.0] * len(feature_names)
+        coef_a[feature_names.index("ticker_rankmean_6m")] = 1.0
+        coef_b[feature_names.index("ticker_rankmean_6m")] = -1.0
+        model_path = tmp_path / "model.json"
+        model_path.write_text(
+            json.dumps({
+                "schema_version": MODEL_SCHEMA_VERSION,
+                "feature_names": feature_names,
+                "models": [
+                    {
+                        "clip_low": [-100.0] * len(feature_names),
+                        "clip_high": [100.0] * len(feature_names),
+                        "mean": [0.0] * len(feature_names),
+                        "scale": [1.0] * len(feature_names),
+                        "coef": coef_a,
+                        "intercept": 0.0,
+                        "weight": 0.75,
+                    },
+                    {
+                        "clip_low": [-100.0] * len(feature_names),
+                        "clip_high": [100.0] * len(feature_names),
+                        "mean": [0.0] * len(feature_names),
+                        "scale": [1.0] * len(feature_names),
+                        "coef": coef_b,
+                        "intercept": 0.0,
+                        "weight": 0.25,
+                    },
+                ],
+                "ticker_priors": {
+                    "AAA": {"ticker_rankmean_6m": 1.0},
+                    "BBB": {"ticker_rankmean_6m": -1.0},
+                },
+                "metadata": {},
+            }),
+            encoding="utf-8",
+        )
+        results = [
+            ScreeningResult(
+                company=Company(ticker="BBB", name="B", market=Market.A_SHARE),
+                financials=Financials(ticker="BBB", period="snapshot"),
+                valuation=ValuationMetrics(ticker="BBB", date="snapshot", price=1.0),
+                composite_score=50.0,
+            ),
+            ScreeningResult(
+                company=Company(ticker="AAA", name="A", market=Market.A_SHARE),
+                financials=Financials(ticker="AAA", period="snapshot"),
+                valuation=ValuationMetrics(ticker="AAA", date="snapshot", price=1.0),
+                composite_score=50.0,
+            ),
+        ]
+
+        clear_model_cache()
+        applied = score_results_with_ml_ranker(results, model_path=model_path)
+        clear_model_cache()
+
+        assert applied is True
+        assert results[0]._ml_ranker_raw_score == pytest.approx(-0.5)
+        assert results[1]._ml_ranker_raw_score == pytest.approx(0.5)
+
+        payload = json.loads(model_path.read_text(encoding="utf-8"))
+        for model in payload["models"]:
+            model["weight"] = 0.0
+        model_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        clear_model_cache()
+        applied = score_results_with_ml_ranker(results, model_path=model_path)
+        clear_model_cache()
+
+        assert applied is True
+        assert results[0]._ml_ranker_raw_score == pytest.approx(0.0)
+        assert results[1]._ml_ranker_raw_score == pytest.approx(0.0)
+
+    def test_ml_ranker_reload_reflects_latest_file_update(self, tmp_path: Path) -> None:
+        from valueinvestor.data.models import (
+            Company,
+            Financials,
+            Market,
+            ScreeningResult,
+            ValuationMetrics,
+        )
+        from valueinvestor.screener.ml_ranker import (
+            MODEL_SCHEMA_VERSION,
+            clear_model_cache,
+            expected_feature_names,
+            score_results_with_ml_ranker,
+        )
+
+        feature_names = expected_feature_names()
+        model_path = tmp_path / "model.json"
+
+        def write_model(weight: float) -> None:
+            coef = [0.0] * len(feature_names)
+            coef[feature_names.index("ticker_rankmean_6m")] = weight
+            model_path.write_text(
+                json.dumps({
+                    "schema_version": MODEL_SCHEMA_VERSION,
+                    "feature_names": feature_names,
+                    "clip_low": [-100.0] * len(feature_names),
+                    "clip_high": [100.0] * len(feature_names),
+                    "mean": [0.0] * len(feature_names),
+                    "scale": [1.0] * len(feature_names),
+                    "coef": coef,
+                    "intercept": 0.0,
+                    "ticker_priors": {
+                        "AAA": {"ticker_rankmean_6m": 0.8},
+                        "BBB": {"ticker_rankmean_6m": -0.8},
+                    },
+                    "metadata": {},
+                }),
+                encoding="utf-8",
+            )
+
+        write_model(1.0)
+        results = [
+            ScreeningResult(
+                company=Company(ticker="BBB", name="B", market=Market.A_SHARE),
+                financials=Financials(ticker="BBB", period="snapshot"),
+                valuation=ValuationMetrics(ticker="BBB", date="snapshot", price=1.0),
+                composite_score=50.0,
+            ),
+            ScreeningResult(
+                company=Company(ticker="AAA", name="A", market=Market.A_SHARE),
+                financials=Financials(ticker="AAA", period="snapshot"),
+                valuation=ValuationMetrics(ticker="AAA", date="snapshot", price=1.0),
+                composite_score=50.0,
+            ),
+        ]
+
+        clear_model_cache()
+        assert score_results_with_ml_ranker(results, model_path=model_path) is True
+        first_scores = [result._ml_ranker_raw_score for result in results]
+
+        time.sleep(0.01)
+        write_model(-1.0)
+        results = [
+            ScreeningResult(
+                company=Company(ticker="BBB", name="B", market=Market.A_SHARE),
+                financials=Financials(ticker="BBB", period="snapshot"),
+                valuation=ValuationMetrics(ticker="BBB", date="snapshot", price=1.0),
+                composite_score=50.0,
+            ),
+            ScreeningResult(
+                company=Company(ticker="AAA", name="A", market=Market.A_SHARE),
+                financials=Financials(ticker="AAA", period="snapshot"),
+                valuation=ValuationMetrics(ticker="AAA", date="snapshot", price=1.0),
+                composite_score=50.0,
+            ),
+        ]
+
+        assert score_results_with_ml_ranker(results, model_path=model_path) is True
+        second_scores = [result._ml_ranker_raw_score for result in results]
+
+        assert first_scores != second_scores
+        assert second_scores[1] < second_scores[0]
+
+    def test_promotion_gate_split_keeps_holdout_untouched(self) -> None:
+        from valueinvestor.scorer_improver.promotion_gate import (
+            HoldoutGateConfig,
+            make_holdout_split,
+        )
+
+        df = pd.DataFrame({
+            "snapshot_date": pd.date_range("2020-01-01", periods=36, freq="MS"),
+            "ticker": ["T"] * 36,
+        })
+        config = HoldoutGateConfig(
+            holdout_months=6,
+            embargo_days=45,
+            min_gate_snapshots=4,
+            min_train_snapshots=4,
+        )
+
+        split = make_holdout_split(df, config=config)
+        train_dates = pd.to_datetime(split.train["snapshot_date"])
+        gate_dates = pd.to_datetime(split.gate["snapshot_date"])
+        gate_start = pd.Timestamp(split.manifest["gate_start"])
+        train_end = pd.Timestamp(split.manifest["train_end_exclusive"])
+
+        assert train_dates.max() < train_end
+        assert gate_dates.min() >= gate_start
+        assert set(split.train.index).isdisjoint(split.gate.index)
+        assert split.manifest["embargo_days"] == 45
+        assert split.manifest["gate_snapshots"] >= 4
+
+    def test_promotion_gate_requires_holdout_6m_improvement(self) -> None:
+        from valueinvestor.scorer_improver.promotion_gate import (
+            HoldoutGateConfig,
+            evaluate_promotion_gate,
+        )
+
+        incumbent = {
+            "1m": {"spearman_rho": 0.10, "hit_rate_top20": 0.50, "mean_excess_return": 0.01},
+            "3m": {"spearman_rho": 0.20, "hit_rate_top20": 0.50, "mean_excess_return": 0.01},
+            "6m": {"spearman_rho": 0.30, "hit_rate_top20": 0.50, "mean_excess_return": 0.01},
+        }
+        candidate = {
+            "1m": {"spearman_rho": 0.11, "hit_rate_top20": 0.50, "mean_excess_return": 0.01},
+            "3m": {"spearman_rho": 0.21, "hit_rate_top20": 0.50, "mean_excess_return": 0.01},
+            "6m": {"spearman_rho": 0.3004, "hit_rate_top20": 0.51, "mean_excess_return": 0.02},
+        }
+
+        result = evaluate_promotion_gate(
+            candidate_metrics=candidate,
+            incumbent_metrics=incumbent,
+            manifest={"gate_snapshots": 8},
+            config=HoldoutGateConfig(min_6m_delta=0.001),
+        )
+
+        assert result.accepted is False
+        assert result.reason == "6m delta below gate"
+
+    def test_promotion_gate_requires_absolute_primary_rho_floor(self) -> None:
+        from valueinvestor.scorer_improver.promotion_gate import (
+            HoldoutGateConfig,
+            evaluate_promotion_gate,
+        )
+
+        incumbent = {
+            "1m": {"spearman_rho": 0.05, "hit_rate_top20": 0.50, "mean_excess_return": 0.01},
+            "3m": {"spearman_rho": 0.06, "hit_rate_top20": 0.50, "mean_excess_return": 0.01},
+            "6m": {"spearman_rho": 0.07, "hit_rate_top20": 0.50, "mean_excess_return": 0.01},
+        }
+        candidate = {
+            "1m": {"spearman_rho": 0.12, "hit_rate_top20": 0.55, "mean_excess_return": 0.02},
+            "3m": {"spearman_rho": 0.20, "hit_rate_top20": 0.55, "mean_excess_return": 0.02},
+            "6m": {"spearman_rho": 0.29, "hit_rate_top20": 0.55, "mean_excess_return": 0.02},
+        }
+
+        result = evaluate_promotion_gate(
+            candidate_metrics=candidate,
+            incumbent_metrics=incumbent,
+            manifest={"gate_snapshots": 8},
+            config=HoldoutGateConfig(min_6m_delta=0.001, min_primary_rho=0.307),
+        )
+
+        assert result.accepted is False
+        assert result.reason == "6m rho below absolute gate"
+
+    def test_promotion_gate_rejects_regime_concentrated_degradation(self) -> None:
+        from valueinvestor.scorer_improver.promotion_gate import (
+            HoldoutGateConfig,
+            evaluate_promotion_gate,
+        )
+
+        metrics = {
+            "1m": {"spearman_rho": 0.20, "hit_rate_top20": 0.60, "mean_excess_return": 0.02},
+            "3m": {"spearman_rho": 0.20, "hit_rate_top20": 0.60, "mean_excess_return": 0.02},
+            "6m": {"spearman_rho": 0.31, "hit_rate_top20": 0.60, "mean_excess_return": 0.02},
+        }
+        incumbent = {
+            "1m": {"spearman_rho": 0.10, "hit_rate_top20": 0.50, "mean_excess_return": 0.01},
+            "3m": {"spearman_rho": 0.10, "hit_rate_top20": 0.50, "mean_excess_return": 0.01},
+            "6m": {"spearman_rho": 0.30, "hit_rate_top20": 0.50, "mean_excess_return": 0.01},
+        }
+
+        result = evaluate_promotion_gate(
+            candidate_metrics=metrics,
+            incumbent_metrics=incumbent,
+            manifest={"gate_snapshots": 8},
+            config=HoldoutGateConfig(min_6m_delta=0.001),
+            regime_diagnostics={
+                "market": [
+                    {"label": "ashare", "deltas": {"6m": 0.02}},
+                    {"label": "hk", "deltas": {"6m": -0.08}},
+                ]
+            },
+        )
+
+        assert result.accepted is False
+        assert result.reason == "regime market 6m degradation"
+
+    def test_asof_feature_frame_uses_past_rows_only(self) -> None:
+        from valueinvestor.scorer_improver.ground_truth import asof_feature_frame
+
+        features = pd.DataFrame({
+            "ticker": ["AAA", "AAA"],
+            "date": ["2020-01-01", "2020-03-01"],
+            "pe_ratio": [10.0, 20.0],
+        })
+        tickers = pd.Series(["AAA", "AAA", "BBB"])
+        snapshots = pd.Series([
+            pd.Timestamp("2020-02-01"),
+            pd.Timestamp("2020-04-01"),
+            pd.Timestamp("2020-04-01"),
+        ])
+
+        result = asof_feature_frame(features, ("pe_ratio",), tickers, snapshots)
+
+        assert result.loc[0, "pe_ratio"] == pytest.approx(10.0)
+        assert result.loc[1, "pe_ratio"] == pytest.approx(20.0)
+        assert pd.isna(result.loc[2, "pe_ratio"])
+
+        lagged = asof_feature_frame(features, ("pe_ratio",), tickers.iloc[[1]], snapshots.iloc[[1]], lag_days=45)
+        assert lagged.loc[0, "pe_ratio"] == pytest.approx(10.0)
+
+    def test_ml_snapshot_cache_requires_current_manifest(self, tmp_path: Path) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import prepare_ml_training_snapshots
+
+        stale_path = tmp_path / "snapshots.parquet"
+        pd.DataFrame({
+            "ticker": ["AAA"],
+            "snapshot_date": [pd.Timestamp("2020-01-01")],
+            "target_rank_1w": [0.0],
+            "target_rank_1w_market": [0.0],
+            "target_rank_1m": [0.0],
+            "target_rank_3m": [0.0],
+            "target_rank_6m": [0.0],
+        }).to_parquet(stale_path, index=False)
+
+        with pytest.raises(RuntimeError, match="has no manifest"):
+            prepare_ml_training_snapshots(
+                output_path=stale_path,
+                start_date=pd.Timestamp("2020-01-01").date(),
+                end_date=pd.Timestamp("2020-12-31").date(),
+            )
+
+    def test_ml_snapshot_manifest_allows_current_cache(self, tmp_path: Path) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import (
+            _write_snapshot_manifest,
+            prepare_ml_training_snapshots,
+        )
+
+        snapshot_path = tmp_path / "snapshots.parquet"
+        start = pd.Timestamp("2020-01-01").date()
+        end = pd.Timestamp("2020-12-31").date()
+        df = pd.DataFrame({
+            "ticker": ["AAA"],
+            "snapshot_date": [pd.Timestamp("2020-01-01")],
+            "target_rank_1w": [0.0],
+            "target_rank_1w_market": [0.0],
+            "target_rank_1m": [0.0],
+            "target_rank_3m": [0.0],
+            "target_rank_6m": [0.0],
+        })
+        df.to_parquet(snapshot_path, index=False)
+        _write_snapshot_manifest(
+            snapshot_path,
+            df,
+            snapshot_frequency="daily",
+            ground_truth_path=tmp_path / "ground_truth.parquet",
+            start_date=start,
+            end_date=end,
+        )
+
+        cached = prepare_ml_training_snapshots(
+            output_path=snapshot_path,
+            ground_truth_path=tmp_path / "ground_truth.parquet",
+            start_date=start,
+            end_date=end,
+        )
+
+        assert len(cached) == 1
+
+    def test_ml_snapshot_manifest_ignores_trainer_search_fingerprint(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import (
+            _snapshot_manifest_path,
+            _write_snapshot_manifest,
+            prepare_ml_training_snapshots,
+        )
+
+        snapshot_path = tmp_path / "snapshots.parquet"
+        start = pd.Timestamp("2020-01-01").date()
+        end = pd.Timestamp("2020-12-31").date()
+        df = pd.DataFrame({
+            "ticker": ["AAA"],
+            "snapshot_date": [pd.Timestamp("2020-01-01")],
+            "target_rank_1w": [0.0],
+            "target_rank_1w_market": [0.0],
+            "target_rank_1m": [0.0],
+            "target_rank_3m": [0.0],
+            "target_rank_6m": [0.0],
+        })
+        df.to_parquet(snapshot_path, index=False)
+        _write_snapshot_manifest(
+            snapshot_path,
+            df,
+            snapshot_frequency="daily",
+            ground_truth_path=tmp_path / "ground_truth.parquet",
+            start_date=start,
+            end_date=end,
+        )
+        manifest_path = _snapshot_manifest_path(snapshot_path)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["source_fingerprints"]["ml_trainer"] = "stale-search-code"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        cached = prepare_ml_training_snapshots(
+            output_path=snapshot_path,
+            ground_truth_path=tmp_path / "ground_truth.parquet",
+            start_date=start,
+            end_date=end,
+        )
+
+        assert len(cached) == 1
+
+    def test_point_in_time_source_validation_rejects_future_only_features(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import (
+            _validate_point_in_time_feature_sources,
+        )
+
+        valuations = pd.DataFrame({
+            "ticker": ["AAA"],
+            "date": [pd.Timestamp("2026-01-01")],
+            "pe_ratio": [10.0],
+        })
+
+        with pytest.raises(RuntimeError, match="Point-in-time feature sources"):
+            _validate_point_in_time_feature_sources(
+                valuations=valuations,
+                financials=pd.DataFrame(),
+                end_date=pd.Timestamp("2025-01-01").date(),
+            )
+
+    def test_rolling_ticker_priors_use_only_known_past_rows(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _attach_asof_ticker_priors
+
+        df = pd.DataFrame({
+            "ticker": ["AAA", "AAA", "AAA"],
+            "snapshot_date": pd.to_datetime(["2020-01-01", "2020-03-01", "2020-07-01"]),
+            "forward_return_1w": [0.01, 0.03, 0.09],
+            "forward_return_1m": [0.10, 0.30, 0.90],
+            "forward_return_3m": [0.20, 0.40, 0.80],
+            "forward_return_6m": [0.50, 0.70, 0.60],
+            "target_rank_1w": [0.1, 0.3, 0.9],
+            "target_rank_1m": [0.1, 0.3, 0.9],
+            "target_rank_3m": [0.2, 0.4, 0.8],
+            "target_rank_6m": [0.5, 0.7, 0.6],
+        })
+
+        result = _attach_asof_ticker_priors(df, df, embargo_days=0)
+
+        assert result.loc[0, "_prior_ticker_mean_1m"] == pytest.approx(0.0)
+        assert result.loc[1, "_prior_ticker_mean_1m"] == pytest.approx(0.10)
+        assert result.loc[2, "_prior_ticker_mean_1m"] == pytest.approx(0.20)
+        assert result.loc[2, "_prior_ticker_mean_6m"] == pytest.approx(0.50)
+
+    def test_ml_trainer_walk_forward_decision_rejects_bad_mean_6m(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _walk_forward_decision
+
+        result = _walk_forward_decision(
+            [
+                {"1m": 0.01, "3m": 0.00, "6m": -0.02},
+                {"1m": 0.00, "3m": 0.01, "6m": 0.00},
+            ],
+            min_6m_delta=0.001,
+            max_horizon_degradation=0.01,
+        )
+
+        assert result["accepted"] is False
+        assert result["reason"] == "mean 6m delta below walk-forward gate"
+
+    def test_ml_trainer_target_values_supports_one_week_target(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _target_values
+
+        snapshots = pd.DataFrame({"target_rank_1w": [-0.5, 0.25, 0.75]})
+
+        values = _target_values(snapshots, "target_rank_1w")
+
+        assert values.tolist() == [-0.5, 0.25, 0.75]
+
+    def test_ml_trainer_target_values_supports_legacy_six_month_search_targets(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _target_values
+
+        snapshots = pd.DataFrame({
+            "ticker": ["000001", "000002", "0005.HK"],
+            "snapshot_date": [pd.Timestamp("2024-01-01").date()] * 3,
+            "forward_return_1m": [0.1, 0.2, 0.3],
+            "forward_return_3m": [0.2, 0.4, 0.6],
+            "forward_return_6m": [0.3, 0.6, 0.9],
+            "target_rank_1m": [-0.5, 0.0, 0.5],
+            "target_rank_3m": [-0.25, 0.0, 0.25],
+            "target_rank_6m": [-1.0, 0.0, 1.0],
+        })
+
+        assert _target_values(snapshots, "target_rank_6m_soft").tolist() == pytest.approx(
+            [-1.0, 0.0, 1.0]
+        )
+        assert _target_values(snapshots, "target_rank_6m_extreme").tolist() == pytest.approx(
+            [-1.0, 0.0, 1.0]
+        )
+        assert _target_values(snapshots, "target_rank_weighted_802").tolist() == pytest.approx(
+            [-0.85, 0.0, 0.85]
+        )
+        assert _target_values(snapshots, "target_rank_weighted_901").tolist() == pytest.approx(
+            [-0.925, 0.0, 0.925]
+        )
+        assert _target_values(snapshots, "target_rank_weighted_8515").tolist() == pytest.approx(
+            [-0.8875, 0.0, 0.8875]
+        )
+        assert _target_values(snapshots, "target_rank_weighted_7525").tolist() == pytest.approx(
+            [-0.8125, 0.0, 0.8125]
+        )
+        assert _target_values(snapshots, "target_rank_6m_market").tolist() == pytest.approx(
+            [-1.0 / 3.0, 1.0 / 3.0, float("nan")],
+            nan_ok=True,
+        )
+        assert _target_values(
+            snapshots,
+            "target_rank_weighted_703_market",
+        ).tolist() == pytest.approx(
+            [-1.0 / 3.0, 1.0 / 3.0, float("nan")],
+            nan_ok=True,
+        )
+
+    def test_ml_trainer_payload_with_ticker_priors_replaces_gate_priors(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _payload_with_ticker_priors
+
+        old_priors = {"OLD": {"ticker_rankmean_6m": 1.0}}
+        payload = {
+            "schema_version": "test",
+            "feature_names": ["ticker_rankmean_6m"],
+            "ticker_priors": old_priors,
+            "temporal_payload_members": [
+                {
+                    "start_date": "2025-01-01",
+                    "payload": {
+                        "schema_version": "test",
+                        "feature_names": ["ticker_rankmean_6m"],
+                        "ticker_priors": old_priors,
+                    },
+                },
+            ],
+        }
+        train_priors = {"NEW": {"ticker_rankmean_6m": -1.0}}
+
+        patched = _payload_with_ticker_priors(payload, train_priors)
+
+        assert patched is not None
+        assert patched["ticker_priors"] == train_priors
+        nested_payload = patched["temporal_payload_members"][0]["payload"]
+        assert nested_payload["ticker_priors"] == train_priors
+        original_nested_payload = payload["temporal_payload_members"][0]["payload"]
+        assert original_nested_payload["ticker_priors"] == old_priors
+        assert payload["ticker_priors"] == old_priors
+
+    def test_single_temporal_member_payload_rejects_cached_metrics(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import (
+            _payload_cached_metrics_are_safe,
+        )
+
+        child_payload = {
+            "schema_version": "test",
+            "feature_names": ["close"],
+            "ticker_priors": {},
+        }
+        bounded_single_member = {
+            "schema_version": "test",
+            "feature_names": [],
+            "ticker_priors": {},
+            "metadata": {"metrics": {"6m": {"spearman_rho": 0.3}}},
+            "temporal_payload_members": [
+                {"start_date": "2025-01-01", "payload": child_payload},
+            ],
+        }
+        two_member_payload = {
+            **bounded_single_member,
+            "temporal_payload_members": [
+                {"end_date": "2025-01-01", "payload": child_payload},
+                {"start_date": "2025-01-01", "payload": child_payload},
+            ],
+        }
+
+        assert not _payload_cached_metrics_are_safe(bounded_single_member)
+        assert _payload_cached_metrics_are_safe(two_member_payload)
+
+    def test_ml_ranker_payload_uses_row_priors_when_marked_rolling(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import predict_ml_ranker_payload
+
+        frame = pd.DataFrame({
+            "ticker": ["AAA"],
+            "_prior_ticker_mean_6m": [0.8],
+        })
+        payload = {
+            "schema_version": "ml-ranker-v1",
+            "feature_names": ["ticker_mean_6m"],
+            "ticker_priors": {"AAA": {"ticker_mean_6m": 0.1}},
+            "metadata": {"uses_rolling_row_priors": True},
+            "models": [{
+                "clip_low": [-10.0],
+                "clip_high": [10.0],
+                "mean": [0.0],
+                "scale": [1.0],
+                "coef": [1.0],
+                "intercept": 0.0,
+                "weight": 1.0,
+            }],
+        }
+
+        predictions = predict_ml_ranker_payload(frame, payload)
+
+        assert predictions.tolist() == pytest.approx([0.8])
+
+    def test_ml_ranker_payload_member_blend_keeps_member_schemas(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import predict_ml_ranker_payload
+
+        frame = pd.DataFrame({
+            "ticker": ["AAA"],
+            "close": [10.0],
+            "price_return_5d": [0.2],
+        })
+        core_payload = {
+            "schema_version": "ml-ranker-v1",
+            "feature_names": ["close"],
+            "ticker_priors": {},
+            "metadata": {},
+            "models": [{
+                "clip_low": [0.0],
+                "clip_high": [100.0],
+                "mean": [0.0],
+                "scale": [1.0],
+                "coef": [1.0],
+                "intercept": 0.0,
+                "weight": 1.0,
+            }],
+        }
+        short_payload = {
+            "schema_version": "ml-ranker-v1",
+            "feature_names": ["price_return_5d"],
+            "ticker_priors": {},
+            "metadata": {},
+            "models": [{
+                "clip_low": [-1.0],
+                "clip_high": [1.0],
+                "mean": [0.0],
+                "scale": [1.0],
+                "coef": [100.0],
+                "intercept": 0.0,
+                "weight": 1.0,
+            }],
+        }
+        payload = {
+            "schema_version": "ml-ranker-v1",
+            "feature_names": [],
+            "ticker_priors": {},
+            "metadata": {},
+            "payload_members": [
+                {"weight": 0.75, "payload": core_payload},
+                {"weight": 0.25, "payload": short_payload},
+            ],
+        }
+
+        predictions = predict_ml_ranker_payload(frame, payload)
+
+        assert predictions.tolist() == pytest.approx([12.5])
+
+    def test_ml_ranker_market_payload_member_blend_routes_by_market(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import predict_ml_ranker_payload
+
+        frame = pd.DataFrame({
+            "ticker": ["000001.SZ", "0700.HK"],
+            "close": [10.0, 20.0],
+            "price_return_5d": [0.2, 0.3],
+        })
+        anchor_payload = {
+            "schema_version": "ml-ranker-v1",
+            "feature_names": ["close"],
+            "ticker_priors": {},
+            "metadata": {},
+            "models": [{
+                "clip_low": [0.0],
+                "clip_high": [100.0],
+                "mean": [0.0],
+                "scale": [1.0],
+                "coef": [1.0],
+                "intercept": 0.0,
+                "weight": 1.0,
+            }],
+        }
+        candidate_payload = {
+            "schema_version": "ml-ranker-v1",
+            "feature_names": ["price_return_5d"],
+            "ticker_priors": {},
+            "metadata": {},
+            "models": [{
+                "clip_low": [-1.0],
+                "clip_high": [1.0],
+                "mean": [0.0],
+                "scale": [1.0],
+                "coef": [100.0],
+                "intercept": 0.0,
+                "weight": 1.0,
+            }],
+        }
+        payload = {
+            "schema_version": "ml-ranker-v1",
+            "feature_names": [],
+            "ticker_priors": {},
+            "metadata": {},
+            "market_payload_members": [
+                {
+                    "market_weights": {"ashare": 0.9, "hk": 0.5},
+                    "payload": anchor_payload,
+                },
+                {
+                    "market_weights": {"ashare": 0.1, "hk": 0.5},
+                    "payload": candidate_payload,
+                },
+            ],
+        }
+
+        predictions = predict_ml_ranker_payload(frame, payload)
+
+        assert predictions.tolist() == pytest.approx([11.0, 25.0])
+
+    def test_ml_ranker_cross_sectional_prediction_keeps_whole_snapshot_for_market_models(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import predict_ml_ranker_payload
+
+        frame = pd.DataFrame({
+            "ticker": ["AAA", "BBB", "0700.HK", "AAA"],
+            "snapshot_date": [
+                "2024-01-01",
+                "2024-01-01",
+                "2024-01-01",
+                "2024-01-02",
+            ],
+            "value_score": [10.0, 20.0, 30.0, 40.0],
+        })
+        model = {
+            "clip_low": [-1.0],
+            "clip_high": [1.0],
+            "mean": [0.0],
+            "scale": [1.0],
+            "coef": [1.0],
+            "intercept": 0.0,
+            "weight": 1.0,
+        }
+        payload = {
+            "schema_version": "ml-ranker-v1",
+            "feature_names": ["cs_rank_value_score"],
+            "ticker_priors": {},
+            "metadata": {},
+            "models": [
+                {**model, "market": "ashare"},
+                {**model, "market": "hk"},
+            ],
+        }
+
+        predictions = predict_ml_ranker_payload(frame, payload, chunk_size=2)
+
+        assert predictions.tolist() == pytest.approx([-0.5, 0.0, 0.5, 0.0])
+
+    def test_ml_ranker_temporal_payload_routes_by_snapshot_date(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import predict_ml_ranker_payload
+
+        frame = pd.DataFrame({
+            "ticker": ["AAA", "BBB"],
+            "snapshot_date": ["2023-06-30", "2023-07-07"],
+            "close": [2.0, 3.0],
+        })
+        early_payload = {
+            "schema_version": "ml-ranker-v1",
+            "feature_names": ["close"],
+            "ticker_priors": {},
+            "metadata": {},
+            "models": [{
+                "clip_low": [0.0],
+                "clip_high": [100.0],
+                "mean": [0.0],
+                "scale": [1.0],
+                "coef": [1.0],
+                "intercept": 0.0,
+                "weight": 1.0,
+            }],
+        }
+        recent_payload = {
+            **early_payload,
+            "models": [{
+                "clip_low": [0.0],
+                "clip_high": [100.0],
+                "mean": [0.0],
+                "scale": [1.0],
+                "coef": [10.0],
+                "intercept": 0.0,
+                "weight": 1.0,
+            }],
+        }
+        payload = {
+            "schema_version": "ml-ranker-v1",
+            "feature_names": [],
+            "ticker_priors": {},
+            "metadata": {"backend": "temporal_payload_blend"},
+            "temporal_payload_members": [
+                {"end_date": "2023-07-07", "payload": early_payload},
+                {"start_date": "2023-07-07", "payload": recent_payload},
+            ],
+        }
+
+        predictions = predict_ml_ranker_payload(frame, payload)
+
+        assert predictions.tolist() == pytest.approx([2.0, 30.0])
+
+    def test_ml_ranker_single_member_temporal_payload_delegates_to_member(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import predict_ml_ranker_payload
+
+        frame = pd.DataFrame({
+            "ticker": ["AAA", "BBB"],
+            "snapshot_date": ["2024-01-01", "2026-01-01"],
+            "close": [2.0, 3.0],
+        })
+        child_payload = {
+            "schema_version": "ml-ranker-v1",
+            "feature_names": ["close"],
+            "ticker_priors": {},
+            "metadata": {},
+            "models": [{
+                "clip_low": [0.0],
+                "clip_high": [100.0],
+                "mean": [0.0],
+                "scale": [1.0],
+                "coef": [10.0],
+                "intercept": 0.0,
+                "weight": 1.0,
+            }],
+        }
+        payload = {
+            "schema_version": "ml-ranker-v1",
+            "feature_names": [],
+            "ticker_priors": {},
+            "metadata": {"backend": "temporal_payload_blend"},
+            "temporal_payload_members": [
+                {"start_date": "2025-01-01", "payload": child_payload},
+            ],
+        }
+
+        predictions = predict_ml_ranker_payload(frame, payload)
+
+        assert predictions.tolist() == pytest.approx([20.0, 30.0])
+
+    def test_runtime_payload_compaction_drops_recursive_training_diagnostics(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import (
+            _compact_runtime_payload,
+            predict_ml_ranker_payload,
+        )
+
+        frame = pd.DataFrame({
+            "ticker": ["AAA", "BBB"],
+            "snapshot_date": ["2023-06-30", "2023-07-07"],
+            "close": [2.0, 3.0],
+        })
+        child_payload = {
+            "schema_version": "ml-ranker-v1",
+            "feature_names": ["close"],
+            "ticker_priors": {},
+            "metadata": {
+                "backend": "ridge",
+                "metrics": {"6m": {"spearman_rho": 0.2}},
+                "promotion_gate_attempts": [{"large": "diagnostic"}],
+            },
+            "models": [{
+                "clip_low": [0.0],
+                "clip_high": [100.0],
+                "mean": [0.0],
+                "scale": [1.0],
+                "coef": [1.0],
+                "intercept": 0.0,
+                "weight": 1.0,
+            }],
+        }
+        payload = {
+            "schema_version": "ml-ranker-v1",
+            "feature_names": [],
+            "ticker_priors": {},
+            "metadata": {
+                "backend": "temporal_payload_blend",
+                "metrics": {"6m": {"spearman_rho": 0.3}},
+                "promotion_gate_attempts": [{"large": "diagnostic"}],
+                "promotion_gate": {"regime_diagnostics": [{"large": "diagnostic"}]},
+            },
+            "temporal_payload_members": [
+                {"end_date": "2023-07-07", "payload": child_payload},
+                {"start_date": "2023-07-07", "payload": child_payload},
+            ],
+        }
+
+        compacted = _compact_runtime_payload(payload)
+        assert isinstance(compacted, dict)
+        assert compacted["metadata"] == {
+            "backend": "temporal_payload_blend",
+            "metrics": {"6m": {"spearman_rho": 0.3}},
+        }
+        nested_metadata = compacted["temporal_payload_members"][0]["payload"]["metadata"]
+        assert nested_metadata == {
+            "backend": "ridge",
+            "metrics": {"6m": {"spearman_rho": 0.2}},
+        }
+        assert predict_ml_ranker_payload(frame, compacted).tolist() == pytest.approx(
+            predict_ml_ranker_payload(frame, payload).tolist()
+        )
+
+    def test_runtime_payload_compaction_collapses_recent_segment_temporal_payload(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import (
+            _compact_runtime_payload,
+            _conditional_blend_payload,
+            predict_ml_ranker_payload,
+        )
+
+        frame = pd.DataFrame({
+            "ticker": ["000001.SZ", "000002.SZ", "000003.SZ", "0700.HK"],
+            "snapshot_date": ["2023-06-30", "2024-06-30", "2025-06-30", "2025-06-30"],
+            "close": [2.0, 3.0, 4.0, 5.0],
+            "market_cap_rmb": [1_000_000_000.0, 1_000_000_000.0, 1_000_000_000.0, 1_000_000_000.0],
+            "price_return_5d": [0.2, 0.3, 0.4, 0.5],
+        })
+        incumbent_payload = {
+            "schema_version": "ml-ranker-v1",
+            "feature_names": ["close"],
+            "ticker_priors": {},
+            "metadata": {"backend": "incumbent"},
+            "models": [{
+                "clip_low": [0.0],
+                "clip_high": [100.0],
+                "mean": [0.0],
+                "scale": [1.0],
+                "coef": [1.0],
+                "intercept": 0.0,
+                "weight": 1.0,
+            }],
+        }
+        candidate_payload = {
+            "schema_version": "ml-ranker-v1",
+            "feature_names": ["price_return_5d"],
+            "ticker_priors": {},
+            "metadata": {"backend": "candidate"},
+            "models": [{
+                "clip_low": [-1.0],
+                "clip_high": [1.0],
+                "mean": [0.0],
+                "scale": [1.0],
+                "coef": [100.0],
+                "intercept": 0.0,
+                "weight": 1.0,
+            }],
+        }
+        recent_payload = _conditional_blend_payload(
+            anchor_payload=incumbent_payload,
+            candidate_payload=candidate_payload,
+            routes=[{
+                "market": "ashare",
+                "cap_bucket": "small",
+                "candidate_weight": 1.0,
+            }],
+        )
+        payload = {
+            "schema_version": "ml-ranker-v1",
+            "feature_names": [],
+            "ticker_priors": {},
+            "metadata": {
+                "backend": "temporal_recent_segment_regime_blend",
+                "temporal_recent_regime_start": "2025-01-01",
+            },
+            "temporal_payload_members": [
+                {"end_date": "2023-07-07", "payload": candidate_payload},
+                {
+                    "start_date": "2023-07-07",
+                    "end_date": "2025-01-01",
+                    "payload": incumbent_payload,
+                },
+                {"start_date": "2025-01-01", "payload": recent_payload},
+            ],
+        }
+
+        compacted = _compact_runtime_payload(payload)
+
+        assert isinstance(compacted, dict)
+        assert "conditional_blend" in compacted
+        assert "temporal_payload_members" not in compacted
+        assert predict_ml_ranker_payload(frame, compacted).tolist() == pytest.approx(
+            predict_ml_ranker_payload(frame, payload).tolist()
+        )
+        assert predict_ml_ranker_payload(frame, compacted).tolist() == pytest.approx(
+            [20.0, 3.0, 40.0, 5.0]
+        )
+
+    def test_recent_market_regime_temporal_payload_routes_by_date_and_market(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import (
+            _recent_market_regime_temporal_payload,
+            predict_ml_ranker_payload,
+        )
+
+        frame = pd.DataFrame({
+            "ticker": ["000001.SZ", "000002.SZ", "000003.SZ", "0700.HK"],
+            "snapshot_date": ["2023-06-30", "2024-06-30", "2025-06-30", "2025-06-30"],
+            "close": [2.0, 3.0, 4.0, 5.0],
+            "price_return_5d": [0.2, 0.3, 0.4, 0.5],
+        })
+        incumbent_payload = {
+            "schema_version": "ml-ranker-v1",
+            "feature_names": ["close"],
+            "ticker_priors": {},
+            "metadata": {},
+            "models": [{
+                "clip_low": [0.0],
+                "clip_high": [100.0],
+                "mean": [0.0],
+                "scale": [1.0],
+                "coef": [1.0],
+                "intercept": 0.0,
+                "weight": 1.0,
+            }],
+        }
+        candidate_payload = {
+            "schema_version": "ml-ranker-v1",
+            "feature_names": ["price_return_5d"],
+            "ticker_priors": {},
+            "metadata": {},
+            "models": [{
+                "clip_low": [-1.0],
+                "clip_high": [1.0],
+                "mean": [0.0],
+                "scale": [1.0],
+                "coef": [100.0],
+                "intercept": 0.0,
+                "weight": 1.0,
+            }],
+        }
+        payload = _recent_market_regime_temporal_payload(
+            candidate_payload=candidate_payload,
+            incumbent_payload=incumbent_payload,
+            gate_start="2023-07-07",
+            recent_start="2025-01-01",
+            candidate_weights_by_market={"ashare": 1.0},
+        )
+
+        assert "conditional_blend" in payload
+        assert "temporal_payload_members" not in payload
+        predictions = predict_ml_ranker_payload(frame, payload)
+
+        assert predictions.tolist() == pytest.approx([20.0, 3.0, 40.0, 5.0])
+
+    def test_ml_trainer_candidate_choice_normalization(self) -> None:
+        from valueinvestor.scorer_improver import ml_trainer
+
+        choices = ml_trainer._normalize_candidate_choices(
+            ("core,short-horizon",),
+            aliases=ml_trainer.FEATURE_SET_ALIASES,
+            option_name="candidate_feature_sets",
+        )
+
+        assert choices == ("core", "short_horizon")
+
+        with pytest.raises(ValueError, match="cannot mix auto/all"):
+            ml_trainer._normalize_candidate_choices(
+                ("auto", "core"),
+                aliases=ml_trainer.FEATURE_SET_ALIASES,
+                option_name="candidate_feature_sets",
+            )
+
+        targets = ml_trainer._normalize_candidate_targets(
+            ("target-rank-1w,target-rank-1w-market",),
+            allowed_targets=("target_rank_1w", "target_rank_1w_market"),
+        )
+        six_month_targets = ml_trainer._normalize_candidate_targets(
+            ("rank-6m-soft,weighted-802,weighted-8515,weighted-703-market,mean",),
+            allowed_targets=(
+                "target_rank_6m_soft",
+                "target_rank_weighted_802",
+                "target_rank_weighted_8515",
+                "target_rank_weighted_703_market",
+                "target_rank_mean",
+            ),
+        )
+        lambdas = ml_trainer._normalize_candidate_lambdas(("1,3,10",))
+
+        assert targets == ("target_rank_1w", "target_rank_1w_market")
+        assert six_month_targets == (
+            "target_rank_6m_soft",
+            "target_rank_weighted_802",
+            "target_rank_weighted_8515",
+            "target_rank_weighted_703_market",
+            "target_rank_mean",
+        )
+        assert lambdas == (1.0, 3.0, 10.0)
+
+    def test_recency_sample_weights_prioritize_newer_snapshots(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _recency_sample_weights
+
+        snapshots = pd.DataFrame({
+            "snapshot_date": pd.to_datetime(["2020-01-01", "2021-01-01", "2022-01-01"]),
+        })
+
+        weights = _recency_sample_weights(snapshots, half_life_days=365.0)
+
+        assert weights[2] > weights[1] > weights[0]
+        assert weights.mean() == pytest.approx(1.0)
+
+    def test_sample_training_snapshots_uses_seeded_balanced_sampling(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _sample_training_snapshots
+
+        rows = [
+            {"snapshot_date": snapshot_date, "ticker": f"T{row_idx:03d}"}
+            for snapshot_date in pd.date_range("2020-01-01", periods=3, freq="MS")
+            for row_idx in range(20)
+        ]
+        snapshots = pd.DataFrame(rows)
+
+        first = _sample_training_snapshots(snapshots, 30, random_seed=0)
+        repeat = _sample_training_snapshots(snapshots, 30, random_seed=0)
+        alternate = _sample_training_snapshots(snapshots, 30, random_seed=41)
+
+        assert first["ticker"].tolist() == repeat["ticker"].tolist()
+        assert first["ticker"].tolist() != alternate["ticker"].tolist()
+        assert first.groupby("snapshot_date").size().tolist() == [10, 10, 10]
+
+    def test_build_full_eval_ensembles_averages_compatible_candidates(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _build_full_eval_ensembles
+
+        rows = []
+        predictions_a = []
+        predictions_b = []
+        for snapshot_date in pd.date_range("2020-01-01", periods=2, freq="MS"):
+            for rank in range(10):
+                rows.append({
+                    "snapshot_date": snapshot_date,
+                    "ticker": f"T{rank:03d}",
+                    "forward_return_1m": float(rank),
+                    "forward_return_3m": float(rank),
+                    "forward_return_6m": float(rank),
+                })
+                predictions_a.append(float(rank))
+                predictions_b.append(float(rank) + (0.1 if rank % 2 else -0.1))
+        snapshots = pd.DataFrame(rows)
+
+        def candidate(name: str, predictions: list[float], rho: float) -> dict:
+            return {
+                "target": name,
+                "ridge_lambda": 100.0,
+                "backend": "numpy",
+                "model_kind": "ridge",
+                "feature_set": "core",
+                "feature_names": ["x"],
+                "prior_strategy": "no_ticker_priors",
+                "prefer_row_priors": False,
+                "priors": {},
+                "clip_low": [0.0],
+                "clip_high": [1.0],
+                "mean": [0.0],
+                "scale": [1.0],
+                "coef": [1.0],
+                "intercept": 0.0,
+                "models": None,
+                "metrics": {"6m": {"spearman_rho": rho}},
+                "sample_rows": len(snapshots),
+                "sample_seed": 0,
+                "_full_predictions": predictions,
+            }
+
+        ensembles = _build_full_eval_ensembles(
+            [candidate("a", predictions_a, 0.90), candidate("b", predictions_b, 0.89)],
+            snapshots,
+            train_baseline_rho=0.1,
+            primary_horizon="6m",
+        )
+
+        assert len(ensembles) >= 3
+        assert all(ensemble["target"] == "ensemble" for ensemble in ensembles)
+        assert all(len(ensemble["ensemble_members"]) == 2 for ensemble in ensembles)
+        assert any(
+            ensemble["metrics"]["6m"]["spearman_rho"] == pytest.approx(1.0)
+            for ensemble in ensembles
+        )
+        assert any(
+            any(model["weight"] != 1.0 for model in ensemble["models"])
+            for ensemble in ensembles
+        )
+
+    def test_build_full_eval_ensembles_keeps_rolling_prior_flag(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _build_full_eval_ensembles
+
+        snapshots = pd.DataFrame(
+            [
+                {
+                    "snapshot_date": snapshot_date,
+                    "ticker": f"T{rank:03d}",
+                    "forward_return_1m": float(rank),
+                    "forward_return_3m": float(rank),
+                    "forward_return_6m": float(rank),
+                }
+                for snapshot_date in pd.date_range("2020-01-01", periods=2, freq="MS")
+                for rank in range(10)
+            ]
+        )
+        predictions = [float(i % 10) for i in range(len(snapshots))]
+
+        def candidate(name: str, rho: float) -> dict:
+            return {
+                "target": name,
+                "ridge_lambda": 3.0,
+                "backend": "mlx",
+                "model_kind": "market_ridge_recent_365",
+                "feature_set": "short_horizon",
+                "feature_names": ["x"],
+                "prior_strategy": "rolling_ticker_priors",
+                "prefer_row_priors": True,
+                "priors": {},
+                "clip_low": [0.0],
+                "clip_high": [1.0],
+                "mean": [0.0],
+                "scale": [1.0],
+                "coef": [1.0],
+                "intercept": 0.0,
+                "models": None,
+                "metrics": {"6m": {"spearman_rho": rho}},
+                "sample_rows": len(snapshots),
+                "sample_seed": 0,
+                "_full_predictions": predictions,
+            }
+
+        ensembles = _build_full_eval_ensembles(
+            [candidate("a", 0.90), candidate("b", 0.89)],
+            snapshots,
+            train_baseline_rho=0.1,
+            primary_horizon="6m",
+        )
+
+        assert ensembles
+        assert all(ensemble["prefer_row_priors"] for ensemble in ensembles)
+        assert all(
+            ensemble["prior_strategy"] == "rolling_ticker_priors"
+            for ensemble in ensembles
+        )
+
+    def test_temporal_anchor_candidates_interleave_gate_scored_anchors(self) -> None:
+        import numpy as np
+
+        from valueinvestor.scorer_improver.ml_trainer import (
+            _build_temporal_anchor_candidates,
+        )
+
+        def candidate(name: str, rho: float) -> dict:
+            return {
+                "target": name,
+                "ridge_lambda": 1.0,
+                "backend": "mlx",
+                "model_kind": "market_ridge_recent_1460",
+                "feature_set": "short_horizon",
+                "feature_names": ["x"],
+                "prior_strategy": "ticker_priors",
+                "prefer_row_priors": False,
+                "priors": {},
+                "metrics": {"6m": {"spearman_rho": rho}},
+                "sample_metrics": {"6m": {"spearman_rho": rho}},
+                "sample_improvement": 1.0,
+                "sample_rows": 10,
+                "sample_seed": 0,
+                "_full_predictions": np.asarray([rho, rho + 0.1], dtype="float32"),
+            }
+
+        temporal = _build_temporal_anchor_candidates(
+            [candidate("train_best", 0.31), candidate("train_second", 0.30)],
+            train_baseline_rho=0.10,
+            primary_horizon="6m",
+            gate_start="2023-07-07",
+            anchor_payloads=[
+                {"path": "weak.json", "payload": {"metadata": {}}, "gate_rho": 0.18},
+                {"path": "strong.json", "payload": {"metadata": {}}, "gate_rho": 0.26},
+            ],
+            promotion_min_train_rho=0.25,
+            max_candidates=3,
+        )
+
+        assert [candidate["temporal_anchor_path"] for candidate in temporal] == [
+            "strong.json",
+            "strong.json",
+            "weak.json",
+        ]
+        assert temporal[0]["temporal_anchor_gate_rho"] == pytest.approx(0.26)
+        assert temporal[0]["metrics"]["6m"]["spearman_rho"] == pytest.approx(0.31)
+
+    def test_recent_market_ridge_model_kind_helpers(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import (
+            _fit_model_kind_for_candidate,
+            _recent_half_life_for_model_kind,
+            _six_month_gate_route_raw_degradation_limit,
+            _six_month_recent_segment_route_max_candidates,
+            _six_month_recent_segment_route_max_segments,
+            _six_month_recent_segment_route_max_starts,
+            _six_month_recent_segment_route_weights,
+            _six_month_recency_half_lives_days,
+            _six_month_sample_seeds,
+        )
+
+        assert _fit_model_kind_for_candidate("market_ridge_recent_270") == "market_ridge"
+        assert _fit_model_kind_for_candidate("segment_ridge_recent_270") == "segment_ridge"
+        assert _recent_half_life_for_model_kind("market_ridge_recent_270") == 270.0
+        assert _recent_half_life_for_model_kind("segment_ridge_recent_270") == 270.0
+        assert _recent_half_life_for_model_kind("market_ridge") is None
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            monkeypatch.delenv("VALUEINVESTOR_ML_6M_RECENCY_HALF_LIVES_DAYS", raising=False)
+            monkeypatch.delenv("VALUEINVESTOR_ML_6M_GATE_ROUTE_RAW_DEGRADATION_LIMIT", raising=False)
+            monkeypatch.delenv("VALUEINVESTOR_ML_6M_RECENT_SEGMENT_ROUTE_WEIGHTS", raising=False)
+            monkeypatch.delenv("VALUEINVESTOR_ML_6M_RECENT_SEGMENT_ROUTE_MAX_STARTS", raising=False)
+            monkeypatch.delenv("VALUEINVESTOR_ML_6M_RECENT_SEGMENT_ROUTE_MAX_SEGMENTS", raising=False)
+            monkeypatch.delenv("VALUEINVESTOR_ML_6M_RECENT_SEGMENT_ROUTE_MAX_CANDIDATES", raising=False)
+            assert 2190.0 in _six_month_recency_half_lives_days()
+            assert _six_month_gate_route_raw_degradation_limit() == pytest.approx(0.005)
+            assert _six_month_recent_segment_route_weights() == (1.0, 0.75, 0.5)
+            assert _six_month_recent_segment_route_max_starts() == 4
+            assert _six_month_recent_segment_route_max_segments() == 8
+            assert _six_month_recent_segment_route_max_candidates() == 8
+            monkeypatch.setenv("VALUEINVESTOR_ML_6M_RECENCY_HALF_LIVES_DAYS", "1095,1460")
+            assert _six_month_recency_half_lives_days() == (1095.0, 1460.0)
+            monkeypatch.setenv("VALUEINVESTOR_ML_6M_GATE_ROUTE_RAW_DEGRADATION_LIMIT", "0.012")
+            assert _six_month_gate_route_raw_degradation_limit() == pytest.approx(0.012)
+            monkeypatch.setenv("VALUEINVESTOR_ML_6M_RECENT_SEGMENT_ROUTE_WEIGHTS", "1,0.5,1")
+            assert _six_month_recent_segment_route_weights() == (1.0, 0.5)
+            monkeypatch.setenv("VALUEINVESTOR_ML_6M_RECENT_SEGMENT_ROUTE_MAX_STARTS", "3")
+            monkeypatch.setenv("VALUEINVESTOR_ML_6M_RECENT_SEGMENT_ROUTE_MAX_SEGMENTS", "5")
+            monkeypatch.setenv("VALUEINVESTOR_ML_6M_RECENT_SEGMENT_ROUTE_MAX_CANDIDATES", "7")
+            assert _six_month_recent_segment_route_max_starts() == 3
+            assert _six_month_recent_segment_route_max_segments() == 5
+            assert _six_month_recent_segment_route_max_candidates() == 7
+            monkeypatch.setenv("VALUEINVESTOR_ML_6M_SAMPLE_SEEDS", "0,29,0")
+            assert _six_month_sample_seeds() == (0, 29)
+
+    def test_latest_supported_daily_end_date_uses_lagging_market(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import (
+            _latest_supported_daily_end_date_from_prices,
+        )
+
+        prices = pd.DataFrame({
+            "ticker": ["000001.SZ", "00700.HK"],
+            "date": ["2026-04-30", "2026-05-05"],
+        })
+
+        assert _latest_supported_daily_end_date_from_prices(prices) == pd.Timestamp(
+            "2025-12-25"
+        ).date()
+
+    def test_market_blend_helpers_apply_market_specific_weights(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import (
+            _market_blend_weight_vector,
+            _market_weighted_blend_payload,
+        )
+
+        def model(market: str) -> dict[str, object]:
+            return {
+                "clip_low": [0.0],
+                "clip_high": [1.0],
+                "mean": [0.0],
+                "scale": [1.0],
+                "coef": [1.0],
+                "intercept": 0.0,
+                "market": market,
+            }
+
+        payload = {
+            "schema_version": "ml-ranker-v1",
+            "feature_names": ["x"],
+            "ticker_priors": {},
+            "metadata": {},
+            "models": [model("ashare"), model("hk")],
+        }
+
+        weights = {"ashare": 0.1, "hk": 0.5}
+        vector = _market_blend_weight_vector(
+            pd.DataFrame({"ticker": ["000001.SZ", "00700.HK"]}),
+            weights,
+        )
+        blended = _market_weighted_blend_payload(
+            payload,
+            payload,
+            candidate_weights_by_market=weights,
+        )
+
+        assert vector.tolist() == pytest.approx([0.1, 0.5])
+        assert [model["weight"] for model in blended["models"]] == pytest.approx(
+            [0.9, 0.5, 0.1, 0.5]
+        )
+
+    def test_train_floor_blend_selection_keeps_near_floor_and_strong_blends(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import (
+            _six_month_gate_market_blend_limit,
+            _select_train_floor_blends,
+            _select_train_floor_market_blends,
+            _top_gate_anchor_payloads,
+        )
+
+        weights = _select_train_floor_blends(
+            [(0.05, 0.230), (0.10, 0.239), (0.125, 0.242), (0.20, 0.255)],
+            promotion_min_train_rho=0.241,
+            limit=2,
+        )
+        market_weights = _select_train_floor_market_blends(
+            [
+                ({"ashare": 0.0, "hk": 0.25}, 0.240),
+                ({"ashare": 0.0, "hk": 0.35}, 0.244),
+                ({"ashare": 0.025, "hk": 0.25}, 0.242),
+                ({"ashare": 0.05, "hk": 0.50}, 0.260),
+            ],
+            promotion_min_train_rho=0.241,
+            limit=2,
+        )
+
+        assert weights == pytest.approx((0.125, 0.20))
+        assert market_weights == (
+            {"ashare": 0.025, "hk": 0.25},
+            {"ashare": 0.0, "hk": 0.35},
+        )
+
+        low_impact_weights = _select_train_floor_blends(
+            [
+                (0.01, 0.240),
+                (0.02, 0.2411),
+                (0.03, 0.2412),
+                (0.05, 0.2420),
+                (1.00, 0.2600),
+            ],
+            promotion_min_train_rho=0.241,
+            limit=3,
+        )
+        assert low_impact_weights == pytest.approx((0.02, 0.03, 0.05))
+
+        low_impact_market_weights = _select_train_floor_market_blends(
+            [
+                ({"ashare": 0.005, "hk": 0.0}, 0.2409),
+                ({"ashare": 0.010, "hk": 0.0}, 0.2411),
+                ({"ashare": 0.015, "hk": 0.0}, 0.2412),
+                ({"ashare": 0.050, "hk": 0.0}, 0.2420),
+                ({"ashare": 0.050, "hk": 0.5}, 0.2600),
+            ],
+            promotion_min_train_rho=0.241,
+            limit=3,
+        )
+        assert low_impact_market_weights == (
+            {"ashare": 0.010, "hk": 0.0},
+            {"ashare": 0.015, "hk": 0.0},
+            {"ashare": 0.050, "hk": 0.0},
+        )
+
+        tolerant_market_weights = _select_train_floor_market_blends(
+            [
+                ({"ashare": 0.005, "hk": 0.0}, 0.2409),
+                ({"ashare": 0.010, "hk": 0.0}, 0.2411),
+            ],
+            promotion_min_train_rho=0.241,
+            limit=2,
+            train_floor_tolerance=0.0002,
+        )
+        assert tolerant_market_weights == (
+            {"ashare": 0.005, "hk": 0.0},
+            {"ashare": 0.010, "hk": 0.0},
+        )
+
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            monkeypatch.setenv("VALUEINVESTOR_ML_6M_GATE_MARKET_BLEND_LIMIT", "9")
+            assert _six_month_gate_market_blend_limit() == 9
+            monkeypatch.setenv("VALUEINVESTOR_ML_6M_GATE_MARKET_BLEND_LIMIT", "bad")
+            assert _six_month_gate_market_blend_limit() == 6
+
+        top_anchors = _top_gate_anchor_payloads(
+            [
+                {"path": "weak", "gate_rho": 0.10},
+                {"path": "best", "gate_rho": 0.30},
+                {"path": "second", "gate_rho": 0.20},
+            ],
+            limit=2,
+        )
+        assert [anchor["path"] for anchor in top_anchors] == ["best", "second"]
+
+    def test_full_eval_candidate_selection_keeps_strategy_diversity(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _select_full_eval_candidates
+
+        candidates = [
+            {
+                "name": "ticker_best",
+                "prior_strategy": "ticker_priors",
+                "model_kind": "ridge",
+                "target": "target_rank_1w",
+                "metrics": {"1w": {"spearman_rho": 0.10}},
+            },
+            {
+                "name": "ticker_second",
+                "prior_strategy": "ticker_priors",
+                "model_kind": "ridge",
+                "target": "target_rank_1w",
+                "metrics": {"1w": {"spearman_rho": 0.09}},
+            },
+            {
+                "name": "no_prior",
+                "prior_strategy": "no_ticker_priors",
+                "model_kind": "ridge",
+                "target": "target_rank_1w",
+                "metrics": {"1w": {"spearman_rho": 0.02}},
+            },
+        ]
+
+        selected = _select_full_eval_candidates(candidates, limit=2, primary_horizon="1w")
+
+        assert [candidate["name"] for candidate in selected] == ["no_prior", "ticker_best"]
+
+    def test_full_eval_candidate_selection_keeps_best_and_current_6m_family(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _select_full_eval_candidates
+
+        candidates = [
+            {
+                "name": "market_short_rank",
+                "backend": "mlx",
+                "feature_set": "short_horizon",
+                "model_kind": "market_ridge",
+                "target": "target_rank_6m",
+                "ridge_lambda": 10.0,
+                "prior_strategy": "ticker_priors",
+                "metrics": {"6m": {"spearman_rho": 0.11}},
+            },
+            {
+                "name": "sample_best_mean",
+                "backend": "numpy",
+                "feature_set": "core",
+                "model_kind": "ridge",
+                "target": "target_rank_mean",
+                "ridge_lambda": 100.0,
+                "prior_strategy": "ticker_priors",
+                "metrics": {"6m": {"spearman_rho": 0.12}},
+            },
+            {
+                "name": "soft_3000",
+                "backend": "mlx",
+                "feature_set": "core",
+                "model_kind": "ridge",
+                "target": "target_rank_6m_soft",
+                "ridge_lambda": 3_000.0,
+                "prior_strategy": "ticker_priors",
+                "metrics": {"6m": {"spearman_rho": 0.10}},
+            },
+            {
+                "name": "soft_no_priors",
+                "backend": "mlx",
+                "feature_set": "core",
+                "model_kind": "ridge",
+                "target": "target_rank_6m_soft",
+                "ridge_lambda": 1_000.0,
+                "prior_strategy": "no_ticker_priors",
+                "metrics": {"6m": {"spearman_rho": 0.10}},
+            },
+            {
+                "name": "weighted_802",
+                "backend": "mlx",
+                "feature_set": "core",
+                "model_kind": "ridge",
+                "target": "target_rank_weighted_802",
+                "ridge_lambda": 300.0,
+                "prior_strategy": "rolling_ticker_priors",
+                "metrics": {"6m": {"spearman_rho": 0.09}},
+            },
+        ]
+
+        selected = _select_full_eval_candidates(candidates, limit=2, primary_horizon="6m")
+
+        assert [candidate["name"] for candidate in selected] == [
+            "sample_best_mean",
+            "market_short_rank",
+        ]
+
+    def test_full_eval_candidate_selection_uses_6m_walk_forward_after_validation(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _select_full_eval_candidates
+
+        def candidate(name: str, rho: float, wf_delta: float) -> dict:
+            return {
+                "name": name,
+                "backend": "mlx",
+                "feature_set": "short_horizon",
+                "model_kind": "market_ridge",
+                "target": "target_rank_6m",
+                "ridge_lambda": 10.0,
+                "prior_strategy": "ticker_priors",
+                "metrics": {"6m": {"spearman_rho": rho}},
+                "walk_forward": {
+                    "mean_deltas": {"6m": wf_delta},
+                    "median_deltas": {"6m": wf_delta / 2.0},
+                },
+            }
+
+        selected = _select_full_eval_candidates(
+            [
+                candidate("sample_best", 0.40, 0.001),
+                candidate("walk_forward_best", 0.35, 0.010),
+            ],
+            limit=1,
+            primary_horizon="6m",
+        )
+
+        assert [candidate["name"] for candidate in selected] == ["walk_forward_best"]
+
+    def test_full_eval_candidate_selection_uses_6m_gate_probe_when_available(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _select_full_eval_candidates
+
+        def candidate(name: str, train_rho: float, gate_rho: float) -> dict:
+            return {
+                "name": name,
+                "backend": "mlx",
+                "feature_set": "cross_sectional_interactions",
+                "model_kind": "segment_ridge_recent_2190",
+                "target": "target_rank_weighted_901_market",
+                "ridge_lambda": 0.1,
+                "prior_strategy": "ticker_priors",
+                "metrics": {"6m": {"spearman_rho": train_rho}},
+                "gate_probe": {
+                    "metrics": {"6m": {"spearman_rho": gate_rho}},
+                    "rows": 120,
+                },
+            }
+
+        selected = _select_full_eval_candidates(
+            [
+                candidate("sample_best_gate_bad", 0.41, 0.08),
+                candidate("sample_second_gate_good", 0.38, 0.25),
+            ],
+            limit=1,
+            primary_horizon="6m",
+        )
+
+        assert [candidate["name"] for candidate in selected] == ["sample_second_gate_good"]
+
+    def test_full_eval_candidate_selection_keeps_6m_model_kind_diversity(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _select_full_eval_candidates
+
+        def candidate(name: str, rho: float, model_kind: str) -> dict:
+            return {
+                "name": name,
+                "backend": "mlx",
+                "feature_set": "short_horizon",
+                "model_kind": model_kind,
+                "target": "target_rank_weighted_802",
+                "ridge_lambda": 3.0,
+                "prior_strategy": "ticker_priors",
+                "metrics": {"6m": {"spearman_rho": rho}},
+            }
+
+        selected = _select_full_eval_candidates(
+            [
+                candidate("market_best", 0.40, "market_ridge"),
+                candidate("market_second", 0.39, "market_ridge"),
+                candidate("recent", 0.30, "market_ridge_recent"),
+                candidate("ridge", 0.29, "ridge"),
+            ],
+            limit=3,
+            primary_horizon="6m",
+        )
+
+        assert [candidate["name"] for candidate in selected] == [
+            "market_best",
+            "recent",
+            "ridge",
+        ]
+
+    def test_full_eval_candidate_selection_keeps_6m_prior_diversity(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _select_full_eval_candidates
+
+        def candidate(name: str, rho: float, prior_strategy: str) -> dict:
+            return {
+                "name": name,
+                "backend": "mlx",
+                "feature_set": "short_horizon",
+                "model_kind": "market_ridge",
+                "target": "target_rank_weighted_703",
+                "ridge_lambda": 3.0,
+                "prior_strategy": prior_strategy,
+                "metrics": {"6m": {"spearman_rho": rho}},
+            }
+
+        selected = _select_full_eval_candidates(
+            [
+                candidate("ticker_best", 0.40, "ticker_priors"),
+                candidate("ticker_second", 0.39, "ticker_priors"),
+                candidate("no_ticker", 0.30, "no_ticker_priors"),
+            ],
+            limit=2,
+            primary_horizon="6m",
+        )
+
+        assert [candidate["name"] for candidate in selected] == [
+            "ticker_best",
+            "no_ticker",
+        ]
+
+    def test_walk_forward_shortlist_respects_full_eval_limit(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _walk_forward_candidate_limit
+
+        assert _walk_forward_candidate_limit(4, primary_horizon="6m") == 4
+        assert _walk_forward_candidate_limit(12, primary_horizon="6m") == 12
+        assert _walk_forward_candidate_limit(4, primary_horizon="1w") == 4
+
+    def test_promotion_gate_candidate_selection_uses_walk_forward_and_diversity(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _select_promotion_gate_candidates
+
+        def candidate(
+            name: str,
+            rho: float,
+            *,
+            target: str = "target_rank_6m",
+            model_kind: str = "market_ridge",
+            wf_delta: float | None = None,
+        ) -> dict:
+            result = {
+                "name": name,
+                "target": target,
+                "model_kind": model_kind,
+                "ridge_lambda": 10.0,
+                "metrics": {"6m": {"spearman_rho": rho}},
+            }
+            if wf_delta is not None:
+                result["walk_forward"] = {
+                    "mean_deltas": {"6m": wf_delta},
+                    "median_deltas": {"6m": wf_delta / 2.0},
+                }
+            return result
+
+        selected = _select_promotion_gate_candidates(
+            [
+                candidate("train_best", 0.40, wf_delta=0.001),
+                candidate("walk_forward_best", 0.35, target="target_rank_weighted_703", wf_delta=0.01),
+                candidate("ensemble", 0.39, target="ensemble", model_kind="ensemble"),
+                candidate("duplicate_family", 0.38, wf_delta=0.002),
+            ],
+            limit=3,
+            primary_horizon="6m",
+        )
+
+        assert [candidate["name"] for candidate in selected] == [
+            "train_best",
+            "ensemble",
+            "walk_forward_best",
+        ]
+
+    def test_promotion_gate_candidate_selection_uses_6m_gate_probe_when_available(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _select_promotion_gate_candidates
+
+        def candidate(name: str, train_rho: float, gate_rho: float | None) -> dict:
+            result = {
+                "name": name,
+                "target": "target_rank_weighted_901",
+                "model_kind": "segment_ridge_recent",
+                "ridge_lambda": 0.3,
+                "metrics": {"6m": {"spearman_rho": train_rho}},
+            }
+            if gate_rho is not None:
+                result["gate_probe"] = {
+                    "metrics": {"6m": {"spearman_rho": gate_rho}},
+                    "rows": 120,
+                }
+            return result
+
+        selected = _select_promotion_gate_candidates(
+            [
+                candidate("train_best_gate_bad", 0.41, 0.08),
+                candidate("probe_best", 0.39, 0.12),
+                candidate("ensemble_without_probe", 0.40, None),
+            ],
+            limit=1,
+            primary_horizon="6m",
+        )
+
+        assert [candidate["name"] for candidate in selected] == ["probe_best"]
+
+    def test_promotion_gate_candidate_selection_keeps_temporal_anchor_with_gate_probe(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _select_promotion_gate_candidates
+
+        def candidate(
+            name: str,
+            train_rho: float,
+            gate_rho: float | None,
+            *,
+            temporal_anchor_gate_rho: float | None = None,
+        ) -> dict:
+            result = {
+                "name": name,
+                "target": "target_rank_weighted_901",
+                "model_kind": "segment_ridge_recent",
+                "ridge_lambda": 0.3,
+                "metrics": {"6m": {"spearman_rho": train_rho}},
+            }
+            if gate_rho is not None:
+                result["gate_probe"] = {
+                    "metrics": {"6m": {"spearman_rho": gate_rho}},
+                    "rows": 120,
+                }
+            if temporal_anchor_gate_rho is not None:
+                result.update({
+                    "target": "temporal_anchor",
+                    "target_source": "temporal_regime",
+                    "temporal_anchor_gate_rho": temporal_anchor_gate_rho,
+                })
+            return result
+
+        selected = _select_promotion_gate_candidates(
+            [
+                candidate("probe_best", 0.39, 0.12),
+                candidate(
+                    "temporal_anchor",
+                    0.38,
+                    None,
+                    temporal_anchor_gate_rho=0.18,
+                ),
+            ],
+            limit=1,
+            primary_horizon="6m",
+        )
+
+        assert [candidate["name"] for candidate in selected] == ["temporal_anchor"]
+
+    def test_promotion_gate_candidate_selection_interleaves_walk_forward_diversity(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _select_promotion_gate_candidates
+
+        def candidate(
+            name: str,
+            rho: float,
+            *,
+            target: str = "target_rank_6m",
+            wf_delta: float = 0.0,
+        ) -> dict:
+            return {
+                "name": name,
+                "target": target,
+                "model_kind": "market_ridge",
+                "ridge_lambda": 10.0,
+                "metrics": {"6m": {"spearman_rho": rho}},
+                "walk_forward": {
+                    "mean_deltas": {"6m": wf_delta},
+                    "median_deltas": {"6m": wf_delta},
+                },
+            }
+
+        selected = _select_promotion_gate_candidates(
+            [
+                candidate("train_best", 0.40, target="target_rank_6m", wf_delta=0.001),
+                candidate("train_second_same_family", 0.39, target="target_rank_6m", wf_delta=0.002),
+                candidate("walk_forward_diverse", 0.35, target="target_rank_weighted_8515", wf_delta=0.020),
+                candidate("walk_forward_next", 0.34, target="target_rank_weighted_901", wf_delta=0.010),
+            ],
+            limit=3,
+            primary_horizon="6m",
+        )
+
+        assert [candidate["name"] for candidate in selected] == [
+            "train_best",
+            "walk_forward_diverse",
+            "walk_forward_next",
+        ]
+
+    def test_promotion_gate_candidate_selection_does_not_only_select_temporal(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _select_promotion_gate_candidates
+
+        def candidate(
+            name: str,
+            rho: float,
+            *,
+            target: str,
+            target_source: str = "direct",
+        ) -> dict:
+            return {
+                "name": name,
+                "target": target,
+                "target_source": target_source,
+                "model_kind": "temporal_payload_blend"
+                if target_source == "temporal_regime"
+                else "market_ridge",
+                "ridge_lambda": 0.0 if target_source == "temporal_regime" else 3.0,
+                "prior_strategy": "temporal"
+                if target_source == "temporal_regime"
+                else "ticker_priors",
+                "metrics": {"6m": {"spearman_rho": rho}},
+            }
+
+        selected = _select_promotion_gate_candidates(
+            [
+                candidate(
+                    "temporal_best",
+                    0.42,
+                    target="temporal_anchor",
+                    target_source="temporal_regime",
+                ),
+                candidate(
+                    "temporal_second",
+                    0.41,
+                    target="temporal_anchor",
+                    target_source="temporal_regime",
+                ),
+                candidate("raw_best", 0.40, target="target_rank_weighted_901"),
+                candidate("raw_diverse", 0.39, target="target_rank_6m_market"),
+            ],
+            limit=3,
+            primary_horizon="6m",
+        )
+
+        assert "temporal_best" in [candidate["name"] for candidate in selected]
+        assert any(
+            candidate.get("target_source") != "temporal_regime" for candidate in selected
+        )
+
+    def test_promotion_gate_candidate_selection_keeps_6m_model_kind_diversity(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _select_promotion_gate_candidates
+
+        def candidate(name: str, rho: float, model_kind: str) -> dict:
+            return {
+                "name": name,
+                "target": "target_rank_weighted_802",
+                "model_kind": model_kind,
+                "ridge_lambda": 3.0,
+                "metrics": {"6m": {"spearman_rho": rho}},
+            }
+
+        selected = _select_promotion_gate_candidates(
+            [
+                candidate("market_best", 0.40, "market_ridge"),
+                candidate("market_second", 0.39, "market_ridge"),
+                candidate("recent", 0.30, "market_ridge_recent"),
+                candidate("ridge", 0.29, "ridge"),
+            ],
+            limit=3,
+            primary_horizon="6m",
+        )
+
+        assert [candidate["name"] for candidate in selected] == [
+            "market_best",
+            "recent",
+            "ridge",
+        ]
+
+    def test_promotion_gate_candidate_selection_keeps_6m_prior_diversity(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _select_promotion_gate_candidates
+
+        def candidate(name: str, rho: float, prior_strategy: str) -> dict:
+            return {
+                "name": name,
+                "target": "target_rank_weighted_703",
+                "model_kind": "market_ridge",
+                "ridge_lambda": 3.0,
+                "prior_strategy": prior_strategy,
+                "metrics": {"6m": {"spearman_rho": rho}},
+            }
+
+        selected = _select_promotion_gate_candidates(
+            [
+                candidate("ticker_best", 0.40, "ticker_priors"),
+                candidate("ticker_second", 0.39, "ticker_priors"),
+                candidate("no_ticker", 0.30, "no_ticker_priors"),
+            ],
+            limit=2,
+            primary_horizon="6m",
+        )
+
+        assert [candidate["name"] for candidate in selected] == [
+            "ticker_best",
+            "no_ticker",
+        ]
+
+    def test_ml_trainer_reads_incumbent_train_rho_from_payload(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _payload_train_rho
+
+        payload = {
+            "metadata": {
+                "train_metrics": {
+                    "6m": {"spearman_rho": 0.310611},
+                },
+            },
+        }
+
+        assert _payload_train_rho(payload, "6m") == pytest.approx(0.310611)
+        assert _payload_train_rho(payload, "1w") is None
+        assert _payload_train_rho(None, "6m") is None
+
+    def test_primary_spearman_helper_matches_full_evaluation(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import (
+            _evaluate_predictions,
+            _evaluate_primary_spearman_rho,
+        )
+
+        rows = []
+        predictions = []
+        for snap_idx, snap_date in enumerate(pd.date_range("2024-01-01", periods=3, freq="D")):
+            for stock_idx in range(12):
+                rows.append({
+                    "snapshot_date": snap_date.date(),
+                    "forward_return_6m": stock_idx + snap_idx * 0.01,
+                })
+                predictions.append(float(11 - stock_idx if snap_idx == 1 else stock_idx))
+        frame = pd.DataFrame(rows)
+        prediction_array = pd.Series(predictions).to_numpy(dtype="float64")
+
+        full_metrics = _evaluate_predictions(frame, prediction_array)
+        primary_rho = _evaluate_primary_spearman_rho(frame, prediction_array, "6m")
+
+        assert primary_rho == pytest.approx(full_metrics["6m"]["spearman_rho"])
+
+    def test_full_eval_candidate_selection_prioritizes_current_1w_winning_family(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _select_full_eval_candidates
+
+        candidates = [
+            {
+                "name": "sample_best_market",
+                "prior_strategy": "no_ticker_priors",
+                "feature_set": "short_horizon",
+                "model_kind": "market_ridge",
+                "target": "target_rank_1w",
+                "metrics": {"1w": {"spearman_rho": 0.12}},
+            },
+            {
+                "name": "recent_target_1w",
+                "prior_strategy": "no_ticker_priors",
+                "feature_set": "short_horizon",
+                "model_kind": "market_ridge_recent",
+                "target": "target_rank_1w",
+                "metrics": {"1w": {"spearman_rho": 0.10}},
+            },
+            {
+                "name": "target_market",
+                "prior_strategy": "no_ticker_priors",
+                "feature_set": "short_horizon",
+                "model_kind": "market_ridge",
+                "target": "target_rank_1w_market",
+                "metrics": {"1w": {"spearman_rho": 0.11}},
+            },
+        ]
+
+        selected = _select_full_eval_candidates(candidates, limit=2, primary_horizon="1w")
+
+        assert [candidate["name"] for candidate in selected] == [
+            "recent_target_1w",
+            "sample_best_market",
+        ]
+
+    def test_full_eval_candidate_selection_keeps_backend_diversity(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _select_full_eval_candidates
+
+        candidates = [
+            {
+                "name": "cg_best",
+                "backend": "mlx",
+                "prior_strategy": "ticker_priors",
+                "model_kind": "ridge",
+                "target": "target_rank_1w",
+                "metrics": {"1w": {"spearman_rho": 0.10}},
+            },
+            {
+                "name": "cg_second",
+                "backend": "mlx",
+                "prior_strategy": "ticker_priors",
+                "model_kind": "ridge",
+                "target": "target_rank_1w",
+                "metrics": {"1w": {"spearman_rho": 0.09}},
+            },
+            {
+                "name": "adam",
+                "backend": "mlx-adam",
+                "prior_strategy": "ticker_priors",
+                "model_kind": "ridge",
+                "target": "target_rank_1w",
+                "metrics": {"1w": {"spearman_rho": 0.08}},
+            },
+        ]
+
+        selected = _select_full_eval_candidates(candidates, limit=2, primary_horizon="1w")
+
+        assert [candidate["name"] for candidate in selected] == ["cg_best", "adam"]
+
+    def test_full_eval_candidate_selection_keeps_prior_backend_pair_diversity(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _select_full_eval_candidates
+
+        candidates = [
+            {
+                "name": "ticker_cg",
+                "backend": "mlx",
+                "prior_strategy": "ticker_priors",
+                "model_kind": "ridge",
+                "target": "target_rank_1w",
+                "metrics": {"1w": {"spearman_rho": 0.10}},
+            },
+            {
+                "name": "ticker_adam",
+                "backend": "mlx-adam",
+                "prior_strategy": "ticker_priors",
+                "model_kind": "ridge",
+                "target": "target_rank_1w",
+                "metrics": {"1w": {"spearman_rho": 0.09}},
+            },
+            {
+                "name": "no_prior_cg",
+                "backend": "mlx",
+                "prior_strategy": "no_ticker_priors",
+                "model_kind": "ridge",
+                "target": "target_rank_1w",
+                "metrics": {"1w": {"spearman_rho": 0.02}},
+            },
+            {
+                "name": "no_prior_adam",
+                "backend": "mlx-adam",
+                "prior_strategy": "no_ticker_priors",
+                "model_kind": "ridge",
+                "target": "target_rank_1w",
+                "metrics": {"1w": {"spearman_rho": 0.01}},
+            },
+        ]
+
+        selected = _select_full_eval_candidates(candidates, limit=4, primary_horizon="1w")
+
+        assert [candidate["name"] for candidate in selected] == [
+            "no_prior_cg",
+            "ticker_cg",
+            "ticker_adam",
+            "no_prior_adam",
+        ]
+
+    def test_gate_result_selection_prefers_higher_primary_delta(self) -> None:
+        from types import SimpleNamespace
+
+        from valueinvestor.scorer_improver.ml_trainer import _is_better_gate_result
+
+        incumbent = SimpleNamespace(deltas={"1w": 0.0001}, weighted_utility=0.01)
+        higher_delta = SimpleNamespace(deltas={"1w": 0.0002}, weighted_utility=-0.01)
+        lower_delta = SimpleNamespace(deltas={"1w": 0.00005}, weighted_utility=0.02)
+        same_delta_higher_utility = SimpleNamespace(deltas={"1w": 0.0001}, weighted_utility=0.02)
+
+        assert _is_better_gate_result(higher_delta, incumbent, primary_horizon="1w")
+        assert not _is_better_gate_result(lower_delta, incumbent, primary_horizon="1w")
+        assert _is_better_gate_result(
+            same_delta_higher_utility,
+            incumbent,
+            primary_horizon="1w",
+        )
+
+    def test_pairwise_ranker_learns_positive_ordering(self) -> None:
+        import numpy as np
+
+        from valueinvestor.scorer_improver.ml_trainer import _fit_pairwise_ranker_numpy
+
+        X = np.asarray([[0.0], [1.0]] * 10)
+        y = np.asarray([-1.0, 1.0] * 10)
+        snapshot_dates = pd.Series(
+            pd.date_range("2020-01-01", periods=10, freq="MS").repeat(2)
+        )
+
+        coef, backend = _fit_pairwise_ranker_numpy(
+            X,
+            y,
+            snapshot_dates,
+            ridge_lambda=0.1,
+            max_pairs=100,
+            steps=30,
+        )
+
+        assert backend == "pairwise_numpy"
+        assert coef[0] > 0
+
+    def test_mlx_ridge_matches_numpy_when_available(self) -> None:
+        import numpy as np
+
+        pytest.importorskip("mlx.core")
+        from valueinvestor.scorer_improver.ml_trainer import (
+            _fit_ridge_mlx,
+            _fit_ridge_numpy,
+        )
+
+        rng = np.random.default_rng(11)
+        X = rng.normal(size=(256, 12)).astype("float64")
+        y = rng.normal(size=256).astype("float64")
+
+        mlx_coef, backend = _fit_ridge_mlx(X, y, 10.0)
+        numpy_coef, _ = _fit_ridge_numpy(X, y, 10.0)
+
+        assert backend == "mlx"
+        assert np.max(np.abs(mlx_coef - numpy_coef)) < 1e-4
+
+    def test_mlx_adam_ridge_backend_when_available(self) -> None:
+        import numpy as np
+
+        pytest.importorskip("mlx.core")
+        from valueinvestor.scorer_improver.ml_trainer import _fit_ridge
+
+        rng = np.random.default_rng(12)
+        X = rng.normal(size=(128, 8)).astype("float64")
+        y = rng.normal(size=128).astype("float64")
+
+        coef, backend = _fit_ridge(X, y, ridge_lambda=10.0, backend="mlx-adam")
+
+        assert backend == "mlx-adam"
+        assert np.isfinite(coef).all()
+
+    def test_train_ml_ranker_uses_train_only_priors_before_gate(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        from valueinvestor.scorer_improver import ml_trainer
+        from valueinvestor.scorer_improver.promotion_gate import (
+            HoldoutGateConfig,
+            make_holdout_split,
+        )
+
+        rows = []
+        dates = pd.date_range("2020-01-01", periods=12, freq="MS").date
+        for date_idx, snap_date in enumerate(dates):
+            for ticker_idx in range(20):
+                rank = ticker_idx / 19.0
+                rows.append({
+                    "ticker": f"T{ticker_idx:03d}",
+                    "snapshot_date": snap_date,
+                    "close": 10.0 + ticker_idx,
+                    "pe_ratio": 8.0 + rank,
+                    "pe_forward": 7.5 + rank,
+                    "pb_ratio": 1.0 + rank,
+                    "ps_ratio": 0.5 + rank,
+                    "peg_ratio": 0.8 + rank,
+                    "dividend_yield": 0.01 + rank / 100.0,
+                    "ev_to_ebitda": 5.0 + rank,
+                    "market_cap_rmb": 1_000_000_000.0 + ticker_idx * 1_000_000.0,
+                    "revenue": 100_000_000.0 + ticker_idx,
+                    "net_income": 10_000_000.0 + ticker_idx,
+                    "total_assets": 200_000_000.0 + ticker_idx,
+                    "total_liabilities": 50_000_000.0,
+                    "total_equity": 150_000_000.0,
+                    "operating_cash_flow": 12_000_000.0 + ticker_idx,
+                    "free_cash_flow": 8_000_000.0 + ticker_idx,
+                    "gross_margin": 0.30 + rank / 10.0,
+                    "roe": 0.10 + rank / 10.0,
+                    "roa": 0.05 + rank / 20.0,
+                    "net_margin": 0.08 + rank / 20.0,
+                    "debt_to_equity": 0.30,
+                    "current_ratio": 1.5,
+                    "composite_score": 100.0 - ticker_idx,
+                    "value_score": 50.0 + ticker_idx,
+                    "quality_score": 50.0 + ticker_idx,
+                    "growth_score": 50.0 + ticker_idx,
+                    "forward_return_1m": rank + date_idx * 0.001,
+                    "forward_return_3m": rank + date_idx * 0.002,
+                    "forward_return_6m": rank + date_idx * 0.003,
+                    "target_rank_1m": rank * 2.0 - 1.0,
+                    "target_rank_3m": rank * 2.0 - 1.0,
+                    "target_rank_6m": rank * 2.0 - 1.0,
+                })
+        snapshots = pd.DataFrame(rows)
+        config = HoldoutGateConfig(
+            holdout_months=2,
+            embargo_days=20,
+            min_6m_delta=-999.0,
+            max_horizon_degradation=999.0,
+            min_weighted_utility=-999.0,
+            min_gate_snapshots=2,
+            min_train_snapshots=4,
+        )
+        expected_split = make_holdout_split(snapshots, config=config)
+        seen: dict[str, object] = {}
+        original_ticker_priors = ml_trainer._ticker_priors
+
+        def spy_ticker_priors(frame):
+            seen["max_snapshot_date"] = pd.to_datetime(frame["snapshot_date"]).max().date()
+            seen["rows"] = len(frame)
+            return original_ticker_priors(frame)
+
+        monkeypatch.setattr(ml_trainer, "prepare_ml_training_snapshots", lambda **kwargs: snapshots)
+        monkeypatch.setattr(ml_trainer, "_ticker_priors", spy_ticker_priors)
+        monkeypatch.setattr(ml_trainer, "append_gate_ledger", lambda *args, **kwargs: None)
+
+        metadata = ml_trainer.train_ml_ranker(
+            output_model_path=tmp_path / "model.json",
+            backend="numpy",
+            model_kind="ridge-only",
+            ridge_lambda=10.0,
+            target_improvement=-999.0,
+            max_training_rows=0,
+            gate_config=config,
+        )
+
+        assert seen["rows"] == len(expected_split.train)
+        assert seen["max_snapshot_date"] == pd.to_datetime(
+            expected_split.train["snapshot_date"]
+        ).max().date()
+        assert "promotion_gate" in metadata
+        assert metadata["promotion_gate"]["accepted"] is True
+
+    def test_one_week_ml_ranker_skips_rolling_priors_and_records_gate_attempts(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        from valueinvestor.scorer_improver import ml_trainer
+        from valueinvestor.scorer_improver.promotion_gate import HoldoutGateConfig
+
+        rows = []
+        dates = pd.date_range("2020-01-01", periods=8, freq="MS").date
+        for date_idx, snap_date in enumerate(dates):
+            for ticker_idx in range(16):
+                rank = ticker_idx / 15.0
+                target = rank * 2.0 - 1.0
+                rows.append({
+                    "ticker": f"T{ticker_idx:03d}",
+                    "snapshot_date": snap_date,
+                    "close": 10.0 + ticker_idx,
+                    "pe_ratio": 8.0 + rank,
+                    "pe_forward": 7.5 + rank,
+                    "pb_ratio": 1.0 + rank,
+                    "ps_ratio": 0.5 + rank,
+                    "peg_ratio": 0.8 + rank,
+                    "dividend_yield": 0.01 + rank / 100.0,
+                    "ev_to_ebitda": 5.0 + rank,
+                    "market_cap_rmb": 1_000_000_000.0 + ticker_idx * 1_000_000.0,
+                    "revenue": 100_000_000.0 + ticker_idx,
+                    "net_income": 10_000_000.0 + ticker_idx,
+                    "total_assets": 200_000_000.0 + ticker_idx,
+                    "total_liabilities": 50_000_000.0,
+                    "total_equity": 150_000_000.0,
+                    "operating_cash_flow": 12_000_000.0 + ticker_idx,
+                    "free_cash_flow": 8_000_000.0 + ticker_idx,
+                    "gross_margin": 0.30 + rank / 10.0,
+                    "roe": 0.10 + rank / 10.0,
+                    "roa": 0.05 + rank / 20.0,
+                    "net_margin": 0.08 + rank / 20.0,
+                    "debt_to_equity": 0.30,
+                    "current_ratio": 1.5,
+                    "composite_score": 100.0 - ticker_idx,
+                    "value_score": 50.0 + ticker_idx,
+                    "quality_score": 50.0 + ticker_idx,
+                    "growth_score": 50.0 + ticker_idx,
+                    "forward_return_1w": rank + date_idx * 0.001,
+                    "forward_return_1m": rank + date_idx * 0.001,
+                    "forward_return_3m": rank + date_idx * 0.002,
+                    "forward_return_6m": rank + date_idx * 0.003,
+                    "target_rank_1w": target,
+                    "target_rank_1m": target,
+                    "target_rank_3m": target,
+                    "target_rank_6m": target,
+                })
+        snapshots = pd.DataFrame(rows)
+
+        def fail_if_rolling_priors(*args, **kwargs):
+            raise AssertionError("1w training should not use rolling row priors by default")
+
+        monkeypatch.setattr(ml_trainer, "prepare_ml_training_snapshots", lambda **kwargs: snapshots)
+        monkeypatch.setattr(ml_trainer, "_attach_asof_ticker_priors", fail_if_rolling_priors)
+        monkeypatch.setattr(ml_trainer, "append_gate_ledger", lambda *args, **kwargs: None)
+
+        metadata = ml_trainer.train_ml_ranker(
+            output_model_path=tmp_path / "model_1w.json",
+            backend="numpy",
+            ridge_lambda=10.0,
+            target_improvement=-999.0,
+            max_training_rows=0,
+            gate_config=HoldoutGateConfig(
+                holdout_months=2,
+                embargo_days=0,
+                min_6m_delta=-999.0,
+                max_horizon_degradation=999.0,
+                min_weighted_utility=-999.0,
+                min_gate_snapshots=2,
+                min_train_snapshots=4,
+            ),
+            walk_forward_folds=0,
+            target_horizon="1w",
+            full_eval_candidate_limit=2,
+        )
+
+        assert metadata["target_horizon"] == "1w"
+        assert metadata["target"] in {"target_rank_1w", "target_rank_1w_market"}
+        assert metadata["prior_strategy"] in {"ticker_priors", "no_ticker_priors"}
+        assert metadata["full_eval_candidate_limit"] == 2
+        assert metadata["promotion_gate_attempts"]
+        assert metadata["promotion_gate_attempts"][-1]["accepted"] is True
+
     def test_get_llm_client_uses_deepseek_config(self, monkeypatch) -> None:
         from valueinvestor.scorer_improver.agent import _get_llm_client
 
@@ -229,6 +3842,7 @@ class TestAgentHelpers:
         monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek_test_key")
         monkeypatch.setenv("IMPROVE_SCORER_PARALLEL", "1")
         monkeypatch.setattr(agent, "PROGRAM_MD_PATH", program_md)
+        monkeypatch.setattr(agent, "PROPOSAL_DEBUG_DIR", tmp_path / "proposal_debug")
         monkeypatch.setattr(agent, "ExperimentLog", TempExperimentLog)
         monkeypatch.setattr(
             agent,

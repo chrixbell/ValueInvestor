@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import sys
+import types
+
 from valueinvestor.data.models import (
     Company,
     Financials,
@@ -15,16 +18,17 @@ from valueinvestor.screener.scorer import MultiFactorScorer, _linear_score
 # ---------------------------------------------------------------------------
 
 def _result(pe: float, pb: float, roe: float, gm: float = 0.30,
+            ticker: str = "TEST",
             dte: float = 0.5, **val_kw) -> ScreeningResult:
     """Build a ScreeningResult with the given PE, PB, ROE."""
     return ScreeningResult(
-        company=Company(ticker="TEST", name="Test Co", market=Market.A_SHARE),
+        company=Company(ticker=ticker, name="Test Co", market=Market.A_SHARE),
         financials=Financials(
-            ticker="TEST", period="2024-12-31",
+            ticker=ticker, period="2024-12-31",
             roe=roe, gross_margin=gm, debt_to_equity=dte,
         ),
         valuation=ValuationMetrics(
-            ticker="TEST", date="2024-06-01",
+            ticker=ticker, date="2024-06-01",
             pe_ratio=pe, pb_ratio=pb, **val_kw,
         ),
     )
@@ -109,6 +113,34 @@ class TestRanking:
         results = [_result(pe=i * 5, pb=1, roe=0.10) for i in range(1, 6)]
         ranked = scorer.rank(results)
         assert [r.rank for r in ranked] == [1, 2, 3, 4, 5]
+
+    def test_rank_uses_ml_ranker_scores_before_sort(self, monkeypatch):
+        fake_module = types.ModuleType("valueinvestor.screener.ml_ranker")
+        calls = []
+
+        def fake_score_results_with_ml_ranker(results):
+            calls.append([r.company.ticker for r in results])
+            ml_scores = {"LOW": 10.0, "MID": 50.0, "HIGH": 90.0}
+            for result in results:
+                result._ml_ranker_raw_score = ml_scores[result.company.ticker]
+                result.composite_score = ml_scores[result.company.ticker]
+            return True
+
+        fake_module.score_results_with_ml_ranker = fake_score_results_with_ml_ranker
+        monkeypatch.setitem(sys.modules, "valueinvestor.screener.ml_ranker", fake_module)
+
+        scorer = MultiFactorScorer()
+        results = [
+            _result(pe=5, pb=0.8, roe=0.25, ticker="LOW"),
+            _result(pe=10, pb=2, roe=0.15, ticker="HIGH"),
+            _result(pe=25, pb=4, roe=0.05, ticker="MID"),
+        ]
+
+        ranked = scorer.rank(results)
+
+        assert calls
+        assert [r.company.ticker for r in ranked] == ["HIGH", "MID", "LOW"]
+        assert [r.rank for r in ranked] == [1, 2, 3]
 
 
 class TestCustomWeights:

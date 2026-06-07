@@ -95,6 +95,32 @@ def _project_root() -> Path:
     return _proj_root
 
 
+def _set_hand_scorer_training_env() -> Optional[str]:
+    """Disable the production ML ranker while optimizing hand-scorer code."""
+    previous = os.environ.get("VALUEINVESTOR_DISABLE_ML_SCORER")
+    os.environ["VALUEINVESTOR_DISABLE_ML_SCORER"] = "true"
+    try:
+        from valueinvestor.screener.ml_ranker import clear_model_cache
+
+        clear_model_cache()
+    except Exception:
+        logger.debug("Could not clear ML ranker cache", exc_info=True)
+    return previous
+
+
+def _restore_hand_scorer_training_env(previous: Optional[str]) -> None:
+    if previous is None:
+        os.environ.pop("VALUEINVESTOR_DISABLE_ML_SCORER", None)
+    else:
+        os.environ["VALUEINVESTOR_DISABLE_ML_SCORER"] = previous
+    try:
+        from valueinvestor.screener.ml_ranker import clear_model_cache
+
+        clear_model_cache()
+    except Exception:
+        logger.debug("Could not clear ML ranker cache", exc_info=True)
+
+
 _REPAIR_INVALID_PROPOSALS = os.environ.get("IMPROVE_SCORER_REPAIR_PROPOSALS", "true").lower() not in {
     "0", "false", "no", "off",
 }
@@ -2543,6 +2569,15 @@ def _create_single_client():
 
 
 def run_improvement_loop(max_iterations: int = 0) -> None:
+    """Run the autonomous scorer improvement loop with ML-ranker masking disabled."""
+    previous_ml_disable = _set_hand_scorer_training_env()
+    try:
+        _run_improvement_loop_inner(max_iterations=max_iterations)
+    finally:
+        _restore_hand_scorer_training_env(previous_ml_disable)
+
+
+def _run_improvement_loop_inner(max_iterations: int = 0) -> None:
     """Run the autonomous scorer improvement loop.
 
     Evaluates each proposed change against all three forward-return horizons
@@ -3643,6 +3678,221 @@ def _print_skip_banner(
         status="❌ REVERTED",
         reason=reason,
     )
+
+
+_STRUCTURED_SEARCHES = (
+    {
+        "name": "value_boost_alpha",
+        "search": "boost_alpha = 1.55",
+        "replacements": ("boost_alpha = 1.35", "boost_alpha = 1.45", "boost_alpha = 1.65"),
+    },
+    {
+        "name": "low_margin_penalty",
+        "search": "r.composite_score *= 0.95",
+        "replacements": ("r.composite_score *= 0.90", "r.composite_score *= 0.975"),
+    },
+    {
+        "name": "value_quality_divergence_penalty",
+        "search": "r.composite_score *= (1.0 - 0.10 * abs(r.value_score - r.quality_score) / 100.0)",
+        "replacements": (
+            "r.composite_score *= (1.0 - 0.05 * abs(r.value_score - r.quality_score) / 100.0)",
+            "r.composite_score *= (1.0 - 0.15 * abs(r.value_score - r.quality_score) / 100.0)",
+        ),
+    },
+)
+
+
+def _structured_candidate_codes(base_code: str) -> list[dict[str, str]]:
+    candidates: list[dict[str, str]] = []
+    for spec in _STRUCTURED_SEARCHES:
+        search = str(spec["search"])
+        if base_code.count(search) != 1:
+            continue
+        for replacement in spec["replacements"]:
+            replacement = str(replacement)
+            if replacement == search:
+                continue
+            code = base_code.replace(search, replacement, 1)
+            candidates.append({
+                "name": str(spec["name"]),
+                "code": code,
+                "description": f"structured {spec['name']}: {search!r} -> {replacement!r}",
+                "diff_summary": _compute_diff_summary(base_code, code),
+            })
+    return candidates
+
+
+def run_structured_parameter_search(max_iterations: int = 0) -> None:
+    """Run a bounded non-LLM search over known scorer parameters."""
+    previous_ml_disable = _set_hand_scorer_training_env()
+    exp_log = ExperimentLog()
+    primary_ground_truth_path = CURRENT_GROUND_TRUTH_FILE if CURRENT_GROUND_TRUTH_FILE.exists() else None
+    allow_legacy_schema = primary_ground_truth_path is None
+    ground_truth_fingerprint_id = (
+        ground_truth_fingerprint(primary_ground_truth_path)
+        if primary_ground_truth_path is not None
+        else ground_truth_fingerprint()
+    )
+    ground_truth_id = f"{ground_truth_fingerprint_id}|eval={_EVALUATION_SCHEMA_ID}|structured=1"
+    os.environ["IMPROVE_SCORER_ACTIVE_GROUND_TRUTH_ID"] = ground_truth_id
+
+    context = ScorerEvaluationContext(
+        ground_truth_path=primary_ground_truth_path,
+        allow_legacy_schema=allow_legacy_schema,
+        quick_sample_size=_QUICK_EVAL_SAMPLE_SIZE,
+    )
+    base_code = _read_scorer()
+    if not _validate_scorer(code=base_code):
+        _restore_hand_scorer_training_env(previous_ml_disable)
+        raise RuntimeError("Structured search cannot start: scorer.py failed validation.")
+
+    baseline_metrics = context.evaluate_all_targets()
+    baseline_rhos = {h: float(baseline_metrics[h]["spearman_rho"]) for h in _HORIZONS}
+    target_rhos = dict(baseline_rhos)
+    quick_baseline = context.quick_evaluate(sample_size=_QUICK_EVAL_SAMPLE_SIZE)
+    quick_baseline_rhos = {h: float(quick_baseline[h]) for h in _HORIZONS}
+
+    candidates = _structured_candidate_codes(base_code)
+    if max_iterations > 0:
+        candidates = candidates[:max_iterations]
+
+    print("\n🔬 Structured scorer parameter search")
+    for h in _HORIZONS:
+        print(f"     {_HORIZON_LABELS[h]:>10} baseline ρ={baseline_rhos[h]:.4f}")
+
+    scorer_workspace = tempfile.TemporaryDirectory(prefix="valueinvestor-structured-scorer-")
+    workspace_dir = Path(scorer_workspace.name)
+    iteration = exp_log.total_experiments()
+    applied = False
+    try:
+        for candidate in candidates:
+            iteration += 1
+            code = candidate["code"]
+            description = candidate["description"]
+            diff_summary = candidate["diff_summary"]
+
+            static_errors = _validate_static(code)
+            if static_errors:
+                _log_skip(
+                    exp_log,
+                    iteration,
+                    baseline_rhos,
+                    f"Structured static analysis failed: {static_errors[0]}",
+                    diff_summary=diff_summary,
+                )
+                continue
+
+            candidate_ref = _materialize_temp_scorer(
+                workspace_dir,
+                code,
+                label="structured",
+                iteration=iteration,
+            )
+            try:
+                if not _validate_scorer(
+                    code=code,
+                    scorer_module=candidate_ref.module_name,
+                    scorer_path=candidate_ref.path,
+                ):
+                    _log_skip(
+                        exp_log,
+                        iteration,
+                        baseline_rhos,
+                        f"Structured validation failed: {description}",
+                        diff_summary=diff_summary,
+                    )
+                    continue
+
+                quick_rhos = context.quick_evaluate(
+                    scorer_module=candidate_ref.module_name,
+                    scorer_path=candidate_ref.path,
+                    sample_size=_QUICK_EVAL_SAMPLE_SIZE,
+                )
+                quick_rejection = _quick_reject_diagnostics(
+                    quick_rhos,
+                    quick_baseline_rhos,
+                    target_rhos,
+                )
+                if quick_rejection["reject"]:
+                    _log_skip(
+                        exp_log,
+                        iteration,
+                        baseline_rhos,
+                        f"Structured quick-rejected ({quick_rejection['reason']}): {description}",
+                        diff_summary=diff_summary,
+                        extra=_quick_reject_log_fields(quick_rejection),
+                    )
+                    continue
+
+                metrics = context.evaluate_all_targets(
+                    scorer_module=candidate_ref.module_name,
+                    scorer_path=candidate_ref.path,
+                )
+                rhos = {h: float(metrics[h]["spearman_rho"]) for h in _HORIZONS}
+                acceptance = _acceptance_diagnostics(rhos, baseline_rhos, target_rhos)
+                improved_horizons = acceptance["accepted_horizons"]
+                if not improved_horizons:
+                    _log_evaluated(
+                        exp_log=exp_log,
+                        iteration=iteration,
+                        baseline_rhos=baseline_rhos,
+                        rhos=rhos,
+                        kept=False,
+                        description=f"structured no improvement: {description}",
+                        diff_summary=diff_summary,
+                        metrics=metrics,
+                        extra=_acceptance_log_fields(acceptance),
+                    )
+                    continue
+
+                backup_path = _backup_scorer(iteration)
+                logger.info("Backed up scorer -> %s", backup_path)
+                tests_passed, test_summary = _write_candidate_and_test(
+                    code,
+                    restore_code=base_code,
+                )
+                if not tests_passed:
+                    _log_evaluated(
+                        exp_log=exp_log,
+                        iteration=iteration,
+                        baseline_rhos=baseline_rhos,
+                        rhos=rhos,
+                        kept=False,
+                        description=f"structured test failure: {test_summary}",
+                        diff_summary=diff_summary,
+                        metrics=metrics,
+                        extra=_acceptance_log_fields(acceptance),
+                    )
+                    continue
+
+                _save_best_scorer_snapshot(
+                    iteration=iteration,
+                    rhos=rhos,
+                    ground_truth_id=ground_truth_id,
+                )
+                _log_evaluated(
+                    exp_log=exp_log,
+                    iteration=iteration,
+                    baseline_rhos=baseline_rhos,
+                    rhos=rhos,
+                    kept=True,
+                    description=description,
+                    diff_summary=diff_summary,
+                    improved_horizons=improved_horizons,
+                    metrics=metrics,
+                    extra=_acceptance_log_fields(acceptance),
+                )
+                print(f"✅ structured candidate kept: {description}")
+                applied = True
+                break
+            finally:
+                _release_scorer_module(candidate_ref)
+    finally:
+        scorer_workspace.cleanup()
+        _restore_hand_scorer_training_env(previous_ml_disable)
+
+    if not applied:
+        print("No structured scorer parameter candidate cleared the gates.")
 
 
 def show_status() -> None:

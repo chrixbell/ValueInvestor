@@ -293,5 +293,12 @@ class PDFReportGenerator:
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
         date_str = datetime.now().strftime("%Y-%m-%d")
-        pdf_path = out / f"{date_str}_china_value_multi_timeframe.pdf"
+        targets = list(report.results_by_horizon)
+        if "1w" in targets and "6m" in targets:
+            suffix = "dual_target"
+        elif targets:
+            suffix = f"{targets[0]}_target"
+        else:
+            suffix = "multi_timeframe"
+        pdf_path = out / f"{date_str}_china_value_{suffix}.pdf"
         return self.generate(md_content, str(pdf_path))

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import math
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from valueinvestor.data.models import ScreeningResult
@@ -67,8 +68,22 @@ def _triangular_score(value: float, low: float, optimal: float, high: float) -> 
 class MultiFactorScorer:
     """Score :class:`ScreeningResult` objects across value, quality, and growth dimensions."""
 
-    def __init__(self, weights: Optional[Dict[str, float]] = None) -> None:
+    def __init__(
+        self,
+        weights: Optional[Dict[str, float]] = None,
+        *,
+        use_ml_ranker: bool = True,
+        ml_model_path: Optional[Path] = None,
+    ) -> None:
         self.weights = weights or dict(_DEFAULT_WEIGHTS)
+        self.use_ml_ranker = use_ml_ranker
+        self.ml_model_path = ml_model_path
+
+    def _uses_default_weights(self) -> bool:
+        return all(
+            abs(float(self.weights.get(key, 0.0)) - value) < 1e-12
+            for key, value in _DEFAULT_WEIGHTS.items()
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -215,6 +230,16 @@ class MultiFactorScorer:
             nm = r.financials.net_margin
             if nm is not None and nm > 0 and nm < 0.02:
                 r.composite_score *= 0.95
+        if self.use_ml_ranker and self._uses_default_weights():
+            try:
+                from valueinvestor.screener.ml_ranker import score_results_with_ml_ranker
+
+                if self.ml_model_path is None:
+                    score_results_with_ml_ranker(results)
+                else:
+                    score_results_with_ml_ranker(results, model_path=self.ml_model_path)
+            except Exception:
+                logger.debug("ML ranker unavailable; using hand scorer", exc_info=True)
         # 4. Sort and assign ranks
         results.sort(key=lambda r: r.composite_score, reverse=True)
         for idx, r in enumerate(results, start=1):
