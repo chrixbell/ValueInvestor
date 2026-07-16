@@ -1,45 +1,50 @@
 {
-  "created_at": "2026-06-01T20:17:38.878794",
-  "end_date": "2025-07-07",
-  "feature_policy_version": "pit-asof-v4",
+  "created_at": "2026-07-15T00:55:43.837825",
+  "end_date": "2026-01-09",
+  "feature_policy_version": "pit-application-universe-v6-annual-financials",
   "feature_source_profile": {
     "financials": {
       "date_columns": {
         "period": {
-          "max": "2025-12-31",
-          "min": "2024-06-30",
-          "valid": 1682
+          "max": "2026-06-30",
+          "min": "1988-12-31",
+          "valid": 393509
+        },
+        "report_date": {
+          "max": "2026-09-28",
+          "min": "1989-04-30",
+          "valid": 393509
         }
       },
       "exists": true,
-      "rows": 1682,
-      "tickers": 1682
+      "rows": 393509,
+      "tickers": 12186
     },
     "valuations": {
       "date_columns": {
         "date": {
-          "max": "2026-05-05",
-          "min": "2016-05-12",
-          "valid": 661218
+          "max": "2026-01-09",
+          "min": "2016-05-25",
+          "valid": 643430
         }
       },
       "exists": true,
-      "rows": 661218,
-      "tickers": 7031
+      "rows": 643430,
+      "tickers": 7030
     }
   },
   "output_path": "data/trainer/ml_training_daily_snapshots.parquet",
-  "row_count": 11821287,
+  "row_count": 1294372,
   "schema_version": "ml-snapshot-manifest-v1",
-  "snapshot_count": 2310,
+  "snapshot_count": 2109,
   "snapshot_frequency": "daily",
   "source_fingerprints": {
-    "ashare_prices": "ashare_prices.parquet:133404287:1777995134036216005",
-    "financials": "financials.parquet:120682:1780316071749291115",
-    "ground_truth_code": "ground_truth.py:27994:1779010104389600535",
-    "hkshare_prices": "hkshare_prices.parquet:69828666:1777995648833735721",
+    "ashare_prices": "ashare_prices.parquet:140093505:1783850796586565318",
+    "financials": "financials.parquet:29690681:1783952815977159111",
+    "ground_truth_code": "ground_truth.py:30628:1784047924932200360",
+    "hkshare_prices": "hkshare_prices.parquet:70581771:1783851331751039293",
     "scorer": "scorer.py:25675:1779011070403751436",
-    "valuations": "valuations.parquet:7326073:1780316071676244423"
+    "valuations": "valuations.parquet:17846957:1783952912035123227"
   },
   "start_date": "2016-05-25"
 }

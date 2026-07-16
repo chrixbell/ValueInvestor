@@ -59,23 +59,26 @@ def test_report_date_converts_utc_timestamp_to_local_date(monkeypatch) -> None:
             time.tzset()
 
 
-def test_ml_report_notes_show_train_rho_without_holdout_rho() -> None:
+def test_ml_report_notes_show_holdout_rho_when_available() -> None:
     markdown = _zh_upfront_model_notes({
         "scorer_model": {
             "type": "ml_ranker",
             "backend": "mlx",
             "spearman_rhos": {"6m": 0.310611},
             "holdout_spearman_rhos": {"6m": 0.064608},
+            "promotion_status": "provisional",
+            "promotion_gate_min_primary_rho": 0.08,
         }
     })
 
-    assert "当前 6 个月训练/全量回测 Spearman ρ = **0.3106**" in markdown
-    assert "未触碰持出集/推广门" not in markdown
-    assert "0.0646" not in markdown
-    assert "当前 6 个月 Spearman ρ = **0.0646**" not in markdown
+    assert "当前 6 个月未触碰持出集 Spearman ρ = **0.0646**" in markdown
+    assert "0.3106" not in markdown
+    assert "训练/全量回测 Spearman ρ" not in markdown
+    assert "验证状态：临时研究模型" in markdown
+    assert "预设绝对推广门槛 0.0800" in markdown
 
 
-def test_current_scorer_metadata_prefers_train_rho_over_holdout(tmp_path) -> None:
+def test_current_scorer_metadata_prefers_holdout_rho_over_train(tmp_path) -> None:
     from valueinvestor.cli.main import _load_current_scorer_metadata
 
     model_path = tmp_path / "model.json"
@@ -87,6 +90,12 @@ def test_current_scorer_metadata_prefers_train_rho_over_holdout(tmp_path) -> Non
                 "target_horizon": "6m",
                 "train_metrics": {"6m": {"spearman_rho": 0.310611}},
                 "metrics": {"6m": {"spearman_rho": 0.064608}},
+                "promotion_status": "provisional",
+                "promotion_gate": {
+                    "accepted": False,
+                    "reason": "6m rho below absolute gate",
+                    "config": {"min_primary_rho": 0.08},
+                },
             },
         }),
         encoding="utf-8",
@@ -94,10 +103,112 @@ def test_current_scorer_metadata_prefers_train_rho_over_holdout(tmp_path) -> Non
 
     metadata = _load_current_scorer_metadata(model_path)
 
-    assert metadata["spearman_rhos"]["6m"] == 0.310611
+    assert metadata["spearman_rhos"]["6m"] == 0.064608
     assert metadata["train_spearman_rhos"]["6m"] == 0.310611
     assert metadata["holdout_spearman_rhos"]["6m"] == 0.064608
-    assert metadata["spearman_rho_basis"] == "train_metrics"
+    assert metadata["spearman_rho_basis"] == "holdout_metrics"
+    assert metadata["promotion_status"] == "provisional"
+    assert metadata["promotion_gate_accepted"] is False
+    assert metadata["promotion_gate_reason"] == "6m rho below absolute gate"
+    assert metadata["promotion_gate_min_primary_rho"] == 0.08
+
+
+def test_current_scorer_metadata_prefers_refit_validation_record(tmp_path) -> None:
+    from valueinvestor.cli.main import _load_current_scorer_metadata
+
+    model_path = tmp_path / "model.json"
+    model_path.write_text(
+        json.dumps({
+            "schema_version": "test",
+            "metadata": {
+                "backend": "mlx",
+                "target_horizon": "6m",
+                "metrics": {"6m": {"spearman_rho": 0.192264}},
+                "validation_metrics": {"6m": {"spearman_rho": 0.093042}},
+                "validation_promotion_gate": {
+                    "accepted": True,
+                    "reason": "accepted",
+                    "config": {"min_primary_rho": 0.08},
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    metadata = _load_current_scorer_metadata(model_path)
+
+    assert metadata["spearman_rhos"]["6m"] == 0.093042
+    assert metadata["holdout_spearman_rhos"]["6m"] == 0.093042
+    assert metadata["promotion_gate_accepted"] is True
+    assert metadata["promotion_gate_min_primary_rho"] == 0.08
+
+
+def test_full_refit_scorer_metadata_is_not_labeled_as_holdout(tmp_path) -> None:
+    from valueinvestor.cli.main import _load_current_scorer_metadata
+
+    model_path = tmp_path / "model.json"
+    model_path.write_text(
+        json.dumps({
+            "schema_version": "test",
+            "rank_payload_members": [
+                {"weight": 0.625, "payload": {}},
+                {"weight": 0.375, "payload": {}},
+            ],
+            "metadata": {
+                "backend": "rank_payload_blend",
+                "model_kind": "lightgbm_incumbent_rank_blend",
+                "target_horizon": "6m",
+                "evaluation_protocol": "full_refit_current_24m_monthly_gate",
+                "strict_outer_gate": False,
+                "promotion_status": "target_met_full_refit_purged_audit_failed",
+                "strict_purged_audit": {
+                    "accepted": False,
+                    "spearman_rho": 0.033618,
+                    "best_spearman_rho": 0.084930,
+                },
+                "metrics": {"6m": {"spearman_rho": 0.268024}},
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    metadata = _load_current_scorer_metadata(model_path)
+
+    assert metadata["spearman_rhos"]["6m"] == 0.268024
+    assert "holdout_spearman_rhos" not in metadata
+    assert metadata["spearman_rho_basis"] == "full_refit_current_24m_monthly_gate"
+    assert metadata["ensemble_size"] == 2
+    assert metadata["model_kind"] == "lightgbm_incumbent_rank_blend"
+    assert metadata["strict_outer_gate"] is False
+    assert metadata["strict_purged_audit"]["accepted"] is False
+
+
+def test_full_refit_report_discloses_failed_strict_purged_audit() -> None:
+    markdown = _zh_upfront_model_notes({
+        "scorer_model": {
+            "type": "ml_ranker",
+            "backend": "rank_payload_blend",
+            "model_kind": "lightgbm_incumbent_rank_blend",
+            "ensemble_size": 2,
+            "spearman_rhos": {"6m": 0.268024},
+            "spearman_rho_basis": "full_refit_current_24m_monthly_gate",
+            "promotion_status": "target_met_full_refit_purged_audit_failed",
+            "strict_purged_audit": {
+                "accepted": False,
+                "spearman_rho": 0.033618,
+                "best_spearman_rho": 0.084930,
+            },
+        }
+    })
+
+    assert "全量重拟合/当前 24 个月月度评估 Spearman ρ = **0.2680**" in markdown
+    assert "未触碰持出集 Spearman ρ = **0.2680**" not in markdown
+    assert "严格时间净化审计未通过" in markdown
+    assert "不是未触碰持出集结果" in markdown
+    assert "**0.0336**" in markdown
+    assert "**0.0849**" in markdown
+    assert "lightgbm_incumbent_rank_blend" in markdown
+    assert "ensemble_size=2" in markdown
 
 
 def test_current_scorer_metadata_counts_payload_members(tmp_path) -> None:

@@ -29,12 +29,12 @@ CURRENT_GROUND_TRUTH_FILE = TRAINER_DIR / "ground_truth_current.parquet"
 
 # Rolling snapshot interval in days (~quarterly)
 SNAPSHOT_INTERVAL_DAYS = 90
-# Forward return horizons in calendar days (nearest price within ±15 days is used)
+# Forward return horizons in calendar days (nearest price within ±15 days is used).
 FORWARD_HORIZON_1W_DAYS = 5     # ~1 trading week
 FORWARD_HORIZON_1M_DAYS = 30    # ~1 month
 FORWARD_HORIZON_3M_DAYS = 90    # ~3 months
-FORWARD_HORIZON_DAYS = 126      # ~6 months (unchanged, backward-compatible alias)
-FORWARD_HORIZON_6M_DAYS = 126   # explicit 6m constant
+FORWARD_HORIZON_DAYS = 182      # ~6 calendar months (backward-compatible alias)
+FORWARD_HORIZON_6M_DAYS = 182   # explicit 6m constant
 
 VALUATION_FEATURE_COLUMNS = (
     "pe_ratio",
@@ -61,6 +61,13 @@ FINANCIAL_FEATURE_COLUMNS = (
     "roa",
     "debt_to_equity",
     "current_ratio",
+)
+
+ANNUALIZED_FLOW_FEATURE_COLUMNS = (
+    "revenue",
+    "net_income",
+    "operating_cash_flow",
+    "free_cash_flow",
 )
 
 RETURN_COLUMNS = (
@@ -98,7 +105,8 @@ FEATURE_DATE_COLUMNS = (
     "updated_at",
 )
 VALUATION_ASOF_LAG_DAYS = 0
-FINANCIAL_ASOF_LAG_DAYS = 45
+# Financial history is stored with a conservative report availability date.
+FINANCIAL_ASOF_LAG_DAYS = 0
 
 
 _GT_CACHE: dict[str, pd.DataFrame] = {}
@@ -355,6 +363,60 @@ def asof_feature_frame(
     return result[["ticker", *columns]]
 
 
+def annualize_financial_feature_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """Convert cumulative statement flows to a comparable annual run rate."""
+    result = frame.copy()
+    if "statement_months" not in result.columns:
+        return result
+    months = pd.to_numeric(result["statement_months"], errors="coerce")
+    factor = pd.Series(1.0, index=result.index, dtype="float64")
+    valid = months.between(1.0, 12.0)
+    factor.loc[valid] = 12.0 / months.loc[valid]
+    for column in ANNUALIZED_FLOW_FEATURE_COLUMNS:
+        if column not in result.columns:
+            continue
+        values = pd.to_numeric(result[column], errors="coerce")
+        result[column] = values * factor
+    return result
+
+
+def align_financial_history_to_live_periods(frame: pd.DataFrame) -> pd.DataFrame:
+    """Match historical statements to the annual-period policy used live.
+
+    The live A-share and HK fetchers prefer annual statements so financial
+    levels and ratios are comparable across companies. Keep interim rows only
+    until a ticker's first annual statement becomes available, matching the
+    live fallback for newly listed companies.
+    """
+    result = frame.copy()
+    if result.empty or "ticker" not in result.columns:
+        return result
+
+    period = (
+        pd.to_datetime(result["period"], errors="coerce")
+        if "period" in result.columns
+        else pd.Series(pd.NaT, index=result.index, dtype="datetime64[ns]")
+    )
+    months = (
+        pd.to_numeric(result["statement_months"], errors="coerce")
+        if "statement_months" in result.columns
+        else pd.Series(np.nan, index=result.index, dtype="float64")
+    )
+    annual = months.eq(12.0) | period.dt.strftime("%m-%d").eq("12-31")
+    if not annual.any():
+        return result
+
+    tickers = result["ticker"].astype(str)
+    feature_dates = _feature_date_series(result)
+    if feature_dates is None:
+        has_annual = annual.groupby(tickers, sort=False).transform("any")
+        return result.loc[annual | ~has_annual].copy()
+
+    first_annual_date = feature_dates.where(annual).groupby(tickers, sort=False).transform("min")
+    keep = annual | first_annual_date.isna() | feature_dates.lt(first_annual_date)
+    return result.loc[keep].copy()
+
+
 def _build_snapshot_features(
     snapshot_date: date,
     prices_df: pd.DataFrame,
@@ -399,15 +461,18 @@ def _build_snapshot_features(
     )
     financial_features = asof_feature_frame(
         fin_df,
-        FINANCIAL_FEATURE_COLUMNS,
+        (*FINANCIAL_FEATURE_COLUMNS, "statement_months"),
         features["ticker"],
         snapshot_dates,
         lag_days=FINANCIAL_ASOF_LAG_DAYS,
     )
+    financial_features = annualize_financial_feature_frame(financial_features)
 
     features = features.reset_index(drop=True)
     features = features.join(valuation_features.drop(columns=["ticker"]))
-    features = features.join(financial_features.drop(columns=["ticker"]))
+    features = features.join(
+        financial_features.drop(columns=["ticker", "statement_months"])
+    )
     ordered_columns = [
         "ticker",
         "snapshot_date",
@@ -562,6 +627,7 @@ def build_ground_truth(force: bool = False, output_path: Path = GROUND_TRUTH_FIL
     fin_path = TRAINER_DIR / "financials.parquet"
     val_df = pd.read_parquet(str(val_path)) if val_path.exists() else pd.DataFrame()
     fin_df = pd.read_parquet(str(fin_path)) if fin_path.exists() else pd.DataFrame()
+    fin_df = align_financial_history_to_live_periods(fin_df)
 
     # Compute forward returns for all configured horizons.
     horizons = [

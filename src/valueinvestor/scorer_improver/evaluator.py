@@ -4,7 +4,7 @@ Loads the ground truth (scorer outputs + forward returns) and computes
 Spearman rank correlation between composite_score and the target forward
 return column as the primary evaluation metric.
 
-Supported horizons: "1m" (30 days), "3m" (90 days), "6m" (126 days, default).
+Supported horizons: "1m" (30 days), "3m" (90 days), "6m" (182 days, default).
 """
 
 from __future__ import annotations

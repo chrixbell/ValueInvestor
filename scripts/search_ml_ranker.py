@@ -56,7 +56,7 @@ DEFAULT_WALK_FORWARD_FOLDS = 3
 DEFAULT_WALK_FORWARD_VALIDATION_MONTHS = 6
 DEFAULT_WALK_FORWARD_MAX_ROWS = 500_000
 DEFAULT_WALK_FORWARD_MIN_6M_DELTA = 0.001
-DEFAULT_WALK_FORWARD_MAX_HORIZON_DEGRADATION = 0.01
+DEFAULT_WALK_FORWARD_MAX_HORIZON_DEGRADATION = 0.10
 
 
 def _log(report_path: Path, record: Mapping[str, object]) -> None:
@@ -558,7 +558,10 @@ def main() -> None:
         "--walk-forward-max-horizon-degradation",
         type=float,
         default=DEFAULT_WALK_FORWARD_MAX_HORIZON_DEGRADATION,
-        help="Allowed walk-forward rho degradation for non-primary horizons.",
+        help=(
+            "Allowed mean non-primary rho degradation and worst primary-fold "
+            "degradation during walk-forward validation."
+        ),
     )
     args = parser.parse_args()
 

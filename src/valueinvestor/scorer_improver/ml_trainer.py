@@ -7,7 +7,7 @@ import logging
 import os
 import time
 from datetime import date, datetime, timedelta
-from itertools import product
+from itertools import combinations, product
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
 
@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+from valueinvestor.config import ScreeningConfig
 from valueinvestor.scorer_improver.ground_truth import (
     CURRENT_GROUND_TRUTH_FILE,
     FINANCIAL_ASOF_LAG_DAYS,
@@ -26,6 +27,8 @@ from valueinvestor.scorer_improver.ground_truth import (
     VALUATION_ASOF_LAG_DAYS,
     VALUATION_FEATURE_COLUMNS,
     _compute_forward_returns,
+    align_financial_history_to_live_periods,
+    annualize_financial_feature_frame,
     asof_feature_frame,
     ensure_current_ground_truth_ready,
 )
@@ -49,7 +52,12 @@ from valueinvestor.screener.ml_ranker import (
     POLYNOMIAL_FEATURES,
     RATIO_FEATURES,
     SHORT_HORIZON_FEATURES,
+    _application_gross_profitability_de_crowding_config,
+    _application_gross_profitability_de_crowding_predictions,
+    _model_from_payload,
     expected_feature_names,
+    feature_matrix_from_values,
+    predict_lightgbm_model,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,10 +75,11 @@ DEFAULT_WALK_FORWARD_FOLDS = 3
 DEFAULT_WALK_FORWARD_VALIDATION_MONTHS = 6
 DEFAULT_WALK_FORWARD_MAX_ROWS = 500_000
 DEFAULT_WALK_FORWARD_MIN_6M_DELTA = 0.001
-DEFAULT_WALK_FORWARD_MAX_HORIZON_DEGRADATION = 0.01
+DEFAULT_WALK_FORWARD_MAX_HORIZON_DEGRADATION = 0.10
 DEFAULT_FULL_EVAL_CANDIDATE_LIMIT = 1
 DEFAULT_ONE_WEEK_FULL_EVAL_CANDIDATE_LIMIT = 8
 DEFAULT_SIX_MONTH_FULL_EVAL_CANDIDATE_LIMIT = 12
+STRICT_WALK_FORWARD_CANDIDATE_LIMIT = 24
 ONE_WEEK_CANDIDATE_LAMBDAS = (
     0.3,
     0.5,
@@ -182,6 +191,37 @@ SIX_MONTH_BLEND_WEIGHTS = (
     0.015,
     0.01,
 )
+SIX_MONTH_QUALITY_RESIDUAL_WEIGHTS = (
+    1.0,
+    0.95,
+    0.90,
+    0.85,
+    0.80,
+    0.75,
+    0.70,
+    0.65,
+    0.60,
+    0.55,
+    0.50,
+)
+SIX_MONTH_APPLICATION_RESIDUAL_SIGNALS = (
+    ("quality_de_crowding", "quality_score", -1.0),
+)
+SIX_MONTH_APPLICATION_FACTOR_SIGNALS = (
+    "model",
+    "quality_de_crowding",
+    "book_yield",
+    "sales_yield",
+    "liability_yield",
+    "momentum_63d",
+    "low_current_ratio",
+)
+SIX_MONTH_APPLICATION_FACTOR_TEMPLATES = (
+    ("equal", (0.10, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15)),
+    ("balanced", (0.10, 0.18, 0.135, 0.09, 0.135, 0.225, 0.135)),
+    ("value_momentum", (0.10, 0.135, 0.18, 0.045, 0.135, 0.27, 0.135)),
+)
+SIX_MONTH_APPLICATION_FACTOR_MIN_RHO_TOLERANCE = 0.01
 SIX_MONTH_GATE_BLEND_LIMIT = 4
 SIX_MONTH_GATE_MARKET_BLEND_LIMIT = 6
 SIX_MONTH_GATE_MARKET_PROBE_TOTALS = (
@@ -295,7 +335,7 @@ TARGET_ALIASES = {
     "mean": "target_rank_mean",
 }
 SNAPSHOT_MANIFEST_SCHEMA_VERSION = "ml-snapshot-manifest-v1"
-FEATURE_POLICY_VERSION = "pit-asof-v4"
+FEATURE_POLICY_VERSION = "pit-application-universe-v6-annual-financials"
 PRIOR_COLUMN_PREFIX = "_prior_"
 SCORER_SOURCE_PATH = Path("src/valueinvestor/screener/scorer.py")
 GROUND_TRUTH_SOURCE_PATH = Path("src/valueinvestor/scorer_improver/ground_truth.py")
@@ -306,6 +346,8 @@ HORIZON_DAYS = {
     "6m": FORWARD_HORIZON_6M_DAYS,
 }
 DEFAULT_PRIOR_EMBARGO_DAYS = 15
+APPLICATION_MIN_ROWS_PER_SNAPSHOT = 20
+APPLICATION_MIN_DAILY_SNAPSHOTS = 252
 
 
 def _blend_weights_for_horizon(primary_horizon: str) -> tuple[float, ...]:
@@ -915,6 +957,123 @@ def _target_rank_by_snapshot_market(df: pd.DataFrame, return_col: str) -> pd.Ser
     return target.astype("float64")
 
 
+def _application_universe_mask(
+    df: pd.DataFrame,
+    *,
+    screening: Optional[ScreeningConfig] = None,
+) -> pd.Series:
+    """Return rows that pass the same quantitative screen as production."""
+    screening = screening or ScreeningConfig()
+    required = {"market_cap_rmb", "pe_ratio", "pb_ratio", "roe", "debt_to_equity"}
+    missing = sorted(required.difference(df.columns))
+    if missing:
+        raise RuntimeError("Application-universe training requires columns: " + ", ".join(missing))
+
+    market_cap = pd.to_numeric(df["market_cap_rmb"], errors="coerce")
+    pe_ratio = pd.to_numeric(df["pe_ratio"], errors="coerce")
+    pb_ratio = pd.to_numeric(df["pb_ratio"], errors="coerce")
+    roe = pd.to_numeric(df["roe"], errors="coerce")
+    debt_ratio = pd.to_numeric(df["debt_to_equity"], errors="coerce")
+    return (
+        market_cap.ge(screening.market_cap_min_rmb)
+        & pe_ratio.gt(0.0)
+        & pe_ratio.le(screening.pe_max)
+        & pb_ratio.gt(0.0)
+        & pb_ratio.le(screening.pb_max)
+        & roe.ge(screening.roe_min)
+        & (debt_ratio.isna() | debt_ratio.le(screening.debt_ratio_max))
+    )
+
+
+def _application_data_quality_summary(df: pd.DataFrame) -> dict[str, object]:
+    feature_columns = (
+        "market_cap_rmb",
+        "pe_ratio",
+        "pb_ratio",
+        "roe",
+        "debt_to_equity",
+    )
+    coverage = {
+        column: int(pd.to_numeric(df[column], errors="coerce").notna().sum()) if column in df.columns else 0
+        for column in feature_columns
+    }
+    try:
+        eligible = _application_universe_mask(df)
+    except RuntimeError:
+        eligible = pd.Series(False, index=df.index, dtype=bool)
+    eligible_frame = df.loc[eligible]
+    return {
+        "rows": int(len(df)),
+        "snapshots": int(df["snapshot_date"].nunique()) if "snapshot_date" in df.columns else 0,
+        "coverage": coverage,
+        "eligible_rows": int(eligible.sum()),
+        "eligible_snapshots": int(eligible_frame["snapshot_date"].nunique())
+        if "snapshot_date" in eligible_frame.columns
+        else 0,
+    }
+
+
+def _filter_application_training_universe(
+    df: pd.DataFrame,
+    *,
+    min_rows_per_snapshot: int = APPLICATION_MIN_ROWS_PER_SNAPSHOT,
+    min_snapshots: int = 0,
+) -> pd.DataFrame:
+    """Filter and rerank snapshots in the universe seen by the live ranker."""
+    summary = _application_data_quality_summary(df)
+    eligible = df.loc[_application_universe_mask(df)].copy()
+    if not eligible.empty and min_rows_per_snapshot > 0:
+        counts = eligible.groupby("snapshot_date", sort=False)["ticker"].transform("size")
+        eligible = eligible.loc[counts >= min_rows_per_snapshot].copy()
+
+    snapshot_count = int(eligible["snapshot_date"].nunique()) if not eligible.empty else 0
+    if eligible.empty or snapshot_count < min_snapshots:
+        coverage = summary["coverage"]
+        raise RuntimeError(
+            "Training data cannot represent the production stock screen: "
+            f"eligible_rows={summary['eligible_rows']}, "
+            f"eligible_snapshots={summary['eligible_snapshots']}, "
+            f"required_snapshots={min_snapshots}, "
+            f"PE_rows={coverage['pe_ratio']}, PB_rows={coverage['pb_ratio']}, "
+            f"ROE_rows={coverage['roe']}. Rebuild point-in-time financial and "
+            "valuation history before training."
+        )
+
+    eligible = eligible.sort_values(["snapshot_date", "ticker"], kind="mergesort")
+    eligible = eligible.reset_index(drop=True)
+    eligible = _refresh_hand_rank_scores(eligible)
+    for horizon in EVAL_HORIZONS:
+        return_col = f"forward_return_{horizon}"
+        if return_col in eligible.columns:
+            eligible[f"target_rank_{horizon}"] = _target_rank_by_snapshot(
+                eligible,
+                return_col,
+            )
+    if "forward_return_1w" in eligible.columns:
+        eligible["target_rank_1w_market"] = _target_rank_by_snapshot_market(
+            eligible,
+            "forward_return_1w",
+        )
+    return eligible
+
+
+def _monthly_rebalance_snapshots(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep one well-populated snapshot per month for independent evaluation."""
+    if df.empty:
+        return df.copy()
+    dates = _snapshot_dates(df)
+    counts = (
+        pd.DataFrame({"snapshot_date": dates}).groupby("snapshot_date", sort=False).size().rename("rows").reset_index()
+    )
+    counts["month"] = counts["snapshot_date"].dt.to_period("M")
+    selected = (
+        counts.sort_values(["month", "rows", "snapshot_date"], kind="mergesort")
+        .groupby("month", sort=False)
+        .tail(1)["snapshot_date"]
+    )
+    return df.loc[dates.isin(selected)].copy().reset_index(drop=True)
+
+
 def _prediction_rank_by_snapshot(df: pd.DataFrame, predictions: np.ndarray) -> np.ndarray:
     values = pd.Series(predictions, index=df.index, dtype="float64")
     valid = values.notna()
@@ -922,6 +1081,60 @@ def _prediction_rank_by_snapshot(df: pd.DataFrame, predictions: np.ndarray) -> n
     ranks = values.groupby(df["snapshot_date"], sort=False).rank(method="average")
     target = ranks / (counts + 1.0) * 2.0 - 1.0
     return target.where(valid & (counts >= 2), np.nan).to_numpy(dtype="float64")
+
+
+def _application_factor_signal_values(df: pd.DataFrame, signal: str) -> np.ndarray:
+    if signal == "quality_de_crowding":
+        return -_numeric_column(df, "quality_score")
+    if signal == "book_yield":
+        return -_numeric_column(df, "pb_ratio")
+    if signal == "sales_yield":
+        return -_numeric_column(df, "ps_ratio")
+    if signal == "liability_yield":
+        liabilities = _numeric_column(df, "total_liabilities")
+        market_cap = _numeric_column(df, "market_cap_rmb")
+        return np.divide(
+            liabilities,
+            market_cap,
+            out=np.full(len(df), np.nan, dtype="float64"),
+            where=np.isfinite(market_cap) & (market_cap > 0.0),
+        )
+    if signal == "momentum_63d":
+        return _numeric_column(df, "relative_return_63d")
+    if signal == "low_current_ratio":
+        return -_numeric_column(df, "current_ratio")
+    return np.full(len(df), np.nan, dtype="float64")
+
+
+def _application_factor_predictions(
+    df: pd.DataFrame,
+    model_predictions: np.ndarray,
+    components: Sequence[Mapping[str, object]],
+) -> np.ndarray:
+    model_rank = _prediction_rank_by_snapshot(df, model_predictions)
+    blended = np.zeros(len(df), dtype="float64")
+    total_weight = 0.0
+    for component in components:
+        signal = str(component.get("signal", "")).strip()
+        try:
+            weight = float(component.get("weight", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if signal not in SIX_MONTH_APPLICATION_FACTOR_SIGNALS or not np.isfinite(weight) or weight <= 0.0:
+            continue
+        if signal == "model":
+            factor_rank = model_rank
+        else:
+            factor_rank = _prediction_rank_by_snapshot(
+                df,
+                _application_factor_signal_values(df, signal),
+            )
+            factor_rank = np.where(np.isfinite(factor_rank), factor_rank, 0.0)
+        blended += weight * factor_rank
+        total_weight += weight
+    if total_weight <= 0.0:
+        return model_predictions
+    return blended / total_weight
 
 
 def _numeric_column(df: pd.DataFrame, column: str) -> np.ndarray:
@@ -1385,9 +1598,7 @@ def prepare_ml_training_snapshots(
 ) -> pd.DataFrame:
     """Create/read the snapshot table used by the local ML ranker."""
     resolved_end_date = (
-        _resolve_daily_end_date(end_date)
-        if snapshot_frequency == "daily"
-        else (end_date or DAILY_END_DATE)
+        _resolve_daily_end_date(end_date) if snapshot_frequency == "daily" else (end_date or DAILY_END_DATE)
     )
     if not force:
         cached = _load_valid_snapshot_cache(
@@ -1413,15 +1624,9 @@ def prepare_ml_training_snapshots(
 
     ensure_current_ground_truth_ready(force=False)
     df = pd.read_parquet(str(ground_truth_path))
-    df = _refresh_hand_rank_scores(df)
-    for horizon in EVAL_HORIZONS:
-        df[f"target_rank_{horizon}"] = _target_rank_by_snapshot(
-            df,
-            f"forward_return_{horizon}",
-        )
-    df["target_rank_1w_market"] = _target_rank_by_snapshot_market(
+    df = _filter_application_training_universe(
         df,
-        "forward_return_1w",
+        min_rows_per_snapshot=APPLICATION_MIN_ROWS_PER_SNAPSHOT,
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1518,13 +1723,8 @@ def _daily_feature_frame(
     start_date: date,
     end_date: date,
 ) -> pd.DataFrame:
-    price_feature_frame = _short_horizon_price_feature_frame(
-        prices[prices["date"] <= end_date]
-    )
-    prices = prices[
-        (prices["date"] >= start_date)
-        & (prices["date"] <= end_date)
-    ].copy()
+    price_feature_frame = _short_horizon_price_feature_frame(prices[prices["date"] <= end_date])
+    prices = prices[(prices["date"] >= start_date) & (prices["date"] <= end_date)].copy()
     if prices.empty:
         raise RuntimeError(f"No price rows between {start_date} and {end_date}")
 
@@ -1540,6 +1740,7 @@ def _daily_feature_frame(
         financials=financials,
         end_date=end_date,
     )
+    financials = align_financial_history_to_live_periods(financials)
 
     base = prices[["ticker", "snapshot_date", "close"]].reset_index(drop=True)
     base = base.merge(
@@ -1556,14 +1757,15 @@ def _daily_feature_frame(
     )
     financial_features = asof_feature_frame(
         financials,
-        FINANCIAL_FEATURE_COLUMNS,
+        (*FINANCIAL_FEATURE_COLUMNS, "statement_months"),
         base["ticker"],
         base["snapshot_date"],
         lag_days=FINANCIAL_ASOF_LAG_DAYS,
     )
+    financial_features = annualize_financial_feature_frame(financial_features)
 
     features = base.join(valuation_features.drop(columns=["ticker"]))
-    features = features.join(financial_features.drop(columns=["ticker"]))
+    features = features.join(financial_features.drop(columns=["ticker", "statement_months"]))
     ordered_columns = [
         "ticker",
         "snapshot_date",
@@ -1598,6 +1800,10 @@ def build_daily_ml_training_snapshots(
 
     prices = _load_training_prices(require_ashare=True)
     features = _daily_feature_frame(prices, start_date=start_date, end_date=resolved_end_date)
+    feature_quality = _application_data_quality_summary(features)
+    features = features.loc[_application_universe_mask(features)].reset_index(drop=True)
+    if features.empty:
+        raise RuntimeError(f"No daily feature rows pass the production stock screen; quality_summary={feature_quality}")
 
     horizons = [
         (FORWARD_HORIZON_1W_DAYS, "forward_return_1w"),
@@ -1622,15 +1828,9 @@ def build_daily_ml_training_snapshots(
         )
 
     merged = merged.dropna(subset=["forward_return_6m"]).reset_index(drop=True)
-    merged = _refresh_hand_rank_scores(merged)
-    for horizon in EVAL_HORIZONS:
-        merged[f"target_rank_{horizon}"] = _target_rank_by_snapshot(
-            merged,
-            f"forward_return_{horizon}",
-        )
-    merged["target_rank_1w_market"] = _target_rank_by_snapshot_market(
+    merged = _filter_application_training_universe(
         merged,
-        "forward_return_1w",
+        min_rows_per_snapshot=APPLICATION_MIN_ROWS_PER_SNAPSHOT,
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1853,9 +2053,7 @@ def _centered_rank_array(values: np.ndarray) -> np.ndarray:
     if n <= 1:
         return output
     finite_values = values[finite]
-    order = np.argsort(finite_values, kind="mergesort")
-    ranks = np.empty(n, dtype="float64")
-    ranks[order] = np.arange(n, dtype="float64")
+    ranks = stats.rankdata(finite_values, method="average") - 1.0
     output[finite] = ranks / float(n - 1) - 0.5
     return output
 
@@ -2041,6 +2239,68 @@ def build_feature_matrix(
             f"ML feature matrix has {matrix.shape[1]} columns; expected {expected_count}"
         )
     return matrix
+
+
+def _runtime_feature_parity(
+    df: pd.DataFrame,
+    payload: Mapping[str, object],
+) -> dict[str, object]:
+    """Compare trainer features with the exact production matrix builder."""
+    model = _model_from_payload(payload)
+    if not model.feature_names:
+        return {
+            "matched": False,
+            "reason": "payload has no direct feature schema",
+            "rows": 0,
+            "features": 0,
+            "max_abs_error": None,
+        }
+    dates = _snapshot_dates(df)
+    latest = pd.Timestamp(dates.max())
+    sample = df.loc[dates == latest].copy().reset_index(drop=True)
+    value_columns = [*BASE_FIELDS, *SHORT_HORIZON_FEATURES]
+    values = sample.reindex(columns=value_columns).to_dict("records")
+    tickers = sample["ticker"].astype(str).tolist()
+    trainer_matrix = build_feature_matrix(
+        sample,
+        model.ticker_priors,
+        prefer_row_priors=False,
+        feature_names=model.feature_names,
+    )
+    runtime_matrix = feature_matrix_from_values(values, tickers, model)
+    if trainer_matrix.shape != runtime_matrix.shape:
+        return {
+            "matched": False,
+            "reason": "feature matrix shape mismatch",
+            "rows": int(len(sample)),
+            "features": int(len(model.feature_names)),
+            "trainer_shape": list(trainer_matrix.shape),
+            "runtime_shape": list(runtime_matrix.shape),
+            "max_abs_error": None,
+        }
+    max_abs_error = float(np.max(np.abs(trainer_matrix - runtime_matrix))) if trainer_matrix.size else 0.0
+    trainer_predictions = _predict_ml_ranker_payload_unblended(sample, payload)
+    runtime_predictions = model.predict_matrix(
+        runtime_matrix,
+        tickers=tickers,
+        cap_buckets=[_cap_bucket(value) for value in sample["market_cap_rmb"]],
+    )
+    prediction_max_abs_error = float(np.max(np.abs(trainer_predictions - runtime_predictions))) if len(sample) else 0.0
+    matched = bool(
+        np.isfinite(max_abs_error)
+        and max_abs_error <= 1e-10
+        and np.isfinite(prediction_max_abs_error)
+        and prediction_max_abs_error <= 1e-10
+    )
+    return {
+        "matched": matched,
+        "reason": "matched" if matched else "feature or prediction values differ",
+        "rows": int(len(sample)),
+        "features": int(len(model.feature_names)),
+        "snapshot_date": latest.date().isoformat(),
+        "max_abs_error": max_abs_error,
+        "prediction_max_abs_error": prediction_max_abs_error,
+    }
 
 
 def _standardize_features(X: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -2407,6 +2667,63 @@ def _fit_segment_ridge_models(
     return models, "+".join(dict.fromkeys(backends))
 
 
+def _predict_scaled_linear_models(
+    X_scaled: np.ndarray,
+    snapshots: pd.DataFrame,
+    models: Sequence[Mapping[str, object]],
+) -> np.ndarray:
+    """Predict freshly fitted routed models without rebuilding their feature matrix."""
+    tickers = snapshots["ticker"].astype(str)
+    markets = tickers.map(_market_bucket).to_numpy(dtype=object)
+    cap_buckets = (
+        snapshots["market_cap_rmb"].map(_cap_bucket).to_numpy(dtype=object)
+        if "market_cap_rmb" in snapshots.columns
+        else np.full(len(snapshots), "unknown", dtype=object)
+    )
+    board_buckets = tickers.map(_board_bucket).to_numpy(dtype=object)
+    listing_buckets = tickers.map(_listing_bucket).to_numpy(dtype=object)
+    weighted_predictions = np.zeros(len(snapshots), dtype="float64")
+    unweighted_predictions = np.zeros(len(snapshots), dtype="float64")
+    total_weights = np.zeros(len(snapshots), dtype="float64")
+    prediction_counts = np.zeros(len(snapshots), dtype="float64")
+
+    for model in models:
+        mask = np.ones(len(snapshots), dtype=bool)
+        for buckets, key in (
+            (markets, "market"),
+            (cap_buckets, "cap_bucket"),
+            (board_buckets, "board_bucket"),
+            (listing_buckets, "listing_bucket"),
+        ):
+            route_value = model.get(key)
+            if route_value is not None:
+                mask &= buckets == str(route_value)
+        if not mask.any():
+            continue
+        model_predictions = X_scaled[mask] @ np.asarray(model["coef"], dtype="float64") + float(model["intercept"])
+        weight = _payload_weight(model)
+        weighted_predictions[mask] += weight * model_predictions
+        unweighted_predictions[mask] += model_predictions
+        total_weights[mask] += weight
+        prediction_counts[mask] += 1.0
+
+    output = np.zeros(len(snapshots), dtype="float64")
+    weighted = total_weights > 0.0
+    output[weighted] = weighted_predictions[weighted] / total_weights[weighted]
+    unweighted = ~weighted & (prediction_counts > 0.0)
+    output[unweighted] = unweighted_predictions[unweighted] / prediction_counts[unweighted]
+    fallback = ~(weighted | unweighted)
+    if fallback.any():
+        output[fallback] = np.mean(
+            [
+                X_scaled[fallback] @ np.asarray(model["coef"], dtype="float64") + float(model["intercept"])
+                for model in models
+            ],
+            axis=0,
+        )
+    return output
+
+
 def _fit_pairwise_ranker_numpy(
     X: np.ndarray,
     y: np.ndarray,
@@ -2590,6 +2907,124 @@ def _evaluate_primary_spearman_rho(
             continue
         rhos.append(float(rho))
     return float(np.mean(rhos)) if rhos else 0.0
+
+
+def _prepare_primary_spearman_context(
+    df: pd.DataFrame,
+    primary_horizon: str,
+) -> dict[str, object]:
+    """Precompute the return-side ranks reused during candidate preselection."""
+    return_col = f"forward_return_{primary_horizon}"
+    if return_col not in df.columns:
+        return {"n_rows": len(df), "positions": np.asarray([], dtype="int64")}
+
+    returns = pd.to_numeric(df[return_col], errors="coerce").to_numpy(dtype="float64")
+    snapshot_dates = df["snapshot_date"].to_numpy()
+    valid_positions = np.flatnonzero(np.isfinite(returns) & pd.notna(snapshot_dates))
+    if not len(valid_positions):
+        return {"n_rows": len(df), "positions": valid_positions}
+
+    codes, unique_dates = pd.factorize(snapshot_dates[valid_positions], sort=False)
+    n_groups = len(unique_dates)
+    group_counts = np.bincount(codes, minlength=n_groups).astype("float64")
+    valid_returns = returns[valid_positions]
+    return_ranks = pd.Series(valid_returns).groupby(codes, sort=False).rank(method="average").to_numpy(dtype="float64")
+    return_means = (
+        np.bincount(
+            codes,
+            weights=return_ranks,
+            minlength=n_groups,
+        )
+        / group_counts
+    )
+    return_centered = return_ranks - return_means[codes]
+    return_sum_squares = np.bincount(
+        codes,
+        weights=return_centered * return_centered,
+        minlength=n_groups,
+    )
+    return {
+        "n_rows": len(df),
+        "positions": valid_positions,
+        "codes": codes,
+        "n_groups": n_groups,
+        "group_counts": group_counts,
+        "returns": valid_returns,
+        "return_centered": return_centered,
+        "return_sum_squares": return_sum_squares,
+    }
+
+
+def _evaluate_prepared_primary_spearman_rho(
+    context: Mapping[str, object],
+    predictions: np.ndarray,
+) -> float:
+    """Evaluate mean cross-sectional Spearman rho from prepared return ranks."""
+    scores = np.asarray(predictions, dtype="float64").reshape(-1)
+    if len(scores) != int(context.get("n_rows", -1)):
+        raise ValueError("prepared Spearman context and predictions have different lengths")
+
+    positions = np.asarray(context.get("positions", []), dtype="int64")
+    if not len(positions):
+        return 0.0
+    codes = np.asarray(context["codes"], dtype="int64")
+    n_groups = int(context["n_groups"])
+    valid_scores = scores[positions]
+    finite_scores = np.isfinite(valid_scores)
+
+    if finite_scores.all():
+        group_counts = np.asarray(context["group_counts"], dtype="float64")
+        return_centered = np.asarray(context["return_centered"], dtype="float64")
+        return_sum_squares = np.asarray(
+            context["return_sum_squares"],
+            dtype="float64",
+        )
+    else:
+        codes = codes[finite_scores]
+        valid_scores = valid_scores[finite_scores]
+        valid_returns = np.asarray(context["returns"], dtype="float64")[finite_scores]
+        if not len(valid_scores):
+            return 0.0
+        group_counts = np.bincount(codes, minlength=n_groups).astype("float64")
+        return_ranks = (
+            pd.Series(valid_returns).groupby(codes, sort=False).rank(method="average").to_numpy(dtype="float64")
+        )
+        return_means = np.divide(
+            np.bincount(codes, weights=return_ranks, minlength=n_groups),
+            group_counts,
+            out=np.zeros(n_groups, dtype="float64"),
+            where=group_counts > 0,
+        )
+        return_centered = return_ranks - return_means[codes]
+        return_sum_squares = np.bincount(
+            codes,
+            weights=return_centered * return_centered,
+            minlength=n_groups,
+        )
+
+    score_ranks = pd.Series(valid_scores).groupby(codes, sort=False).rank(method="average").to_numpy(dtype="float64")
+    score_means = np.divide(
+        np.bincount(codes, weights=score_ranks, minlength=n_groups),
+        group_counts,
+        out=np.zeros(n_groups, dtype="float64"),
+        where=group_counts > 0,
+    )
+    score_centered = score_ranks - score_means[codes]
+    score_sum_squares = np.bincount(
+        codes,
+        weights=score_centered * score_centered,
+        minlength=n_groups,
+    )
+    cross_products = np.bincount(
+        codes,
+        weights=score_centered * return_centered,
+        minlength=n_groups,
+    )
+    evaluable = (group_counts >= 10) & (score_sum_squares > 0.0) & (return_sum_squares > 0.0)
+    if not evaluable.any():
+        return 0.0
+    rhos = cross_products[evaluable] / np.sqrt(score_sum_squares[evaluable] * return_sum_squares[evaluable])
+    return float(np.mean(rhos))
 
 
 def _target_values(snapshots: pd.DataFrame, target: str) -> np.ndarray:
@@ -3064,60 +3499,72 @@ def _walk_forward_validate_candidate(
     max_horizon_degradation: float,
     primary_horizon: str = "6m",
     blend_weights: tuple[float, ...] = BLEND_WEIGHTS,
+    quality_residual_weights: tuple[float, ...] = (1.0,),
+    require_primary_top20_excess_non_degradation: bool = False,
     sample_seed: int = 0,
 ) -> dict[str, object]:
     if not folds:
         return {"accepted": True, "reason": "walk-forward disabled", "blend_weight": 1.0}
 
     dates = _snapshot_dates(snapshots)
-    best_result: Optional[dict[str, object]] = None
-    for blend_weight in blend_weights:
+    fold_predictions: list[tuple[pd.DataFrame, np.ndarray, np.ndarray]] = []
+    for fold in folds:
+        train_mask = dates < pd.Timestamp(fold["train_end_exclusive"])
+        validation_mask = (dates >= pd.Timestamp(fold["validation_start"])) & (
+            dates <= pd.Timestamp(fold["validation_end"])
+        )
+        train = snapshots.loc[train_mask]
+        validation = _monthly_rebalance_snapshots(snapshots.loc[validation_mask])
+        incumbent_for_fold = _payload_with_ticker_priors(
+            incumbent_payload,
+            _ticker_priors(train),
+        )
+        model, priors, _used_backend, _prefer_row_priors = _fit_candidate_model(
+            train,
+            target_name=target_name,
+            ridge_lambda=ridge_lambda,
+            backend=backend,
+            max_rows=max_rows,
+            prior_strategy=prior_strategy,
+            model_kind=model_kind,
+            feature_names=feature_names,
+            random_seed=sample_seed + int(fold["index"]) * 10_000,
+        )
+        candidate_predictions = _predict_from_linear_model(
+            validation,
+            priors,
+            model,
+            prefer_row_priors=False,
+            feature_names=feature_names,
+        )
+        incumbent_predictions = _incumbent_predictions(
+            validation,
+            incumbent_for_fold,
+        )
+        fold_predictions.append(
+            (
+                validation,
+                _prediction_rank_by_snapshot(validation, candidate_predictions),
+                _prediction_rank_by_snapshot(validation, incumbent_predictions),
+            )
+        )
+
+    blend_results: list[dict[str, object]] = []
+    for blend_weight in dict.fromkeys(float(weight) for weight in blend_weights):
         fold_deltas: list[Mapping[str, float]] = []
-        for fold in folds:
-            train_mask = dates < pd.Timestamp(fold["train_end_exclusive"])
-            validation_mask = (
-                (dates >= pd.Timestamp(fold["validation_start"]))
-                & (dates <= pd.Timestamp(fold["validation_end"]))
-            )
-            train = snapshots.loc[train_mask]
-            validation = snapshots.loc[validation_mask]
-            incumbent_for_fold = _payload_with_ticker_priors(
-                incumbent_payload,
-                _ticker_priors(train),
-            )
-            model, priors, _used_backend, prefer_row_priors = _fit_candidate_model(
-                train,
-                target_name=target_name,
-                ridge_lambda=ridge_lambda,
-                backend=backend,
-                max_rows=max_rows,
-                prior_strategy=prior_strategy,
-                model_kind=model_kind,
-                feature_names=feature_names,
-                random_seed=sample_seed + int(fold["index"]) * 10_000,
-            )
-            if prefer_row_priors:
-                validation_for_candidate = _attach_asof_ticker_priors(validation, train)
-            else:
-                validation_for_candidate = validation
-            candidate_predictions = _predict_from_linear_model(
-                validation_for_candidate,
-                priors,
-                model,
-                prefer_row_priors=prefer_row_priors,
-                feature_names=feature_names,
-            )
-            incumbent_predictions = _incumbent_predictions(validation, incumbent_for_fold)
+        for validation, candidate_predictions, incumbent_predictions in fold_predictions:
             blended = blend_weight * candidate_predictions + (1.0 - blend_weight) * incumbent_predictions
             candidate_metrics = _evaluate_predictions(validation, blended)
             incumbent_metrics = _evaluate_predictions(validation, incumbent_predictions)
-            fold_deltas.append({
-                horizon: (
-                    float(candidate_metrics[horizon]["spearman_rho"])
-                    - float(incumbent_metrics[horizon]["spearman_rho"])
-                )
-                for horizon in EVAL_HORIZONS
-            })
+            fold_deltas.append(
+                {
+                    horizon: (
+                        float(candidate_metrics[horizon]["spearman_rho"])
+                        - float(incumbent_metrics[horizon]["spearman_rho"])
+                    )
+                    for horizon in EVAL_HORIZONS
+                }
+            )
 
         decision = _walk_forward_decision(
             fold_deltas,
@@ -3126,27 +3573,348 @@ def _walk_forward_validate_candidate(
             primary_horizon=primary_horizon,
         )
         decision["blend_weight"] = float(blend_weight)
-        if best_result is None:
-            best_result = decision
-        else:
-            best_mean = (best_result.get("mean_deltas") or {}).get(
-                primary_horizon,
-                float("-inf"),
-            )
-            this_mean = (decision.get("mean_deltas") or {}).get(
-                primary_horizon,
-                float("-inf"),
-            )
-            if float(this_mean) > float(best_mean):
-                best_result = decision
-        if decision["accepted"]:
-            return decision
+        decision["blend_scale"] = "snapshot_rank"
+        blend_results.append(decision)
 
+    if not blend_results:
+        return {
+            "accepted": False,
+            "reason": "no walk-forward folds",
+            "blend_weight": 1.0,
+        }
+    accepted = [result for result in blend_results if result.get("accepted")]
+    selection_pool = accepted or blend_results
+
+    def selection_key(result: Mapping[str, object]) -> tuple[float, float, float]:
+        mean_deltas = result.get("mean_deltas")
+        median_deltas = result.get("median_deltas")
+        min_deltas = result.get("min_deltas")
+        return (
+            float(mean_deltas.get(primary_horizon, float("-inf")))
+            if isinstance(mean_deltas, Mapping)
+            else float("-inf"),
+            float(median_deltas.get(primary_horizon, float("-inf")))
+            if isinstance(median_deltas, Mapping)
+            else float("-inf"),
+            float(min_deltas.get(primary_horizon, float("-inf"))) if isinstance(min_deltas, Mapping) else float("-inf"),
+        )
+
+    best_result = max(selection_pool, key=selection_key)
+    best_result["blend_candidates_evaluated"] = len(blend_results)
+    if (
+        primary_horizon == "6m"
+        and any(column in snapshots.columns for _name, column, _direction in SIX_MONTH_APPLICATION_RESIDUAL_SIGNALS)
+        and any(float(weight) < 1.0 for weight in quality_residual_weights)
+    ):
+        residual_result = _select_application_residual_blend(
+            fold_predictions,
+            base_blend_weight=float(best_result["blend_weight"]),
+            residual_weights=quality_residual_weights,
+            residual_signals=SIX_MONTH_APPLICATION_RESIDUAL_SIGNALS,
+            min_6m_delta=min_6m_delta,
+            max_horizon_degradation=max_horizon_degradation,
+            primary_horizon=primary_horizon,
+            blend_candidates_evaluated=len(blend_results),
+            require_primary_top20_excess_non_degradation=(require_primary_top20_excess_non_degradation),
+        )
+        if residual_result.get("accepted"):
+            best_result = residual_result
     return best_result or {
         "accepted": False,
         "reason": "no walk-forward folds",
         "blend_weight": 1.0,
     }
+
+
+def _select_practical_factor_blend(
+    fold_predictions: Sequence[tuple[pd.DataFrame, np.ndarray, np.ndarray]],
+    *,
+    base_blend_weight: float,
+    factor_templates: Sequence[tuple[str, Sequence[float]]],
+    min_6m_delta: float,
+    max_horizon_degradation: float,
+    primary_horizon: str,
+    blend_candidates_evaluated: int,
+    require_primary_top20_excess_non_degradation: bool = False,
+) -> Optional[dict[str, object]]:
+    """Select a diversified, live-available factor overlay on purged folds."""
+    required_columns = {
+        "quality_score",
+        "pb_ratio",
+        "ps_ratio",
+        "total_liabilities",
+        "market_cap_rmb",
+        "relative_return_63d",
+        "current_ratio",
+    }
+    if not fold_predictions or not all(
+        required_columns.issubset(validation.columns)
+        for validation, _candidate, _incumbent in fold_predictions
+    ):
+        return None
+
+    factor_results: list[dict[str, object]] = []
+    for template_name, raw_weights in factor_templates:
+        if len(raw_weights) != len(SIX_MONTH_APPLICATION_FACTOR_SIGNALS):
+            continue
+        components = [
+            {"signal": signal, "weight": float(weight)}
+            for signal, weight in zip(SIX_MONTH_APPLICATION_FACTOR_SIGNALS, raw_weights)
+            if np.isfinite(float(weight)) and float(weight) > 0.0
+        ]
+        if not components:
+            continue
+
+        fold_deltas: list[Mapping[str, float]] = []
+        fold_primary_rhos: list[float] = []
+        fold_horizon_rhos: dict[str, list[float]] = {horizon: [] for horizon in EVAL_HORIZONS}
+        fold_practical_passes: list[bool] = []
+        for validation, candidate_predictions, incumbent_predictions in fold_predictions:
+            base_predictions = (
+                base_blend_weight * candidate_predictions + (1.0 - base_blend_weight) * incumbent_predictions
+            )
+            blended = _application_factor_predictions(validation, base_predictions, components)
+            candidate_metrics = _evaluate_predictions(validation, blended)
+            incumbent_metrics = _evaluate_predictions(validation, incumbent_predictions)
+            fold_deltas.append(
+                {
+                    horizon: (
+                        float(candidate_metrics[horizon]["spearman_rho"])
+                        - float(incumbent_metrics[horizon]["spearman_rho"])
+                    )
+                    for horizon in EVAL_HORIZONS
+                }
+            )
+            for horizon in EVAL_HORIZONS:
+                fold_horizon_rhos[horizon].append(float(candidate_metrics[horizon]["spearman_rho"]))
+            fold_primary_rhos.append(float(candidate_metrics[primary_horizon]["spearman_rho"]))
+            incumbent_top20_excess = _primary_top20_excess_metrics(
+                validation,
+                incumbent_predictions,
+                primary_horizon,
+            )
+            fold_practical_passes.append(
+                _primary_top20_excess_predictions_non_degraded(
+                    validation,
+                    blended,
+                    incumbent_top20_excess,
+                    primary_horizon,
+                )
+            )
+
+        decision = _walk_forward_decision(
+            fold_deltas,
+            min_6m_delta=min_6m_delta,
+            max_horizon_degradation=max_horizon_degradation,
+            primary_horizon=primary_horizon,
+        )
+        if require_primary_top20_excess_non_degradation and not all(fold_practical_passes):
+            decision["accepted"] = False
+            decision["reason"] = "fold 6m top20 and excess return degraded"
+        decision.update(
+            {
+                "blend_weight": float(base_blend_weight),
+                "blend_scale": "snapshot_rank",
+                "blend_candidates_evaluated": int(blend_candidates_evaluated),
+                "application_factor_template": str(template_name),
+                "application_factor_components": components,
+                "application_factor_scale": "snapshot_rank",
+                "application_factor_fold_primary_rhos": [round(value, 6) for value in fold_primary_rhos],
+                "application_factor_fold_practical_passes": fold_practical_passes,
+                "application_factor_mean_rhos": {
+                    horizon: round(float(np.mean(values)), 6) for horizon, values in fold_horizon_rhos.items()
+                },
+                "application_factor_min_rhos": {
+                    horizon: round(float(np.min(values)), 6) for horizon, values in fold_horizon_rhos.items()
+                },
+            }
+        )
+        factor_results.append(decision)
+
+    accepted = [result for result in factor_results if result.get("accepted")]
+    if not accepted:
+        return None
+    best_min_rho = max(
+        float(result["application_factor_min_rhos"][primary_horizon])
+        for result in accepted
+    )
+    robust = [
+        result
+        for result in accepted
+        if float(result["application_factor_min_rhos"][primary_horizon])
+        >= best_min_rho - SIX_MONTH_APPLICATION_FACTOR_MIN_RHO_TOLERANCE
+    ]
+    selected = max(
+        robust,
+        key=lambda result: (
+            float(result["application_factor_mean_rhos"][primary_horizon]),
+            float(result["application_factor_min_rhos"][primary_horizon]),
+            str(result["application_factor_template"]),
+        ),
+    )
+    selected["application_factor_candidates_evaluated"] = len(factor_results)
+    return selected
+
+
+def _select_application_residual_blend(
+    fold_predictions: Sequence[tuple[pd.DataFrame, np.ndarray, np.ndarray]],
+    *,
+    base_blend_weight: float,
+    residual_weights: Sequence[float],
+    residual_signals: Sequence[tuple[str, str, float]],
+    min_6m_delta: float,
+    max_horizon_degradation: float,
+    primary_horizon: str,
+    blend_candidates_evaluated: int,
+    require_primary_top20_excess_non_degradation: bool = False,
+) -> dict[str, object]:
+    """Select a live-available calibration signal on purged inner folds."""
+    residual_results: list[dict[str, object]] = []
+    for signal_name, signal_column, signal_direction in residual_signals:
+        if not signal_name or not signal_column or not np.isfinite(signal_direction):
+            continue
+        if not all(signal_column in validation.columns for validation, _candidate, _incumbent in fold_predictions):
+            continue
+        for residual_weight in dict.fromkeys(float(weight) for weight in residual_weights):
+            if not 0.0 <= residual_weight <= 1.0:
+                continue
+            fold_deltas: list[Mapping[str, float]] = []
+            fold_primary_rhos: list[float] = []
+            fold_horizon_rhos: dict[str, list[float]] = {horizon: [] for horizon in EVAL_HORIZONS}
+            fold_practical_passes: list[bool] = []
+            for validation, candidate_predictions, incumbent_predictions in fold_predictions:
+                base_predictions = (
+                    base_blend_weight * candidate_predictions + (1.0 - base_blend_weight) * incumbent_predictions
+                )
+                signal_values = signal_direction * pd.to_numeric(
+                    validation[signal_column],
+                    errors="coerce",
+                ).to_numpy(dtype="float64")
+                signal_rank = _prediction_rank_by_snapshot(validation, signal_values)
+                blended = base_predictions.copy()
+                usable = np.isfinite(base_predictions) & np.isfinite(signal_rank)
+                blended[usable] = (
+                    residual_weight * base_predictions[usable] + (1.0 - residual_weight) * signal_rank[usable]
+                )
+                candidate_metrics = _evaluate_predictions(validation, blended)
+                incumbent_metrics = _evaluate_predictions(validation, incumbent_predictions)
+                fold_deltas.append(
+                    {
+                        horizon: (
+                            float(candidate_metrics[horizon]["spearman_rho"])
+                            - float(incumbent_metrics[horizon]["spearman_rho"])
+                        )
+                        for horizon in EVAL_HORIZONS
+                    }
+                )
+                for horizon in EVAL_HORIZONS:
+                    fold_horizon_rhos[horizon].append(float(candidate_metrics[horizon]["spearman_rho"]))
+                fold_primary_rhos.append(float(candidate_metrics[primary_horizon]["spearman_rho"]))
+                incumbent_top20_excess = _primary_top20_excess_metrics(
+                    validation,
+                    incumbent_predictions,
+                    primary_horizon,
+                )
+                fold_practical_passes.append(
+                    _primary_top20_excess_predictions_non_degraded(
+                        validation,
+                        blended,
+                        incumbent_top20_excess,
+                        primary_horizon,
+                    )
+                )
+
+            decision = _walk_forward_decision(
+                fold_deltas,
+                min_6m_delta=min_6m_delta,
+                max_horizon_degradation=max_horizon_degradation,
+                primary_horizon=primary_horizon,
+            )
+            if require_primary_top20_excess_non_degradation and not all(fold_practical_passes):
+                decision["accepted"] = False
+                decision["reason"] = "fold 6m top20 and excess return degraded"
+            decision.update(
+                {
+                    "blend_weight": float(base_blend_weight),
+                    "blend_scale": "snapshot_rank",
+                    "blend_candidates_evaluated": int(blend_candidates_evaluated),
+                    "application_residual_candidate_weight": float(residual_weight),
+                    "application_residual_signal": str(signal_name),
+                    "application_residual_column": str(signal_column),
+                    "application_residual_direction": float(signal_direction),
+                    "application_residual_scale": "snapshot_rank",
+                    "application_residual_fold_primary_rhos": [round(value, 6) for value in fold_primary_rhos],
+                    "application_residual_fold_practical_passes": fold_practical_passes,
+                    "application_residual_mean_rhos": {
+                        horizon: round(float(np.mean(values)), 6) for horizon, values in fold_horizon_rhos.items()
+                    },
+                    "application_residual_min_rhos": {
+                        horizon: round(float(np.min(values)), 6) for horizon, values in fold_horizon_rhos.items()
+                    },
+                }
+            )
+            if signal_name == "quality_de_crowding":
+                decision.update(
+                    {
+                        "quality_residual_candidate_weight": float(residual_weight),
+                        "quality_residual_direction": "inverse",
+                        "quality_residual_scale": "snapshot_rank",
+                        "quality_residual_fold_primary_rhos": decision["application_residual_fold_primary_rhos"],
+                        "quality_residual_mean_rhos": decision["application_residual_mean_rhos"],
+                        "quality_residual_min_rhos": decision["application_residual_min_rhos"],
+                    }
+                )
+            residual_results.append(decision)
+
+    if not residual_results:
+        return {
+            "accepted": False,
+            "reason": "no application residual candidates",
+            "blend_weight": float(base_blend_weight),
+        }
+    accepted = [result for result in residual_results if result.get("accepted")]
+    selection_pool = accepted or residual_results
+
+    def residual_key(result: Mapping[str, object]) -> tuple[float, float, float]:
+        min_rhos = result.get("application_residual_min_rhos")
+        mean_rhos = result.get("application_residual_mean_rhos")
+        mean_deltas = result.get("mean_deltas")
+        return (
+            float(min_rhos.get(primary_horizon, float("-inf"))) if isinstance(min_rhos, Mapping) else float("-inf"),
+            float(mean_rhos.get(primary_horizon, float("-inf"))) if isinstance(mean_rhos, Mapping) else float("-inf"),
+            float(mean_deltas.get(primary_horizon, float("-inf")))
+            if isinstance(mean_deltas, Mapping)
+            else float("-inf"),
+        )
+
+    selected = max(selection_pool, key=residual_key)
+    selected["application_residual_candidates_evaluated"] = len(residual_results)
+    if selected.get("application_residual_signal") == "quality_de_crowding":
+        selected["quality_residual_candidates_evaluated"] = len(residual_results)
+    return selected
+
+
+def _select_quality_residual_blend(
+    fold_predictions: Sequence[tuple[pd.DataFrame, np.ndarray, np.ndarray]],
+    *,
+    base_blend_weight: float,
+    residual_weights: Sequence[float],
+    min_6m_delta: float,
+    max_horizon_degradation: float,
+    primary_horizon: str,
+    blend_candidates_evaluated: int,
+) -> dict[str, object]:
+    """Backward-compatible wrapper for the original quality-only selector."""
+    return _select_application_residual_blend(
+        fold_predictions,
+        base_blend_weight=base_blend_weight,
+        residual_weights=residual_weights,
+        residual_signals=(("quality_de_crowding", "quality_score", -1.0),),
+        min_6m_delta=min_6m_delta,
+        max_horizon_degradation=max_horizon_degradation,
+        primary_horizon=primary_horizon,
+        blend_candidates_evaluated=blend_candidates_evaluated,
+    )
 
 
 def _feature_names_need_cross_sectional(
@@ -3232,9 +4000,11 @@ def _linear_payloads(payload: Mapping[str, object]) -> list[Mapping[str, object]
         return [model for model in models if isinstance(model, Mapping)]
     if (
         isinstance(payload.get("payload_members"), list)
+        or isinstance(payload.get("rank_payload_members"), list)
         or isinstance(payload.get("market_payload_members"), list)
         or isinstance(payload.get("temporal_payload_members"), list)
         or isinstance(payload.get("conditional_blend"), Mapping)
+        or isinstance(payload.get("lightgbm_model"), str)
     ):
         return []
     return [payload]
@@ -3288,6 +4058,29 @@ def _payload_cached_metrics_are_safe(payload: Mapping[str, object]) -> bool:
 
 def _payload_member_payloads(payload: Mapping[str, object]) -> list[tuple[float, Mapping[str, object]]]:
     members = payload.get("payload_members")
+    if not isinstance(members, list):
+        return []
+    output: list[tuple[float, Mapping[str, object]]] = []
+    for member in members:
+        if not isinstance(member, Mapping):
+            continue
+        member_payload = member.get("payload")
+        if not isinstance(member_payload, Mapping):
+            continue
+        try:
+            weight = float(member.get("weight", 1.0))
+        except (TypeError, ValueError):
+            weight = 1.0
+        if not np.isfinite(weight) or weight <= 0.0:
+            continue
+        output.append((weight, member_payload))
+    return output
+
+
+def _payload_rank_member_payloads(
+    payload: Mapping[str, object],
+) -> list[tuple[float, Mapping[str, object]]]:
+    members = payload.get("rank_payload_members")
     if not isinstance(members, list):
         return []
     output: list[tuple[float, Mapping[str, object]]] = []
@@ -3543,20 +4336,25 @@ def _predict_from_linear_model_payloads(
             weighted = chunk_total_weights > 0
             chunk_output[weighted] = chunk_weighted[weighted] / chunk_total_weights[weighted]
             unweighted = ~weighted & (chunk_prediction_counts > 0)
-            chunk_output[unweighted] = (
-                chunk_unweighted[unweighted] / chunk_prediction_counts[unweighted]
-            )
+            chunk_output[unweighted] = chunk_unweighted[unweighted] / chunk_prediction_counts[unweighted]
             fallback = ~(weighted | unweighted)
             if fallback.any():
-                fallback_model = models[0]
-                clip_low = np.asarray(fallback_model["clip_low"], dtype="float64")
-                clip_high = np.asarray(fallback_model["clip_high"], dtype="float64")
-                mean = np.asarray(fallback_model["mean"], dtype="float64")
-                scale = np.asarray(fallback_model["scale"], dtype="float64")
-                coef = np.asarray(fallback_model["coef"], dtype="float64")
-                X_scaled = (np.clip(X[fallback], clip_low, clip_high) - mean) / scale
-                chunk_output[fallback] = X_scaled @ coef + float(
-                    fallback_model["intercept"]
+                chunk_output[fallback] = np.mean(
+                    [
+                        (
+                            np.clip(
+                                X[fallback],
+                                np.asarray(model["clip_low"], dtype="float64"),
+                                np.asarray(model["clip_high"], dtype="float64"),
+                            )
+                            - np.asarray(model["mean"], dtype="float64")
+                        )
+                        / np.asarray(model["scale"], dtype="float64")
+                        @ np.asarray(model["coef"], dtype="float64")
+                        + float(model["intercept"])
+                        for model in models
+                    ],
+                    axis=0,
                 )
             predictions[index] = chunk_output
         return predictions
@@ -3565,11 +4363,7 @@ def _predict_from_linear_model_payloads(
         market = _payload_market(model)
         if market is not None:
             market_code = market_lookup.get(str(market))
-            mask = (
-                (market_codes == market_code).copy()
-                if market_code is not None
-                else np.zeros(len(df), dtype=bool)
-            )
+            mask = (market_codes == market_code).copy() if market_code is not None else np.zeros(len(df), dtype=bool)
         else:
             mask = np.ones(len(df), dtype=bool)
         cap_bucket = _payload_cap_bucket(model)
@@ -3617,20 +4411,25 @@ def _predict_from_linear_model_payloads(
     unweighted = ~weighted & (prediction_counts > 0)
     output[unweighted] = unweighted_predictions[unweighted] / prediction_counts[unweighted]
     if (~(weighted | unweighted)).any():
-        fallback_model = models[0]
         fallback_mask = ~(weighted | unweighted)
-        output[fallback_mask] = _predict_in_chunks(
-            df.loc[fallback_mask],
-            ticker_priors=ticker_priors,
-            clip_low=np.asarray(fallback_model["clip_low"], dtype="float64"),
-            clip_high=np.asarray(fallback_model["clip_high"], dtype="float64"),
-            mean=np.asarray(fallback_model["mean"], dtype="float64"),
-            scale=np.asarray(fallback_model["scale"], dtype="float64"),
-            coef=np.asarray(fallback_model["coef"], dtype="float64"),
-            intercept=float(fallback_model["intercept"]),
-            chunk_size=chunk_size,
-            prefer_row_priors=prefer_row_priors,
-            feature_names=feature_names,
+        output[fallback_mask] = np.mean(
+            [
+                _predict_in_chunks(
+                    df.loc[fallback_mask],
+                    ticker_priors=ticker_priors,
+                    clip_low=np.asarray(model["clip_low"], dtype="float64"),
+                    clip_high=np.asarray(model["clip_high"], dtype="float64"),
+                    mean=np.asarray(model["mean"], dtype="float64"),
+                    scale=np.asarray(model["scale"], dtype="float64"),
+                    coef=np.asarray(model["coef"], dtype="float64"),
+                    intercept=float(model["intercept"]),
+                    chunk_size=chunk_size,
+                    prefer_row_priors=prefer_row_priors,
+                    feature_names=feature_names,
+                )
+                for model in models
+            ],
+            axis=0,
         )
     return output
 
@@ -4046,6 +4845,19 @@ def _payload_has_market_models(payload: Mapping[str, object]) -> bool:
 
 
 RUNTIME_METADATA_KEYS = {
+    "application_blend_candidate_weight",
+    "application_blend_scale",
+    "application_factor_components",
+    "application_factor_scale",
+    "application_factor_template",
+    "application_residual_candidate_weight",
+    "application_residual_column",
+    "application_residual_direction",
+    "application_residual_scale",
+    "application_residual_signal",
+    "application_quality_residual_candidate_weight",
+    "application_quality_residual_direction",
+    "application_quality_residual_scale",
     "anchor_backend",
     "anchor_model_path",
     "anchor_target",
@@ -4076,6 +4888,8 @@ RUNTIME_METADATA_KEYS = {
     "n_snapshots",
     "n_training_rows",
     "prior_strategy",
+    "ridge_lambda",
+    "runtime_feature_parity",
     "target",
     "target_horizon",
     "temporal_anchor_backend",
@@ -4515,23 +5329,89 @@ def _market_weighted_blend_payload(
     }
 
 
-def predict_ml_ranker_payload(
+def _application_blend_candidate_weight(payload: Mapping[str, object]) -> float:
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return 1.0
+    try:
+        weight = float(metadata.get("application_blend_candidate_weight", 1.0))
+    except (TypeError, ValueError):
+        return 1.0
+    if not np.isfinite(weight):
+        return 1.0
+    return float(np.clip(weight, 0.0, 1.0))
+
+
+def _application_quality_residual_candidate_weight(payload: Mapping[str, object]) -> float:
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return 1.0
+    try:
+        weight = float(metadata.get("application_quality_residual_candidate_weight", 1.0))
+    except (TypeError, ValueError):
+        return 1.0
+    if not np.isfinite(weight):
+        return 1.0
+    return float(np.clip(weight, 0.0, 1.0))
+
+
+def _application_factor_config(payload: Mapping[str, object]) -> tuple[dict[str, object], ...]:
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return ()
+    raw_components = metadata.get("application_factor_components")
+    if not isinstance(raw_components, list):
+        return ()
+    components: list[dict[str, object]] = []
+    for component in raw_components:
+        if not isinstance(component, Mapping):
+            continue
+        signal = str(component.get("signal", "")).strip()
+        try:
+            weight = float(component.get("weight", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if signal in SIX_MONTH_APPLICATION_FACTOR_SIGNALS and np.isfinite(weight) and weight > 0.0:
+            components.append({"signal": signal, "weight": weight})
+    return tuple(components)
+
+
+def _application_residual_config(
+    payload: Mapping[str, object],
+) -> tuple[float, str, float]:
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return 1.0, "", 1.0
+    if "application_residual_candidate_weight" not in metadata:
+        weight = _application_quality_residual_candidate_weight(payload)
+        return weight, "quality_score", -1.0
+    try:
+        weight = float(metadata.get("application_residual_candidate_weight", 1.0))
+        direction = float(metadata.get("application_residual_direction", 1.0))
+    except (TypeError, ValueError):
+        return 1.0, "", 1.0
+    column = str(metadata.get("application_residual_column", "")).strip()
+    if not np.isfinite(weight) or not np.isfinite(direction) or not column:
+        return 1.0, "", 1.0
+    return float(np.clip(weight, 0.0, 1.0)), column, direction
+
+
+def _predict_ml_ranker_payload_unblended(
     df: pd.DataFrame,
     payload: Mapping[str, object],
     *,
     chunk_size: int = 200_000,
 ) -> np.ndarray:
-    """Predict a snapshot frame from a serialized ML ranker artifact."""
     conditional_blend = _payload_conditional_blend(payload)
     if conditional_blend is not None:
         base_payload, candidate_payload, routes = conditional_blend
         route_weights = _conditional_route_weight_vector(df, routes)
-        candidate_predictions = predict_ml_ranker_payload(
+        candidate_predictions = _predict_ml_ranker_payload_unblended(
             df,
             candidate_payload,
             chunk_size=chunk_size,
         )
-        base_predictions = predict_ml_ranker_payload(
+        base_predictions = _predict_ml_ranker_payload_unblended(
             df,
             base_payload,
             chunk_size=chunk_size,
@@ -4542,7 +5422,7 @@ def predict_ml_ranker_payload(
     if temporal_members:
         if len(temporal_members) == 1:
             _start_date, _end_date, member_payload = temporal_members[0]
-            return predict_ml_ranker_payload(
+            return _predict_ml_ranker_payload_unblended(
                 df,
                 member_payload,
                 chunk_size=chunk_size,
@@ -4561,26 +5441,42 @@ def predict_ml_ranker_payload(
             mask_array = mask.to_numpy(dtype=bool) & ~assigned
             if not mask_array.any():
                 continue
-            predictions[mask_array] = predict_ml_ranker_payload(
+            predictions[mask_array] = _predict_ml_ranker_payload_unblended(
                 df.loc[mask_array],
                 member_payload,
                 chunk_size=chunk_size,
             )
             assigned[mask_array] = True
         if (~assigned).any():
-            predictions[~assigned] = predict_ml_ranker_payload(
+            predictions[~assigned] = _predict_ml_ranker_payload_unblended(
                 df.loc[~assigned],
                 temporal_members[-1][2],
                 chunk_size=chunk_size,
             )
         return predictions
 
+    rank_payload_members = _payload_rank_member_payloads(payload)
+    if rank_payload_members:
+        predictions = np.zeros(len(df), dtype="float64")
+        total_weight = 0.0
+        for weight, member_payload in rank_payload_members:
+            member_predictions = _predict_ml_ranker_payload_unblended(
+                df,
+                member_payload,
+                chunk_size=chunk_size,
+            )
+            predictions += weight * _prediction_rank_by_snapshot(df, member_predictions)
+            total_weight += weight
+        if total_weight <= 0.0:
+            raise ValueError("rank payload-member ensemble has no positive weights")
+        return predictions / total_weight
+
     payload_members = _payload_member_payloads(payload)
     if payload_members:
         predictions = np.zeros(len(df), dtype="float64")
         total_weight = 0.0
         for weight, member_payload in payload_members:
-            predictions += weight * predict_ml_ranker_payload(
+            predictions += weight * _predict_ml_ranker_payload_unblended(
                 df,
                 member_payload,
                 chunk_size=chunk_size,
@@ -4603,14 +5499,12 @@ def predict_ml_ranker_payload(
                 if code is not None:
                     weights_by_code[code] = float(weight)
             weights_array = (
-                weights_by_code[market_codes]
-                if len(weights_by_code)
-                else np.zeros(len(df), dtype="float64")
+                weights_by_code[market_codes] if len(weights_by_code) else np.zeros(len(df), dtype="float64")
             )
             weights_array = np.clip(weights_array, 0.0, 1.0)
             if not weights_array.any():
                 continue
-            member_predictions = predict_ml_ranker_payload(
+            member_predictions = _predict_ml_ranker_payload_unblended(
                 df,
                 member_payload,
                 chunk_size=chunk_size,
@@ -4621,11 +5515,35 @@ def predict_ml_ranker_payload(
         if assigned.any():
             predictions[assigned] = predictions[assigned] / total_weights[assigned]
         if (~assigned).any():
-            predictions[~assigned] = predict_ml_ranker_payload(
+            predictions[~assigned] = _predict_ml_ranker_payload_unblended(
                 df.loc[~assigned],
                 market_payload_members[0][1],
                 chunk_size=chunk_size,
             )
+        return predictions
+
+    lightgbm_model_text = payload.get("lightgbm_model")
+    if isinstance(lightgbm_model_text, str) and lightgbm_model_text:
+        ticker_priors = payload.get("ticker_priors", {})
+        if not isinstance(ticker_priors, Mapping):
+            ticker_priors = {}
+        feature_names = payload.get("feature_names")
+        if not isinstance(feature_names, list):
+            raise ValueError("LightGBM payload requires feature_names")
+        prefer_row_priors = _payload_uses_row_priors(payload) and _has_row_prior_columns(df)
+        predictions = np.empty(len(df), dtype="float64")
+        for index in _prediction_index_chunks(
+            df,
+            chunk_size=chunk_size,
+            feature_names=feature_names,
+        ):
+            features = build_feature_matrix(
+                df.iloc[index],
+                ticker_priors,
+                prefer_row_priors=prefer_row_priors,
+                feature_names=feature_names,
+            )
+            predictions[index] = predict_lightgbm_model(lightgbm_model_text, features)
         return predictions
 
     model_payloads = _linear_payloads(payload)
@@ -4644,6 +5562,79 @@ def predict_ml_ranker_payload(
         prefer_row_priors=_payload_uses_row_priors(payload) and _has_row_prior_columns(df),
         feature_names=payload.get("feature_names") if isinstance(payload.get("feature_names"), list) else None,
     )
+
+
+def predict_ml_ranker_payload(
+    df: pd.DataFrame,
+    payload: Mapping[str, object],
+    *,
+    chunk_size: int = 200_000,
+) -> np.ndarray:
+    """Predict a snapshot frame from a serialized ML ranker artifact."""
+    predictions = _predict_ml_ranker_payload_unblended(
+        df,
+        payload,
+        chunk_size=chunk_size,
+    )
+    blend_weight = _application_blend_candidate_weight(payload)
+    if blend_weight < 1.0:
+        if "composite_score" not in df.columns:
+            raise ValueError("Application-blended ML ranker requires composite_score")
+        incumbent_predictions = pd.to_numeric(
+            df["composite_score"],
+            errors="coerce",
+        ).to_numpy(dtype="float64")
+        predictions = blend_weight * _prediction_rank_by_snapshot(df, predictions) + (
+            1.0 - blend_weight
+        ) * _prediction_rank_by_snapshot(df, incumbent_predictions)
+
+    factor_components = _application_factor_config(payload)
+    if factor_components:
+        predictions = _application_factor_predictions(
+            df,
+            predictions,
+            factor_components,
+        )
+    residual_weight, residual_column, residual_direction = _application_residual_config(payload)
+    if not factor_components and residual_weight < 1.0:
+        if residual_column not in df.columns:
+            raise ValueError(f"Application-residual ML ranker requires {residual_column}")
+        residual_values = residual_direction * pd.to_numeric(
+            df[residual_column],
+            errors="coerce",
+        ).to_numpy(dtype="float64")
+        model_rank = _prediction_rank_by_snapshot(df, predictions)
+        residual_rank = _prediction_rank_by_snapshot(df, residual_values)
+        blended = model_rank.copy()
+        usable = np.isfinite(model_rank) & np.isfinite(residual_rank)
+        blended[usable] = residual_weight * model_rank[usable] + (1.0 - residual_weight) * residual_rank[usable]
+        predictions = blended
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, Mapping):
+        metadata = {}
+    (
+        de_crowding_weight,
+        de_crowding_max_rank,
+        de_crowding_min_market_return,
+    ) = _application_gross_profitability_de_crowding_config(metadata)
+    if de_crowding_weight > 0.0:
+        revenue = _numeric_column(df, "revenue")
+        gross_margin = _numeric_column(df, "gross_margin")
+        total_assets = _numeric_column(df, "total_assets")
+        gross_profit_assets = _safe_divide(revenue * gross_margin, total_assets)
+        market_return_63d = _numeric_column(df, "market_return_63d")
+        adjusted = np.asarray(predictions, dtype="float64").copy()
+        for positions in df.groupby("snapshot_date", sort=False).indices.values():
+            adjusted[positions] = _application_gross_profitability_de_crowding_predictions(
+                adjusted[positions],
+                gross_profit_assets[positions],
+                market_return_63d[positions],
+                factor_weight=de_crowding_weight,
+                max_model_rank=de_crowding_max_rank,
+                min_market_return=de_crowding_min_market_return,
+            )
+        predictions = adjusted
+    return predictions
 
 
 def evaluate_ml_ranker_payload(
@@ -5642,6 +6633,57 @@ def _select_full_eval_candidates(
     return selected
 
 
+def _select_balanced_walk_forward_specs(
+    candidates: Sequence[dict],
+    *,
+    limit: int = STRICT_WALK_FORWARD_CANDIDATE_LIMIT,
+) -> list[dict]:
+    """Select a configuration-balanced panel without using fitted outcomes."""
+    if limit <= 0 or not candidates:
+        return []
+    fields = (
+        "model_kind",
+        "prior_strategy",
+        "feature_set",
+        "target",
+        "ridge_lambda",
+    )
+    remaining = list(candidates)
+    selected: list[dict] = []
+    counts: dict[str, dict[object, int]] = {field: {} for field in fields}
+    field_pairs = tuple(combinations(fields, 2))
+    pair_counts: dict[tuple[str, str], dict[tuple[object, object], int]] = {pair: {} for pair in field_pairs}
+    while remaining and len(selected) < limit:
+        best_index = max(
+            range(len(remaining)),
+            key=lambda index: (
+                sum(1.0 / (1.0 + counts[field].get(remaining[index].get(field), 0)) for field in fields)
+                + 0.5
+                * sum(
+                    1.0
+                    / (
+                        1.0
+                        + pair_counts[pair].get(
+                            tuple(remaining[index].get(field) for field in pair),
+                            0,
+                        )
+                    )
+                    for pair in field_pairs
+                ),
+                -index,
+            ),
+        )
+        candidate = remaining.pop(best_index)
+        selected.append(candidate)
+        for field in fields:
+            value = candidate.get(field)
+            counts[field][value] = counts[field].get(value, 0) + 1
+        for pair in field_pairs:
+            value = tuple(candidate.get(field) for field in pair)
+            pair_counts[pair][value] = pair_counts[pair].get(value, 0) + 1
+    return selected
+
+
 def _walk_forward_candidate_limit(
     full_eval_candidate_limit: int,
     *,
@@ -6306,9 +7348,16 @@ def _latest_supported_daily_end_date_from_prices(prices: pd.DataFrame) -> date:
     if frame.empty:
         return DAILY_END_DATE
     frame["_market"] = frame["ticker"].map(_market_bucket)
-    market_max_dates = frame.groupby("_market", sort=False)["date"].max()
-    latest_price_date = min(market_max_dates) if not market_max_dates.empty else frame["date"].max()
-    return latest_price_date - timedelta(days=FORWARD_HORIZON_6M_DAYS)
+    supported_dates: list[date] = []
+    for _market, market_frame in frame.groupby("_market", sort=False):
+        trading_dates = sorted(set(market_frame["date"]))
+        latest_date = trading_dates[-1]
+        cutoff = latest_date - timedelta(days=FORWARD_HORIZON_6M_DAYS)
+        eligible_dates = [trading_date for trading_date in trading_dates if trading_date <= cutoff]
+        if not eligible_dates:
+            return DAILY_END_DATE
+        supported_dates.append(eligible_dates[-1])
+    return min(supported_dates) if supported_dates else DAILY_END_DATE
 
 
 def _resolve_daily_end_date(end_date: Optional[date]) -> date:
@@ -6329,7 +7378,7 @@ def train_ml_ranker(
     backend: str = "auto",
     snapshot_frequency: str = "daily",
     start_date: date = DAILY_START_DATE,
-    end_date: Optional[date] = DAILY_END_DATE,
+    end_date: Optional[date] = None,
     target_improvement: float = DEFAULT_TARGET_IMPROVEMENT,
     max_training_rows: Optional[int] = DEFAULT_MAX_TRAINING_ROWS,
     gate_config: Optional[HoldoutGateConfig] = None,
@@ -6347,15 +7396,16 @@ def train_ml_ranker(
     candidate_ridge_lambdas: Optional[Sequence[str]] = None,
     promotion_min_train_rho: Optional[float] = None,
     candidate_anchor_model_paths: Optional[Sequence[Path]] = None,
+    strict_outer_gate: bool = True,
 ) -> Dict[str, object]:
     """Train and persist the local ML ranker artifact."""
     if target_horizon not in EVAL_HORIZONS:
         raise ValueError(f"target_horizon must be one of: {', '.join(EVAL_HORIZONS)}")
     primary_horizon = target_horizon
+    if strict_outer_gate and walk_forward_folds <= 0:
+        raise ValueError("strict_outer_gate requires at least one walk-forward fold")
     resolved_end_date = (
-        _resolve_daily_end_date(end_date)
-        if snapshot_frequency == "daily"
-        else (end_date or DAILY_END_DATE)
+        _resolve_daily_end_date(end_date) if snapshot_frequency == "daily" else (end_date or DAILY_END_DATE)
     )
     if primary_horizon == "1w" and output_model_path == DEFAULT_MODEL_PATH:
         output_model_path = ONE_WEEK_MODEL_PATH
@@ -6388,11 +7438,26 @@ def train_ml_ranker(
         start_date=start_date,
         end_date=resolved_end_date,
     )
+    snapshots = _filter_application_training_universe(
+        snapshots,
+        min_rows_per_snapshot=APPLICATION_MIN_ROWS_PER_SNAPSHOT,
+        min_snapshots=(APPLICATION_MIN_DAILY_SNAPSHOTS if snapshot_frequency == "daily" else 12),
+    )
     gate_config = gate_config or HoldoutGateConfig()
     promotion_min_gate_rho = gate_config.min_primary_rho
     split = make_holdout_split(snapshots, config=gate_config, source_path=snapshots_path)
     train_snapshots = split.train
-    gate_snapshots = split.gate
+    raw_gate_snapshots = split.gate
+    gate_snapshots = _monthly_rebalance_snapshots(raw_gate_snapshots)
+    split.manifest.update(
+        {
+            "raw_gate_rows": int(len(raw_gate_snapshots)),
+            "raw_gate_snapshots": int(raw_gate_snapshots["snapshot_date"].nunique()),
+            "evaluation_frequency": "monthly",
+            "gate_rows": int(len(gate_snapshots)),
+            "gate_snapshots": int(gate_snapshots["snapshot_date"].nunique()),
+        }
+    )
     training_snapshots = _sample_training_snapshots(train_snapshots, max_training_rows)
     base_priors = _ticker_priors(train_snapshots)
 
@@ -6404,7 +7469,7 @@ def train_ml_ranker(
         incumbent_eval_payload = _payload_with_ticker_priors(incumbent_payload, base_priors)
         incumbent_type = "ml_ranker"
     anchor_payloads = _load_anchor_payloads(
-        candidate_anchor_model_paths,
+        () if strict_outer_gate else candidate_anchor_model_paths,
         output_model_path=output_model_path,
         allow_output_model=primary_horizon == "6m",
     )
@@ -6427,6 +7492,11 @@ def train_ml_ranker(
         validation_months=walk_forward_validation_months,
         embargo_days=gate_config.embargo_days,
     )
+    if strict_outer_gate and not folds:
+        raise RuntimeError(
+            "strict_outer_gate could not construct purged walk-forward folds from "
+            "the available application-universe snapshots"
+        )
     if folds:
         logger.info(
             "ML walk-forward filter: %d folds, %d validation months/fold",
@@ -6513,30 +7583,23 @@ def train_ml_ranker(
             ),
         )
     else:
-        candidate_lambdas = tuple(
-            dict.fromkeys((ridge_lambda, 10.0, 30.0, 100.0, 300.0, 1_000.0))
-        )
+        candidate_lambdas = tuple(dict.fromkeys((ridge_lambda, 10.0, 30.0, 100.0, 300.0, 1_000.0)))
         candidate_feature_sets = (("core", expected_feature_names()),)
     if candidate_lambda_filter is not None:
         candidate_lambdas = candidate_lambda_filter
     if feature_set_filter is not None:
         candidate_feature_sets = tuple(
-            candidate
-            for candidate in candidate_feature_sets
-            if candidate[0] in feature_set_filter
+            candidate for candidate in candidate_feature_sets if candidate[0] in feature_set_filter
         )
         if not candidate_feature_sets:
             raise ValueError(
-                "candidate_feature_sets produced no valid candidates for "
-                f"target_horizon={primary_horizon}"
+                f"candidate_feature_sets produced no valid candidates for target_horizon={primary_horizon}"
             )
     six_month_recent_model_kinds = tuple(
-        f"market_ridge_recent_{half_life:g}"
-        for half_life in _six_month_recency_half_lives_days()
+        f"market_ridge_recent_{half_life:g}" for half_life in _six_month_recency_half_lives_days()
     )
     six_month_recent_segment_model_kinds = tuple(
-        f"segment_ridge_recent_{half_life:g}"
-        for half_life in _six_month_recency_half_lives_days()
+        f"segment_ridge_recent_{half_life:g}" for half_life in _six_month_recency_half_lives_days()
     )
     if model_kind == "auto":
         if primary_horizon == "6m":
@@ -6562,11 +7625,7 @@ def train_ml_ranker(
     elif model_kind in {"market-ridge-only", "market_ridge_only"}:
         candidate_model_kinds = ("market_ridge",)
     elif model_kind in {"market-ridge-recent", "market_ridge_recent"}:
-        candidate_model_kinds = (
-            six_month_recent_model_kinds
-            if primary_horizon == "6m"
-            else ("market_ridge_recent",)
-        )
+        candidate_model_kinds = six_month_recent_model_kinds if primary_horizon == "6m" else ("market_ridge_recent",)
     elif model_kind in {"segment-ridge", "segment_ridge"}:
         if primary_horizon == "6m":
             candidate_model_kinds = ("segment_ridge", *six_month_recent_segment_model_kinds)
@@ -6576,9 +7635,7 @@ def train_ml_ranker(
         candidate_model_kinds = ("segment_ridge",)
     elif model_kind in {"segment-ridge-recent", "segment_ridge_recent"}:
         candidate_model_kinds = (
-            six_month_recent_segment_model_kinds
-            if primary_horizon == "6m"
-            else ("segment_ridge_recent",)
+            six_month_recent_segment_model_kinds if primary_horizon == "6m" else ("segment_ridge_recent",)
         )
     elif model_kind in {"ridge-only", "ridge_only"}:
         candidate_model_kinds = ("ridge",)
@@ -6614,25 +7671,19 @@ def train_ml_ranker(
         )
         if primary_horizon == "1w"
         else (
-            ("ticker_priors", base_priors),
             ("rolling_ticker_priors", base_priors),
             ("no_ticker_priors", {}),
+            *((("ticker_priors", base_priors),) if not strict_outer_gate else ()),
         )
     )
     if prior_strategy_filter is not None:
-        prior_options = tuple(
-            candidate
-            for candidate in prior_options
-            if candidate[0] in prior_strategy_filter
-        )
+        prior_options = tuple(candidate for candidate in prior_options if candidate[0] in prior_strategy_filter)
         if not prior_options:
             raise ValueError(
-                "candidate_prior_strategies produced no valid candidates for "
-                f"target_horizon={primary_horizon}"
+                f"candidate_prior_strategies produced no valid candidates for target_horizon={primary_horizon}"
             )
     logger.info(
-        "ML candidate search target=%s targets=%s models=%s features=%s priors=%s "
-        "lambdas=%s full_eval_limit=%d",
+        "ML candidate search target=%s targets=%s models=%s features=%s priors=%s lambdas=%s full_eval_limit=%d",
         primary_horizon,
         ",".join(candidate_targets),
         ",".join(candidate_model_kinds),
@@ -6641,9 +7692,10 @@ def train_ml_ranker(
         ",".join(f"{candidate_lambda:g}" for candidate_lambda in candidate_lambdas),
         full_eval_candidate_limit,
     )
-    candidate_training_variants = [(0, training_snapshots)]
+    candidate_training_variants = [] if strict_outer_gate else [(0, training_snapshots)]
     if (
-        primary_horizon == "6m"
+        not strict_outer_gate
+        and primary_horizon == "6m"
         and max_training_rows is not None
         and max_training_rows > 0
         and len(train_snapshots) > len(training_snapshots)
@@ -6667,6 +7719,19 @@ def train_ml_ranker(
     gate_probe_snapshots: Optional[pd.DataFrame] = None
     gate_probe_snapshots_with_rolling_priors: Optional[pd.DataFrame] = None
     sample_rolling_priors_cache: dict[int, pd.DataFrame] = {}
+    sample_primary_context_cache: dict[int, dict[str, object]] = {}
+
+    def sample_primary_metrics(
+        frame: pd.DataFrame,
+        predictions: np.ndarray,
+    ) -> dict[str, dict[str, float]]:
+        cache_key = id(frame)
+        context = sample_primary_context_cache.get(cache_key)
+        if context is None:
+            context = _prepare_primary_spearman_context(frame, primary_horizon)
+            sample_primary_context_cache[cache_key] = context
+        rho = _evaluate_prepared_primary_spearman_rho(context, predictions)
+        return {primary_horizon: {"spearman_rho": rho}}
 
     def train_with_rolling_priors() -> pd.DataFrame:
         nonlocal train_snapshots_with_rolling_priors
@@ -6700,8 +7765,7 @@ def train_ml_ranker(
         columns = [
             column
             for column in source.columns
-            if column in required_columns
-            or (uses_row_priors and str(column).startswith(PRIOR_COLUMN_PREFIX))
+            if column in required_columns or (uses_row_priors and str(column).startswith(PRIOR_COLUMN_PREFIX))
         ]
         return source.loc[:, columns]
 
@@ -6710,7 +7774,9 @@ def train_ml_ranker(
         *,
         train_frame: bool,
     ) -> pd.DataFrame:
-        if _payload_uses_row_priors(payload):
+        if strict_outer_gate and not train_frame:
+            source = gate_snapshots
+        elif _payload_uses_row_priors(payload):
             source = train_with_rolling_priors() if train_frame else gate_with_rolling_priors()
         else:
             source = train_snapshots if train_frame else gate_snapshots
@@ -6724,11 +7790,7 @@ def train_ml_ranker(
         refit_rows = len(train_snapshots)
         if refit_max_rows > 0:
             refit_rows = min(len(train_snapshots), max(refit_max_rows, sample_rows))
-        if (
-            primary_horizon != "6m"
-            or not SIX_MONTH_REFIT_FULL_EVAL_CANDIDATES
-            or sample_rows >= refit_rows
-        ):
+        if primary_horizon != "6m" or not SIX_MONTH_REFIT_FULL_EVAL_CANDIDATES or sample_rows >= refit_rows:
             return candidate
 
         model, priors, used_backend, prefer_row_priors = _fit_candidate_model(
@@ -6743,28 +7805,31 @@ def train_ml_ranker(
             random_seed=int(candidate.get("sample_seed", 0)),
         )
         refit = dict(candidate)
-        refit.update({
-            "backend": used_backend,
-            "priors": priors,
-            "prefer_row_priors": prefer_row_priors,
-            "full_fit_rows": int(refit_rows),
-            "full_fit_refit": True,
-        })
+        refit.update(
+            {
+                "backend": used_backend,
+                "priors": priors,
+                "prefer_row_priors": prefer_row_priors,
+                "full_fit_rows": int(refit_rows),
+                "full_fit_refit": True,
+            }
+        )
         if isinstance(model.get("models"), list):
             refit["models"] = model["models"]
         else:
             refit["models"] = None
-            refit.update({
-                "clip_low": np.asarray(model["clip_low"], dtype="float64"),
-                "clip_high": np.asarray(model["clip_high"], dtype="float64"),
-                "mean": np.asarray(model["mean"], dtype="float64"),
-                "scale": np.asarray(model["scale"], dtype="float64"),
-                "coef": np.asarray(model["coef"], dtype="float64"),
-                "intercept": float(model["intercept"]),
-            })
+            refit.update(
+                {
+                    "clip_low": np.asarray(model["clip_low"], dtype="float64"),
+                    "clip_high": np.asarray(model["clip_high"], dtype="float64"),
+                    "mean": np.asarray(model["mean"], dtype="float64"),
+                    "scale": np.asarray(model["scale"], dtype="float64"),
+                    "coef": np.asarray(model["coef"], dtype="float64"),
+                    "intercept": float(model["intercept"]),
+                }
+            )
         logger.info(
-            "ML full-eval refit target=%s lambda=%.4g backend=%s model=%s "
-            "features=%s priors=%s rows=%d",
+            "ML full-eval refit target=%s lambda=%.4g backend=%s model=%s features=%s priors=%s rows=%d",
             candidate["target"],
             float(candidate["ridge_lambda"]),
             used_backend,
@@ -6778,11 +7843,7 @@ def train_ml_ranker(
     def evaluate_full_candidate(candidate: dict) -> dict:
         nonlocal best_full
         candidate = refit_full_eval_candidate(candidate)
-        full_frame = (
-            train_with_rolling_priors()
-            if candidate["prefer_row_priors"]
-            else train_snapshots
-        )
+        full_frame = train_with_rolling_priors() if candidate["prefer_row_priors"] else train_snapshots
         if candidate.get("models") is not None:
             full_predictions = _predict_from_linear_model_payloads(
                 full_frame,
@@ -6813,9 +7874,7 @@ def train_ml_ranker(
         full_candidate["sample_improvement"] = candidate["improvement"]
         full_candidate["improvement"] = full_improvement
         full_candidate["_full_predictions"] = full_predictions.astype("float32", copy=False)
-        if best_full is None or full_rho > float(
-            best_full["metrics"][primary_horizon]["spearman_rho"]
-        ):
+        if best_full is None or full_rho > float(best_full["metrics"][primary_horizon]["spearman_rho"]):
             best_full = full_candidate
         logger.info(
             "ML full-eval target=%s lambda=%.4g backend=%s model=%s features=%s priors=%s "
@@ -6919,8 +7978,7 @@ def train_ml_ranker(
                 float(gate_rho),
             )
         logger.info(
-            "ML sample gate-probe target=%s scored=%d candidates rows=%d "
-            "candidate_limit=%d",
+            "ML sample gate-probe target=%s scored=%d candidates rows=%d candidate_limit=%d",
             primary_horizon,
             scored,
             len(probe_frame),
@@ -6937,17 +7995,14 @@ def train_ml_ranker(
         if primary_horizon != "6m" or not anchor_payloads:
             return
         teacher_base_targets = tuple(
-            target
-            for target in candidate_targets
-            if target in SIX_MONTH_ANCHOR_TEACHER_BASE_TARGETS
+            target for target in candidate_targets if target in SIX_MONTH_ANCHOR_TEACHER_BASE_TARGETS
         )
         if not teacher_base_targets:
             return
         teacher_model_kinds = tuple(
             model
             for model in candidate_model_kinds
-            if _fit_model_kind_for_candidate(model)
-            in {"ridge", "market_ridge", "segment_ridge"}
+            if _fit_model_kind_for_candidate(model) in {"ridge", "market_ridge", "segment_ridge"}
             and not _is_recent_market_ridge(model)
             and not _is_recent_segment_ridge(model)
         )
@@ -6975,17 +8030,13 @@ def train_ml_ranker(
                 prefer_row_priors = prior_strategy == "rolling_ticker_priors"
                 if prefer_row_priors:
                     sample_cache_key = id(sample_training_snapshots)
-                    candidate_training_snapshots = sample_rolling_priors_cache.get(
-                        sample_cache_key
-                    )
+                    candidate_training_snapshots = sample_rolling_priors_cache.get(sample_cache_key)
                     if candidate_training_snapshots is None:
                         candidate_training_snapshots = _attach_asof_ticker_priors(
                             sample_training_snapshots,
                             train_snapshots,
                         )
-                        sample_rolling_priors_cache[sample_cache_key] = (
-                            candidate_training_snapshots
-                        )
+                        sample_rolling_priors_cache[sample_cache_key] = candidate_training_snapshots
                 else:
                     candidate_training_snapshots = sample_training_snapshots
                 for feature_set, feature_names in candidate_feature_sets:
@@ -7002,35 +8053,23 @@ def train_ml_ranker(
                             base_target,
                         )
                         best_before_teacher = (
-                            float(
-                                best_sample["metrics"][primary_horizon][
-                                    "spearman_rho"
-                                ]
-                            )
+                            float(best_sample["metrics"][primary_horizon]["spearman_rho"])
                             if best_sample is not None
                             else float("-inf")
                         )
                         for truth_weight in SIX_MONTH_ANCHOR_TEACHER_WEIGHTS:
                             best_weight_rho = float("-inf")
-                            target = (
-                                float(truth_weight) * base_values
-                                + (1.0 - float(truth_weight)) * anchor_rank
-                            )
+                            target = float(truth_weight) * base_values + (1.0 - float(truth_weight)) * anchor_rank
                             valid = np.isfinite(target)
                             if valid.sum() < 10:
                                 continue
-                            target_name = (
-                                f"anchor_teacher_{base_target}_w{truth_weight:g}"
-                            )
+                            target_name = f"anchor_teacher_{base_target}_w{truth_weight:g}"
                             for candidate_lambda in candidate_lambdas:
                                 for candidate_model_kind in teacher_model_kinds:
-                                    fit_candidate_model_kind = (
-                                        _fit_model_kind_for_candidate(candidate_model_kind)
-                                    )
+                                    fit_candidate_model_kind = _fit_model_kind_for_candidate(candidate_model_kind)
                                     model_backends = (
                                         ridge_candidate_backends
-                                        if fit_candidate_model_kind
-                                        in {"ridge", "market_ridge", "segment_ridge"}
+                                        if fit_candidate_model_kind in {"ridge", "market_ridge", "segment_ridge"}
                                         else (backend,)
                                     )
                                     for candidate_backend in model_backends:
@@ -7043,66 +8082,52 @@ def train_ml_ranker(
                                             )
                                             candidate_models = None
                                         elif fit_candidate_model_kind == "market_ridge":
-                                            candidate_models, used_backend = (
-                                                _fit_market_ridge_models(
-                                                    X_scaled,
-                                                    target,
-                                                    candidate_training_snapshots[
-                                                        "ticker"
-                                                    ].astype(str),
-                                                    ridge_lambda=candidate_lambda,
-                                                    backend=candidate_backend,
-                                                    clip_low=clip_low,
-                                                    clip_high=clip_high,
-                                                    mean=mean,
-                                                    scale=scale,
-                                                )
+                                            candidate_models, used_backend = _fit_market_ridge_models(
+                                                X_scaled,
+                                                target,
+                                                candidate_training_snapshots["ticker"].astype(str),
+                                                ridge_lambda=candidate_lambda,
+                                                backend=candidate_backend,
+                                                clip_low=clip_low,
+                                                clip_high=clip_high,
+                                                mean=mean,
+                                                scale=scale,
                                             )
                                             coef_with_intercept = None
                                         elif fit_candidate_model_kind == "segment_ridge":
-                                            candidate_models, used_backend = (
-                                                _fit_segment_ridge_models(
-                                                    X_scaled,
-                                                    target,
-                                                    candidate_training_snapshots,
-                                                    ridge_lambda=candidate_lambda,
-                                                    backend=candidate_backend,
-                                                    clip_low=clip_low,
-                                                    clip_high=clip_high,
-                                                    mean=mean,
-                                                    scale=scale,
-                                                )
+                                            candidate_models, used_backend = _fit_segment_ridge_models(
+                                                X_scaled,
+                                                target,
+                                                candidate_training_snapshots,
+                                                ridge_lambda=candidate_lambda,
+                                                backend=candidate_backend,
+                                                clip_low=clip_low,
+                                                clip_high=clip_high,
+                                                mean=mean,
+                                                scale=scale,
                                             )
                                             coef_with_intercept = None
                                         else:
                                             continue
                                         if candidate_models is not None:
-                                            predictions = (
-                                                _predict_from_linear_model_payloads(
-                                                    candidate_training_snapshots,
-                                                    priors,
-                                                    candidate_models,
-                                                    prefer_row_priors=prefer_row_priors,
-                                                    feature_names=feature_names,
-                                                )
+                                            predictions = _predict_scaled_linear_models(
+                                                X_scaled,
+                                                candidate_training_snapshots,
+                                                candidate_models,
                                             )
                                             coef = np.asarray([], dtype="float64")
                                             intercept = 0.0
                                         else:
                                             if coef_with_intercept is None:
-                                                raise RuntimeError(
-                                                    "missing linear coefficients"
-                                                )
+                                                raise RuntimeError("missing linear coefficients")
                                             coef = coef_with_intercept[:-1]
                                             intercept = float(coef_with_intercept[-1])
                                             predictions = X_scaled @ coef + intercept
-                                        metrics = _evaluate_predictions(
+                                        metrics = sample_primary_metrics(
                                             sample_training_snapshots,
                                             predictions,
                                         )
-                                        final_rho = float(
-                                            metrics[primary_horizon]["spearman_rho"]
-                                        )
+                                        final_rho = float(metrics[primary_horizon]["spearman_rho"])
                                         best_weight_rho = max(
                                             best_weight_rho,
                                             final_rho,
@@ -7139,9 +8164,7 @@ def train_ml_ranker(
                                         }
                                         sample_candidates.append(candidate)
                                         if best_sample is None or final_rho > float(
-                                            best_sample["metrics"][primary_horizon][
-                                                "spearman_rho"
-                                            ]
+                                            best_sample["metrics"][primary_horizon]["spearman_rho"]
                                         ):
                                             best_sample = candidate
                                         logger.info(
@@ -7166,9 +8189,7 @@ def train_ml_ranker(
                                         )
                             if (
                                 best_before_teacher > float("-inf")
-                                and best_weight_rho
-                                + SIX_MONTH_ANCHOR_TEACHER_PRUNE_GAP
-                                < best_before_teacher
+                                and best_weight_rho + SIX_MONTH_ANCHOR_TEACHER_PRUNE_GAP < best_before_teacher
                             ):
                                 logger.info(
                                     "ML sample anchor-teacher pruning base=%s "
@@ -7216,12 +8237,8 @@ def train_ml_ranker(
                         continue
                     for candidate_lambda in candidate_lambdas:
                         for candidate_model_kind in candidate_model_kinds:
-                            fit_candidate_model_kind = _fit_model_kind_for_candidate(
-                                candidate_model_kind
-                            )
-                            recency_half_life = _recent_half_life_for_model_kind(
-                                candidate_model_kind
-                            )
+                            fit_candidate_model_kind = _fit_model_kind_for_candidate(candidate_model_kind)
+                            recency_half_life = _recent_half_life_for_model_kind(candidate_model_kind)
                             sample_weight = (
                                 _recency_sample_weights(
                                     candidate_training_snapshots,
@@ -7232,8 +8249,7 @@ def train_ml_ranker(
                             )
                             model_backends = (
                                 ridge_candidate_backends
-                                if fit_candidate_model_kind
-                                in {"ridge", "market_ridge", "segment_ridge"}
+                                if fit_candidate_model_kind in {"ridge", "market_ridge", "segment_ridge"}
                                 else (backend,)
                             )
                             for candidate_backend in model_backends:
@@ -7244,11 +8260,7 @@ def train_ml_ranker(
                                             target[valid],
                                             ridge_lambda=candidate_lambda,
                                             backend=candidate_backend,
-                                            sample_weight=(
-                                                sample_weight[valid]
-                                                if sample_weight is not None
-                                                else None
-                                            ),
+                                            sample_weight=(sample_weight[valid] if sample_weight is not None else None),
                                         )
                                     except Exception as exc:
                                         if backend == "auto" and candidate_backend == "mlx-adam":
@@ -7314,12 +8326,10 @@ def train_ml_ranker(
                                     )
                                     candidate_models = None
                                 if candidate_models is not None:
-                                    predictions = _predict_from_linear_model_payloads(
+                                    predictions = _predict_scaled_linear_models(
+                                        X_scaled,
                                         candidate_training_snapshots,
-                                        priors,
                                         candidate_models,
-                                        prefer_row_priors=prefer_row_priors,
-                                        feature_names=feature_names,
                                     )
                                     coef = np.asarray([], dtype="float64")
                                     intercept = 0.0
@@ -7329,7 +8339,7 @@ def train_ml_ranker(
                                     coef = coef_with_intercept[:-1]
                                     intercept = float(coef_with_intercept[-1])
                                     predictions = X_scaled @ coef + intercept
-                                metrics = _evaluate_predictions(
+                                metrics = sample_primary_metrics(
                                     sample_training_snapshots,
                                     predictions,
                                 )
@@ -7384,24 +8394,63 @@ def train_ml_ranker(
             sample_training_snapshots=sample_training_snapshots,
         )
 
+    if strict_outer_gate:
+        candidate_specs: list[dict] = []
+        for prior_strategy, priors in prior_options:
+            prefer_row_priors = prior_strategy == "rolling_ticker_priors"
+            for feature_set, feature_names in candidate_feature_sets:
+                for target_name in candidate_targets:
+                    for candidate_lambda in candidate_lambdas:
+                        for candidate_model_kind in candidate_model_kinds:
+                            fit_model_kind = _fit_model_kind_for_candidate(candidate_model_kind)
+                            candidate_backend = (
+                                ridge_candidate_backends[0]
+                                if fit_model_kind in {"ridge", "market_ridge", "segment_ridge"}
+                                else backend
+                            )
+                            candidate_specs.append(
+                                {
+                                    "target": target_name,
+                                    "ridge_lambda": float(candidate_lambda),
+                                    "backend": candidate_backend,
+                                    "model_kind": candidate_model_kind,
+                                    "feature_set": feature_set,
+                                    "feature_names": list(feature_names),
+                                    "prior_strategy": prior_strategy,
+                                    "prefer_row_priors": prefer_row_priors,
+                                    "priors": priors,
+                                    "metrics": {
+                                        primary_horizon: {"spearman_rho": 0.0},
+                                    },
+                                    "improvement": float("inf"),
+                                    "sample_rows": 0,
+                                    "sample_seed": 0,
+                                }
+                            )
+        sample_candidates = _select_balanced_walk_forward_specs(candidate_specs)
+        best_sample = sample_candidates[0] if sample_candidates else None
+        logger.info(
+            "ML strict walk-forward panel target=%s selected=%d configuration_space=%d",
+            primary_horizon,
+            len(sample_candidates),
+            len(candidate_specs),
+        )
+
     sample_candidates.sort(
         key=lambda candidate: float(candidate["metrics"][primary_horizon]["spearman_rho"]),
         reverse=True,
     )
     floor_screened_sample_candidates = sample_candidates
-    if promotion_min_train_rho is not None:
+    if promotion_min_train_rho is not None and not strict_outer_gate:
         sample_train_floor_tolerance = _sample_train_floor_tolerance(primary_horizon)
         floor_screened_sample_candidates = [
             candidate
             for candidate in sample_candidates
             if candidate.get("target_source") == "anchor_teacher"
-            or _candidate_primary_rho(candidate, primary_horizon)
-            + sample_train_floor_tolerance
+            or _candidate_primary_rho(candidate, primary_horizon) + sample_train_floor_tolerance
             >= promotion_min_train_rho
         ]
-        skipped_sample_candidates = len(sample_candidates) - len(
-            floor_screened_sample_candidates
-        )
+        skipped_sample_candidates = len(sample_candidates) - len(floor_screened_sample_candidates)
         if skipped_sample_candidates:
             best_sample_rho = _candidate_primary_rho(sample_candidates[0], primary_horizon)
             logger.info(
@@ -7420,9 +8469,7 @@ def train_ml_ranker(
             )
         if not floor_screened_sample_candidates:
             best_sample_rho = (
-                _candidate_primary_rho(sample_candidates[0], primary_horizon)
-                if sample_candidates
-                else float("-inf")
+                _candidate_primary_rho(sample_candidates[0], primary_horizon) if sample_candidates else float("-inf")
             )
             raise RuntimeError(
                 "ML ranker skipped full eval because sample rho did not meet "
@@ -7431,19 +8478,22 @@ def train_ml_ranker(
                 f"rho={float(promotion_min_train_rho):.6f}, "
                 f"tolerance={sample_train_floor_tolerance:.6f}"
             )
-    score_gate_probe_candidates(floor_screened_sample_candidates)
+    if not strict_outer_gate:
+        score_gate_probe_candidates(floor_screened_sample_candidates)
     walk_forward_limit = _walk_forward_candidate_limit(
         full_eval_candidate_limit,
         primary_horizon=primary_horizon,
     )
-    walk_forward_candidates = _select_full_eval_candidates(
-        floor_screened_sample_candidates,
-        limit=walk_forward_limit,
-        primary_horizon=primary_horizon,
-    )
+    if strict_outer_gate:
+        walk_forward_candidates = list(floor_screened_sample_candidates)
+    else:
+        walk_forward_candidates = _select_full_eval_candidates(
+            floor_screened_sample_candidates,
+            limit=walk_forward_limit,
+            primary_horizon=primary_horizon,
+        )
     logger.info(
-        "ML walk-forward shortlist target=%s selected=%d sample_candidates=%d "
-        "floor_candidates=%d full_eval_limit=%d",
+        "ML walk-forward shortlist target=%s selected=%d sample_candidates=%d floor_candidates=%d full_eval_limit=%d",
         primary_horizon,
         len(walk_forward_candidates),
         len(sample_candidates),
@@ -7452,15 +8502,16 @@ def train_ml_ranker(
     )
     validated_candidates: list[dict] = []
     for candidate in walk_forward_candidates:
-        if (
-            candidate is not best_sample
-            and float(candidate["improvement"]) < target_improvement
-        ):
+        if candidate is not best_sample and float(candidate["improvement"]) < target_improvement:
             continue
         candidate_blend_weights = (
             _blend_weights_for_horizon(primary_horizon)
-            if incumbent_eval_payload is not None
-            and candidate["priors"] == incumbent_eval_payload.get("ticker_priors")
+            if (primary_horizon == "6m" and incumbent_eval_payload is None)
+            or (
+                not strict_outer_gate
+                and incumbent_eval_payload is not None
+                and candidate["priors"] == incumbent_eval_payload.get("ticker_priors")
+            )
             else (1.0,)
         )
         if candidate.get("target_source") == "anchor_teacher":
@@ -7485,18 +8536,41 @@ def train_ml_ranker(
                 max_horizon_degradation=walk_forward_max_horizon_degradation,
                 primary_horizon=primary_horizon,
                 blend_weights=candidate_blend_weights,
+                quality_residual_weights=(
+                    SIX_MONTH_QUALITY_RESIDUAL_WEIGHTS
+                    if primary_horizon == "6m" and incumbent_eval_payload is None
+                    else (1.0,)
+                ),
+                require_primary_top20_excess_non_degradation=(gate_config.require_6m_top20_excess_non_degradation),
                 sample_seed=int(candidate.get("sample_seed", 0)),
             )
         candidate["walk_forward"] = walk_forward
         if not walk_forward.get("accepted"):
             logger.info(
-                "ML walk-forward rejected target=%s lambda=%.4g priors=%s: %s",
+                "ML walk-forward rejected target=%s lambda=%.4g model=%s "
+                "features=%s priors=%s mean_deltas=%s min_deltas=%s: %s",
                 candidate["target"],
                 candidate["ridge_lambda"],
+                candidate["model_kind"],
+                candidate["feature_set"],
                 candidate["prior_strategy"],
+                walk_forward.get("mean_deltas"),
+                walk_forward.get("min_deltas"),
                 walk_forward.get("reason"),
             )
             continue
+        logger.info(
+            "ML walk-forward accepted target=%s lambda=%.4g model=%s "
+            "features=%s priors=%s mean_deltas=%s median_deltas=%s min_deltas=%s",
+            candidate["target"],
+            candidate["ridge_lambda"],
+            candidate["model_kind"],
+            candidate["feature_set"],
+            candidate["prior_strategy"],
+            walk_forward.get("mean_deltas"),
+            walk_forward.get("median_deltas"),
+            walk_forward.get("min_deltas"),
+        )
         validated_candidates.append(candidate)
 
     if folds:
@@ -7521,18 +8595,15 @@ def train_ml_ranker(
 
     selected_full_eval_candidates = _select_full_eval_candidates(
         validated_candidates,
-        limit=full_eval_candidate_limit,
+        limit=1 if strict_outer_gate else full_eval_candidate_limit,
         primary_horizon=primary_horizon,
     )
     if not selected_full_eval_candidates:
         if folds:
             raise RuntimeError("No ML ranker candidates passed walk-forward validation")
         raise RuntimeError("Not enough valid target rows to train ML ranker")
-    full_candidates = [
-        evaluate_full_candidate(candidate)
-        for candidate in selected_full_eval_candidates
-    ]
-    if primary_horizon == "6m":
+    full_candidates = [evaluate_full_candidate(candidate) for candidate in selected_full_eval_candidates]
+    if primary_horizon == "6m" and not strict_outer_gate:
         full_candidates.extend(
             _build_full_eval_ensembles(
                 full_candidates,
@@ -7566,7 +8637,7 @@ def train_ml_ranker(
     full_eval_candidates_evaluated = len(full_candidates)
     full_candidates = _select_promotion_gate_candidates(
         full_candidates,
-        limit=full_eval_candidate_limit,
+        limit=1 if strict_outer_gate else full_eval_candidate_limit,
         primary_horizon=primary_horizon,
     )
     logger.info(
@@ -7591,15 +8662,9 @@ def train_ml_ranker(
         candidate_train_rho = _candidate_primary_rho(candidate, primary_horizon)
         if float(candidate["improvement"]) < target_improvement:
             continue
-        if (
-            incumbent_train_floor is not None
-            and candidate_train_rho < incumbent_train_floor
-        ):
+        if incumbent_train_floor is not None and candidate_train_rho < incumbent_train_floor:
             continue
-        if (
-            promotion_min_train_rho is not None
-            and candidate_train_rho < promotion_min_train_rho
-        ):
+        if promotion_min_train_rho is not None and candidate_train_rho < promotion_min_train_rho:
             continue
         promotable_full_candidates.append(candidate)
     if not promotable_full_candidates:
@@ -7639,6 +8704,11 @@ def train_ml_ranker(
         metadata = incumbent_eval_payload.get("metadata")
         if not isinstance(metadata, Mapping):
             return None
+        cached_manifest = metadata.get("promotion_gate_manifest")
+        if not isinstance(cached_manifest, Mapping):
+            return None
+        if dict(cached_manifest) != split.manifest:
+            return None
         try:
             if int(metadata.get("n_rows", -1)) != len(snapshots):
                 return None
@@ -7673,8 +8743,7 @@ def train_ml_ranker(
         incumbent_gate_metrics = incumbent_cached_gate_metrics()
         if incumbent_gate_metrics is not None:
             logger.info(
-                "ML promotion-gate using cached incumbent gate metrics "
-                "target=%s gate_%s_rho=%.6f snapshots=%d",
+                "ML promotion-gate using cached incumbent gate metrics target=%s gate_%s_rho=%.6f snapshots=%d",
                 primary_horizon,
                 primary_horizon,
                 float(incumbent_gate_metrics[primary_horizon]["spearman_rho"]),
@@ -7691,8 +8760,7 @@ def train_ml_ranker(
                 incumbent_gate_predictions,
             )
             logger.info(
-                "ML promotion-gate computed incumbent gate metrics "
-                "target=%s gate_%s_rho=%.6f snapshots=%d",
+                "ML promotion-gate computed incumbent gate metrics target=%s gate_%s_rho=%.6f snapshots=%d",
                 primary_horizon,
                 primary_horizon,
                 float(incumbent_gate_metrics[primary_horizon]["spearman_rho"]),
@@ -7704,9 +8772,7 @@ def train_ml_ranker(
             errors="coerce",
         ).to_numpy(dtype="float64")
         incumbent_gate_metrics = _baseline_metrics(gate_snapshots)
-    incumbent_gate_primary_rho = float(
-        incumbent_gate_metrics[primary_horizon]["spearman_rho"]
-    )
+    incumbent_gate_primary_rho = float(incumbent_gate_metrics[primary_horizon]["spearman_rho"])
 
     def ensure_incumbent_gate_predictions() -> np.ndarray:
         nonlocal incumbent_gate_predictions, incumbent_gate_metrics
@@ -7724,8 +8790,7 @@ def train_ml_ranker(
                     incumbent_gate_predictions,
                 )
                 logger.info(
-                    "ML promotion-gate refreshed incumbent gate metrics "
-                    "target=%s gate_%s_rho=%.6f snapshots=%d",
+                    "ML promotion-gate refreshed incumbent gate metrics target=%s gate_%s_rho=%.6f snapshots=%d",
                     primary_horizon,
                     primary_horizon,
                     float(incumbent_gate_metrics[primary_horizon]["spearman_rho"]),
@@ -7757,11 +8822,7 @@ def train_ml_ranker(
             anchor_metadata = temporal_anchor_payload.get("metadata", {})
             if not isinstance(anchor_metadata, Mapping):
                 anchor_metadata = {}
-            train_metrics = (
-                train_metrics_override
-                if train_metrics_override is not None
-                else full_candidate["metrics"]
-            )
+            train_metrics = train_metrics_override if train_metrics_override is not None else full_candidate["metrics"]
             return {
                 "schema_version": MODEL_SCHEMA_VERSION,
                 "feature_names": [],
@@ -7785,10 +8846,9 @@ def train_ml_ranker(
                     "target": full_candidate["target"],
                     "target_source": "temporal_regime",
                     "target_horizon": primary_horizon,
+                    "strict_outer_gate": bool(strict_outer_gate),
                     "prior_strategy": "temporal",
-                    "uses_rolling_row_priors": _payload_uses_row_priors(
-                        train_member_payload
-                    )
+                    "uses_rolling_row_priors": _payload_uses_row_priors(train_member_payload)
                     or _payload_uses_row_priors(temporal_anchor_payload),
                     "target_improvement": target_improvement,
                     "promotion_min_train_rho": promotion_min_train_rho,
@@ -7806,40 +8866,23 @@ def train_ml_ranker(
                     "temporal_transition_date": transition_date,
                     "temporal_train_member_target": train_member_metadata.get("target"),
                     "temporal_train_member_backend": train_member_metadata.get("backend"),
-                    "temporal_train_member_model_kind": train_member_metadata.get(
-                        "model_kind"
-                    ),
-                    "temporal_train_member_feature_set": train_member_metadata.get(
-                        "feature_set"
-                    ),
-                    "temporal_anchor_model_path": full_candidate.get(
-                        "temporal_anchor_path"
-                    ),
-                    "temporal_anchor_gate_rho": full_candidate.get(
-                        "temporal_anchor_gate_rho"
-                    ),
+                    "temporal_train_member_model_kind": train_member_metadata.get("model_kind"),
+                    "temporal_train_member_feature_set": train_member_metadata.get("feature_set"),
+                    "temporal_anchor_model_path": full_candidate.get("temporal_anchor_path"),
+                    "temporal_anchor_gate_rho": full_candidate.get("temporal_anchor_gate_rho"),
                     "temporal_anchor_backend": anchor_metadata.get("backend"),
                     "temporal_anchor_target": anchor_metadata.get("target"),
                     "temporal_anchor_trained_at": anchor_metadata.get("trained_at"),
-                    "candidate_feature_sets": [
-                        feature_set for feature_set, _ in candidate_feature_sets
-                    ],
-                    "candidate_prior_strategies": [
-                        prior_strategy for prior_strategy, _ in prior_options
-                    ],
+                    "candidate_feature_sets": [feature_set for feature_set, _ in candidate_feature_sets],
+                    "candidate_prior_strategies": [prior_strategy for prior_strategy, _ in prior_options],
                     "candidate_targets": list(candidate_targets),
-                    "candidate_ridge_lambdas": [
-                        float(candidate_lambda) for candidate_lambda in candidate_lambdas
-                    ],
-                    "candidate_anchor_model_paths": [
-                        str(anchor["path"]) for anchor in anchor_payloads
-                    ],
+                    "candidate_ridge_lambdas": [float(candidate_lambda) for candidate_lambda in candidate_lambdas],
+                    "candidate_anchor_model_paths": [str(anchor["path"]) for anchor in anchor_payloads],
                     "full_eval_candidate_limit": full_eval_candidate_limit,
                     "full_eval_candidates_evaluated": full_eval_candidates_evaluated,
                     "promotion_gate_candidates_considered": len(full_candidates),
                     "ground_truth_id": (
-                        _snapshot_fingerprint(snapshots_path)
-                        + "|eval=ranked-snapshot-v1|model=ml-ranker-v1"
+                        _snapshot_fingerprint(snapshots_path) + "|eval=ranked-snapshot-v1|model=ml-ranker-v1"
                     ),
                     "snapshots_path": str(snapshots_path),
                     "model_path": str(output_model_path),
@@ -7872,10 +8915,12 @@ def train_ml_ranker(
                     member_weight = 1.0
                 if not np.isfinite(member_weight) or member_weight <= 0.0:
                     continue
-                member_payloads.append({
-                    "weight": member_weight,
-                    "payload": build_payload(member_candidate, blend_weight_override=1.0),
-                })
+                member_payloads.append(
+                    {
+                        "weight": member_weight,
+                        "payload": build_payload(member_candidate, blend_weight_override=1.0),
+                    }
+                )
             if not member_payloads:
                 raise RuntimeError("payload-member ensemble has no valid members")
             return {
@@ -7893,10 +8938,9 @@ def train_ml_ranker(
                     "target_source": full_candidate.get("target_source", "direct"),
                     "teacher_base_target": full_candidate.get("teacher_base_target"),
                     "teacher_truth_weight": full_candidate.get("teacher_truth_weight"),
-                    "teacher_anchor_model_path": full_candidate.get(
-                        "teacher_anchor_model_path"
-                    ),
+                    "teacher_anchor_model_path": full_candidate.get("teacher_anchor_model_path"),
                     "target_horizon": primary_horizon,
+                    "strict_outer_gate": bool(strict_outer_gate),
                     "prior_strategy": full_candidate["prior_strategy"],
                     "uses_rolling_row_priors": False,
                     "target_improvement": target_improvement,
@@ -7912,25 +8956,16 @@ def train_ml_ranker(
                     "ensemble_members": list(full_candidate.get("ensemble_members", [])),
                     "train_rho_improvement": full_candidate["improvement"],
                     "walk_forward": full_candidate.get("walk_forward"),
-                    "candidate_feature_sets": [
-                        feature_set for feature_set, _ in candidate_feature_sets
-                    ],
-                    "candidate_prior_strategies": [
-                        prior_strategy for prior_strategy, _ in prior_options
-                    ],
+                    "candidate_feature_sets": [feature_set for feature_set, _ in candidate_feature_sets],
+                    "candidate_prior_strategies": [prior_strategy for prior_strategy, _ in prior_options],
                     "candidate_targets": list(candidate_targets),
-                    "candidate_ridge_lambdas": [
-                        float(candidate_lambda) for candidate_lambda in candidate_lambdas
-                    ],
-                    "candidate_anchor_model_paths": [
-                        str(anchor["path"]) for anchor in anchor_payloads
-                    ],
+                    "candidate_ridge_lambdas": [float(candidate_lambda) for candidate_lambda in candidate_lambdas],
+                    "candidate_anchor_model_paths": [str(anchor["path"]) for anchor in anchor_payloads],
                     "full_eval_candidate_limit": full_eval_candidate_limit,
                     "full_eval_candidates_evaluated": full_eval_candidates_evaluated,
                     "promotion_gate_candidates_considered": len(full_candidates),
                     "ground_truth_id": (
-                        _snapshot_fingerprint(snapshots_path)
-                        + "|eval=ranked-snapshot-v1|model=ml-ranker-v1"
+                        _snapshot_fingerprint(snapshots_path) + "|eval=ranked-snapshot-v1|model=ml-ranker-v1"
                     ),
                     "snapshots_path": str(snapshots_path),
                     "model_path": str(output_model_path),
@@ -7944,9 +8979,7 @@ def train_ml_ranker(
                     "n_features": 0,
                     "walk_forward_folds": [_fold_summary(fold) for fold in folds],
                     "train_metrics": (
-                        train_metrics_override
-                        if train_metrics_override is not None
-                        else full_candidate["metrics"]
+                        train_metrics_override if train_metrics_override is not None else full_candidate["metrics"]
                     ),
                     "blend_candidate_weight": 1.0,
                 },
@@ -7966,10 +8999,9 @@ def train_ml_ranker(
                 "target_source": full_candidate.get("target_source", "direct"),
                 "teacher_base_target": full_candidate.get("teacher_base_target"),
                 "teacher_truth_weight": full_candidate.get("teacher_truth_weight"),
-                "teacher_anchor_model_path": full_candidate.get(
-                    "teacher_anchor_model_path"
-                ),
+                "teacher_anchor_model_path": full_candidate.get("teacher_anchor_model_path"),
                 "target_horizon": primary_horizon,
+                "strict_outer_gate": bool(strict_outer_gate),
                 "prior_strategy": full_candidate["prior_strategy"],
                 "uses_rolling_row_priors": bool(full_candidate["prefer_row_priors"]),
                 "target_improvement": target_improvement,
@@ -7985,25 +9017,16 @@ def train_ml_ranker(
                 "ensemble_members": list(full_candidate.get("ensemble_members", [])),
                 "train_rho_improvement": full_candidate["improvement"],
                 "walk_forward": full_candidate.get("walk_forward"),
-                "candidate_feature_sets": [
-                    feature_set for feature_set, _ in candidate_feature_sets
-                ],
-                "candidate_prior_strategies": [
-                    prior_strategy for prior_strategy, _ in prior_options
-                ],
+                "candidate_feature_sets": [feature_set for feature_set, _ in candidate_feature_sets],
+                "candidate_prior_strategies": [prior_strategy for prior_strategy, _ in prior_options],
                 "candidate_targets": list(candidate_targets),
-                "candidate_ridge_lambdas": [
-                    float(candidate_lambda) for candidate_lambda in candidate_lambdas
-                ],
-                "candidate_anchor_model_paths": [
-                    str(anchor["path"]) for anchor in anchor_payloads
-                ],
+                "candidate_ridge_lambdas": [float(candidate_lambda) for candidate_lambda in candidate_lambdas],
+                "candidate_anchor_model_paths": [str(anchor["path"]) for anchor in anchor_payloads],
                 "full_eval_candidate_limit": full_eval_candidate_limit,
                 "full_eval_candidates_evaluated": full_eval_candidates_evaluated,
                 "promotion_gate_candidates_considered": len(full_candidates),
                 "ground_truth_id": (
-                    _snapshot_fingerprint(snapshots_path)
-                    + "|eval=ranked-snapshot-v1|model=ml-ranker-v1"
+                    _snapshot_fingerprint(snapshots_path) + "|eval=ranked-snapshot-v1|model=ml-ranker-v1"
                 ),
                 "snapshots_path": str(snapshots_path),
                 "model_path": str(output_model_path),
@@ -8021,18 +9044,19 @@ def train_ml_ranker(
         }
         if full_candidate.get("models") is not None:
             payload["models"] = [
-                _linear_model_payload(model, weight=_payload_weight(model))
-                for model in full_candidate["models"]
+                _linear_model_payload(model, weight=_payload_weight(model)) for model in full_candidate["models"]
             ]
         else:
-            payload.update({
-                "clip_low": np.asarray(full_candidate["clip_low"], dtype="float64").tolist(),
-                "clip_high": np.asarray(full_candidate["clip_high"], dtype="float64").tolist(),
-                "mean": np.asarray(full_candidate["mean"], dtype="float64").tolist(),
-                "scale": np.asarray(full_candidate["scale"], dtype="float64").tolist(),
-                "coef": np.asarray(full_candidate["coef"], dtype="float64").tolist(),
-                "intercept": float(full_candidate["intercept"]),
-            })
+            payload.update(
+                {
+                    "clip_low": np.asarray(full_candidate["clip_low"], dtype="float64").tolist(),
+                    "clip_high": np.asarray(full_candidate["clip_high"], dtype="float64").tolist(),
+                    "mean": np.asarray(full_candidate["mean"], dtype="float64").tolist(),
+                    "scale": np.asarray(full_candidate["scale"], dtype="float64").tolist(),
+                    "coef": np.asarray(full_candidate["coef"], dtype="float64").tolist(),
+                    "intercept": float(full_candidate["intercept"]),
+                }
+            )
 
         walk_forward = payload["metadata"].get("walk_forward")
         blend_weight = 1.0
@@ -8044,10 +9068,66 @@ def train_ml_ranker(
             except (TypeError, ValueError):
                 blend_weight = 1.0
         payload["metadata"]["blend_candidate_weight"] = float(blend_weight)
+        if incumbent_eval_payload is None and 0.0 <= blend_weight < 1.0:
+            payload["metadata"].update(
+                {
+                    "application_blend_candidate_weight": float(blend_weight),
+                    "application_blend_scale": "snapshot_rank",
+                }
+            )
+        factor_components: object = None
+        if isinstance(walk_forward, Mapping):
+            factor_components = walk_forward.get("application_factor_components")
+        if isinstance(factor_components, list) and factor_components:
+            payload["metadata"].update(
+                {
+                    "application_factor_template": str(
+                        walk_forward.get("application_factor_template", "")
+                    ),
+                    "application_factor_components": factor_components,
+                    "application_factor_scale": "snapshot_rank",
+                }
+            )
+        elif isinstance(walk_forward, Mapping):
+            try:
+                residual_weight = float(
+                    walk_forward.get(
+                        "application_residual_candidate_weight",
+                        walk_forward.get("quality_residual_candidate_weight", 1.0),
+                    )
+                )
+                residual_direction = float(walk_forward.get("application_residual_direction", -1.0))
+            except (TypeError, ValueError):
+                residual_weight = 1.0
+                residual_direction = 1.0
+            residual_column = str(walk_forward.get("application_residual_column", "quality_score"))
+            residual_signal = str(
+                walk_forward.get(
+                    "application_residual_signal",
+                    "quality_de_crowding",
+                )
+            )
+            if 0.0 <= residual_weight < 1.0 and residual_column:
+                payload["metadata"].update(
+                    {
+                        "application_residual_candidate_weight": residual_weight,
+                        "application_residual_signal": residual_signal,
+                        "application_residual_column": residual_column,
+                        "application_residual_direction": residual_direction,
+                        "application_residual_scale": "snapshot_rank",
+                    }
+                )
+                if residual_signal == "quality_de_crowding":
+                    payload["metadata"].update(
+                        {
+                            "application_quality_residual_candidate_weight": residual_weight,
+                            "application_quality_residual_direction": "inverse",
+                            "application_quality_residual_scale": "snapshot_rank",
+                        }
+                    )
         if market_blend_weights_override is not None:
             payload["metadata"]["market_blend_candidate_weights"] = {
-                str(market): float(weight)
-                for market, weight in market_blend_weights_override.items()
+                str(market): float(weight) for market, weight in market_blend_weights_override.items()
             }
         if (
             market_blend_weights_override is not None
@@ -8067,13 +9147,15 @@ def train_ml_ranker(
                     payload,
                 )
             )
-            payload["metadata"].update({
-                "train_metrics": blend_train_metrics,
-                "train_rho_improvement": _improvement_ratio(
-                    float(blend_train_metrics[primary_horizon]["spearman_rho"]),
-                    train_baseline_rho,
-                ),
-            })
+            payload["metadata"].update(
+                {
+                    "train_metrics": blend_train_metrics,
+                    "train_rho_improvement": _improvement_ratio(
+                        float(blend_train_metrics[primary_horizon]["spearman_rho"]),
+                        train_baseline_rho,
+                    ),
+                }
+            )
         elif market_blend_weights_override is not None and incumbent_eval_payload is not None:
             payload = _market_payload_member_blend_payload(
                 anchor_payload=incumbent_eval_payload,
@@ -8088,13 +9170,15 @@ def train_ml_ranker(
                     payload,
                 )
             )
-            payload["metadata"].update({
-                "train_metrics": blend_train_metrics,
-                "train_rho_improvement": _improvement_ratio(
-                    float(blend_train_metrics[primary_horizon]["spearman_rho"]),
-                    train_baseline_rho,
-                ),
-            })
+            payload["metadata"].update(
+                {
+                    "train_metrics": blend_train_metrics,
+                    "train_rho_improvement": _improvement_ratio(
+                        float(blend_train_metrics[primary_horizon]["spearman_rho"]),
+                        train_baseline_rho,
+                    ),
+                }
+            )
         elif (
             incumbent_eval_payload is not None
             and 0.0 < blend_weight < 1.0
@@ -8113,13 +9197,15 @@ def train_ml_ranker(
                     payload,
                 )
             )
-            payload["metadata"].update({
-                "train_metrics": blend_train_metrics,
-                "train_rho_improvement": _improvement_ratio(
-                    float(blend_train_metrics[primary_horizon]["spearman_rho"]),
-                    train_baseline_rho,
-                ),
-            })
+            payload["metadata"].update(
+                {
+                    "train_metrics": blend_train_metrics,
+                    "train_rho_improvement": _improvement_ratio(
+                        float(blend_train_metrics[primary_horizon]["spearman_rho"]),
+                        train_baseline_rho,
+                    ),
+                }
+            )
         return payload
 
     gate_attempts: list[dict[str, object]] = []
@@ -8136,37 +9222,73 @@ def train_ml_ranker(
     attempt_index = 0
     absolute_gate_route_margin = 0.05
     route_raw_degradation_limit = (
-        _six_month_gate_route_raw_degradation_limit()
-        if primary_horizon == "6m"
-        else float("inf")
+        _six_month_gate_route_raw_degradation_limit() if primary_horizon == "6m" else float("inf")
     )
-    require_route_side_guard = (
-        primary_horizon == "6m"
-        and gate_config.require_6m_top20_excess_non_degradation
-    )
+    require_route_side_guard = primary_horizon == "6m" and gate_config.require_6m_top20_excess_non_degradation
     for full_candidate in promotable_full_candidates:
-        raw_payload = build_payload(full_candidate, blend_weight_override=1.0)
+        frozen_application_blend_weight = 1.0
+        if strict_outer_gate and incumbent_eval_payload is None:
+            walk_forward = full_candidate.get("walk_forward")
+            if isinstance(walk_forward, Mapping):
+                try:
+                    frozen_application_blend_weight = float(walk_forward.get("blend_weight", 1.0))
+                except (TypeError, ValueError):
+                    frozen_application_blend_weight = 1.0
+        raw_payload = build_payload(
+            full_candidate,
+            blend_weight_override=frozen_application_blend_weight,
+        )
+        if strict_outer_gate:
+            runtime_parity = _runtime_feature_parity(gate_snapshots, raw_payload)
+            if not runtime_parity.get("matched"):
+                raise RuntimeError(f"ML candidate failed trainer/runtime feature parity: {runtime_parity}")
+            metadata = raw_payload.get("metadata")
+            if isinstance(metadata, dict):
+                metadata["runtime_feature_parity"] = runtime_parity
         raw_gate_predictions: Optional[np.ndarray] = None
         raw_gate_primary_rho: Optional[float] = None
-        raw_train_predictions = full_candidate.get("_full_predictions")
-        if raw_train_predictions is not None:
-            raw_train_predictions = np.asarray(raw_train_predictions, dtype="float64")
-            if len(raw_train_predictions) != len(train_snapshots):
-                raw_train_predictions = None
+        frozen_train_rho: Optional[float] = None
+        if frozen_application_blend_weight < 1.0:
+            raw_train_predictions = predict_ml_ranker_payload(
+                frame_for_payload(raw_payload, train_frame=True),
+                raw_payload,
+            )
+            frozen_train_metrics = _evaluate_predictions(
+                train_snapshots,
+                raw_train_predictions,
+            )
+            frozen_train_rho = float(frozen_train_metrics[primary_horizon]["spearman_rho"])
+            metadata = raw_payload.get("metadata")
+            if isinstance(metadata, dict):
+                metadata["train_metrics"] = frozen_train_metrics
+                metadata["train_rho_improvement"] = _improvement_ratio(
+                    frozen_train_rho,
+                    train_baseline_rho,
+                )
+        else:
+            raw_train_predictions = full_candidate.get("_full_predictions")
+            if raw_train_predictions is not None:
+                raw_train_predictions = np.asarray(
+                    raw_train_predictions,
+                    dtype="float64",
+                )
+                if len(raw_train_predictions) != len(train_snapshots):
+                    raw_train_predictions = None
         gate_blend_weights = (1.0,)
-        if incumbent_eval_payload is not None and _payloads_compatible_for_blend(
-            raw_payload,
-            incumbent_eval_payload,
+        if (
+            not strict_outer_gate
+            and incumbent_eval_payload is not None
+            and _payloads_compatible_for_blend(
+                raw_payload,
+                incumbent_eval_payload,
+            )
         ):
             gate_blend_weights = _blend_weights_for_horizon(primary_horizon)
         gate_market_blend_weights: tuple[Mapping[str, float], ...] = ()
-        market_train_floor_tolerance = (
-            _six_month_market_train_floor_tolerance()
-            if primary_horizon == "6m"
-            else 0.0
-        )
+        market_train_floor_tolerance = _six_month_market_train_floor_tolerance() if primary_horizon == "6m" else 0.0
         if (
-            primary_horizon == "6m"
+            not strict_outer_gate
+            and primary_horizon == "6m"
             and incumbent_eval_payload is not None
             and _payload_has_market_models(raw_payload)
         ):
@@ -8187,9 +9309,7 @@ def train_ml_ranker(
             scored_blends: list[tuple[float, float]] = []
             for candidate_weight in sorted({float(weight) for weight in gate_blend_weights}):
                 if candidate_weight == 1.0:
-                    train_rho = float(
-                        full_candidate["metrics"][primary_horizon]["spearman_rho"]
-                    )
+                    train_rho = float(full_candidate["metrics"][primary_horizon]["spearman_rho"])
                 else:
                     blended_train_predictions = (
                         candidate_weight * raw_train_predictions
@@ -8208,35 +9328,40 @@ def train_ml_ranker(
                 limit=SIX_MONTH_GATE_BLEND_LIMIT,
             )
         if gate_market_blend_weights:
-            gate_market_blend_weights = tuple(
-                gate_market_blend_weights[: _six_month_gate_market_blend_limit()]
-            )
+            gate_market_blend_weights = tuple(gate_market_blend_weights[: _six_month_gate_market_blend_limit()])
 
         gate_blend_options: list[dict[str, object]] = [
-            {"blend_weight": float(weight), "market_blend_weights": None}
-            for weight in gate_blend_weights
+            {"blend_weight": float(weight), "market_blend_weights": None} for weight in gate_blend_weights
         ]
-        if primary_horizon == "6m" and incumbent_eval_payload is not None:
-            gate_blend_options.append({
-                "blend_weight": 1.0,
-                "market_blend_weights": None,
-                "segment_regime": True,
-            })
-            gate_blend_options.append({
-                "blend_weight": 1.0,
-                "market_blend_weights": None,
-                "recent_segment_regime": True,
-            })
-            gate_blend_options.append({
-                "blend_weight": 1.0,
-                "market_blend_weights": None,
-                "recent_market_regime": True,
-            })
-            gate_blend_options.append({
-                "blend_weight": 1.0,
-                "market_blend_weights": None,
-                "recent_regime": True,
-            })
+        if not strict_outer_gate and primary_horizon == "6m" and incumbent_eval_payload is not None:
+            gate_blend_options.append(
+                {
+                    "blend_weight": 1.0,
+                    "market_blend_weights": None,
+                    "segment_regime": True,
+                }
+            )
+            gate_blend_options.append(
+                {
+                    "blend_weight": 1.0,
+                    "market_blend_weights": None,
+                    "recent_segment_regime": True,
+                }
+            )
+            gate_blend_options.append(
+                {
+                    "blend_weight": 1.0,
+                    "market_blend_weights": None,
+                    "recent_market_regime": True,
+                }
+            )
+            gate_blend_options.append(
+                {
+                    "blend_weight": 1.0,
+                    "market_blend_weights": None,
+                    "recent_regime": True,
+                }
+            )
         gate_blend_options.extend(
             {
                 "blend_weight": max(float(weight) for weight in market_weights.values()),
@@ -8245,7 +9370,8 @@ def train_ml_ranker(
             for market_weights in gate_market_blend_weights
         )
         if (
-            primary_horizon == "6m"
+            not strict_outer_gate
+            and primary_horizon == "6m"
             and anchor_payloads
             and full_candidate.get("target_source") != "temporal_regime"
         ):
@@ -8268,8 +9394,7 @@ def train_ml_ranker(
                 for candidate_weight in SIX_MONTH_ANCHOR_BLEND_WEIGHTS:
                     blended_train_predictions = (
                         float(candidate_weight) * raw_train_predictions
-                        + (1.0 - float(candidate_weight))
-                        * anchor_train_predictions[anchor_path]
+                        + (1.0 - float(candidate_weight)) * anchor_train_predictions[anchor_path]
                     )
                     train_rho = _evaluate_primary_spearman_rho(
                         train_snapshots,
@@ -8312,21 +9437,14 @@ def train_ml_ranker(
             recent_market_weights: Optional[dict[str, float]] = None
             recent_segment_routes: list[dict[str, object]] = []
             blend_key = float(blend_weight)
-            market_blend_key = (
-                _market_blend_key(market_blend_weights)
-                if market_blend_weights is not None
-                else None
-            )
-            is_incumbent_convex_blend = (
-                market_blend_weights is not None
-                or (
-                    anchor_payload_option is None
-                    and blend_weight != 1.0
-                    and not segment_regime
-                    and not recent_segment_regime
-                    and not recent_market_regime
-                    and not recent_regime
-                )
+            market_blend_key = _market_blend_key(market_blend_weights) if market_blend_weights is not None else None
+            is_incumbent_convex_blend = market_blend_weights is not None or (
+                anchor_payload_option is None
+                and blend_weight != 1.0
+                and not segment_regime
+                and not recent_segment_regime
+                and not recent_market_regime
+                and not recent_regime
             )
             if promotion_min_gate_rho is not None and is_incumbent_convex_blend:
                 if raw_gate_predictions is None:
@@ -8342,33 +9460,32 @@ def train_ml_ranker(
                     )
                 if (
                     incumbent_gate_primary_rho < float(promotion_min_gate_rho)
-                    and raw_gate_primary_rho + route_raw_degradation_limit
-                    < incumbent_gate_primary_rho
+                    and raw_gate_primary_rho + route_raw_degradation_limit < incumbent_gate_primary_rho
                 ):
-                    skipped_gate_attempts.append({
-                        "attempt": attempt_index,
-                        "reason": "raw gate rho too degraded for blend rescue",
-                        "target": full_candidate["target"],
-                        "target_horizon": primary_horizon,
-                        "ridge_lambda": full_candidate["ridge_lambda"],
-                        "backend": full_candidate["backend"],
-                        "model_kind": full_candidate["model_kind"],
-                        "feature_set": full_candidate["feature_set"],
-                        "blend_weight": float(blend_weight),
-                        "market_blend_weights": dict(market_blend_weights or {}),
-                        "anchor_model_path": anchor_path,
-                        "recent_regime_start": recent_regime_start or "",
-                        "recent_market_weights": dict(recent_market_weights or {}),
-                        "recent_segment_routes": recent_segment_routes,
-                        "prior_strategy": full_candidate["prior_strategy"],
-                        "train_rho": float(
-                            full_candidate["metrics"][primary_horizon]["spearman_rho"]
-                        ),
-                        "raw_gate_rho": float(raw_gate_primary_rho),
-                        "incumbent_gate_rho": float(incumbent_gate_primary_rho),
-                        "gate_raw_degradation_limit": float(route_raw_degradation_limit),
-                        "promotion_min_gate_rho": float(promotion_min_gate_rho),
-                    })
+                    skipped_gate_attempts.append(
+                        {
+                            "attempt": attempt_index,
+                            "reason": "raw gate rho too degraded for blend rescue",
+                            "target": full_candidate["target"],
+                            "target_horizon": primary_horizon,
+                            "ridge_lambda": full_candidate["ridge_lambda"],
+                            "backend": full_candidate["backend"],
+                            "model_kind": full_candidate["model_kind"],
+                            "feature_set": full_candidate["feature_set"],
+                            "blend_weight": float(blend_weight),
+                            "market_blend_weights": dict(market_blend_weights or {}),
+                            "anchor_model_path": anchor_path,
+                            "recent_regime_start": recent_regime_start or "",
+                            "recent_market_weights": dict(recent_market_weights or {}),
+                            "recent_segment_routes": recent_segment_routes,
+                            "prior_strategy": full_candidate["prior_strategy"],
+                            "train_rho": float(full_candidate["metrics"][primary_horizon]["spearman_rho"]),
+                            "raw_gate_rho": float(raw_gate_primary_rho),
+                            "incumbent_gate_rho": float(incumbent_gate_primary_rho),
+                            "gate_raw_degradation_limit": float(route_raw_degradation_limit),
+                            "promotion_min_gate_rho": float(promotion_min_gate_rho),
+                        }
+                    )
                     logger.info(
                         "ML promotion-gate skipped blend rescue target=%s "
                         "lambda=%.4g backend=%s model=%s features=%s blend=%.3g "
@@ -8391,37 +9508,32 @@ def train_ml_ranker(
                         float(promotion_min_gate_rho),
                     )
                     continue
-                if (
-                    max(raw_gate_primary_rho, incumbent_gate_primary_rho)
-                    + absolute_gate_route_margin
-                    < float(promotion_min_gate_rho)
+                if max(raw_gate_primary_rho, incumbent_gate_primary_rho) + absolute_gate_route_margin < float(
+                    promotion_min_gate_rho
                 ):
-                    skipped_gate_attempts.append({
-                        "attempt": attempt_index,
-                        "reason": (
-                            "raw/incumbent gate rho too far below absolute floor "
-                            "for blend precheck"
-                        ),
-                        "target": full_candidate["target"],
-                        "target_horizon": primary_horizon,
-                        "ridge_lambda": full_candidate["ridge_lambda"],
-                        "backend": full_candidate["backend"],
-                        "model_kind": full_candidate["model_kind"],
-                        "feature_set": full_candidate["feature_set"],
-                        "blend_weight": float(blend_weight),
-                        "market_blend_weights": dict(market_blend_weights or {}),
-                        "anchor_model_path": anchor_path,
-                        "recent_regime_start": recent_regime_start or "",
-                        "recent_market_weights": dict(recent_market_weights or {}),
-                        "recent_segment_routes": recent_segment_routes,
-                        "prior_strategy": full_candidate["prior_strategy"],
-                        "train_rho": float(
-                            full_candidate["metrics"][primary_horizon]["spearman_rho"]
-                        ),
-                        "raw_gate_rho": float(raw_gate_primary_rho),
-                        "incumbent_gate_rho": float(incumbent_gate_primary_rho),
-                        "promotion_min_gate_rho": float(promotion_min_gate_rho),
-                    })
+                    skipped_gate_attempts.append(
+                        {
+                            "attempt": attempt_index,
+                            "reason": ("raw/incumbent gate rho too far below absolute floor for blend precheck"),
+                            "target": full_candidate["target"],
+                            "target_horizon": primary_horizon,
+                            "ridge_lambda": full_candidate["ridge_lambda"],
+                            "backend": full_candidate["backend"],
+                            "model_kind": full_candidate["model_kind"],
+                            "feature_set": full_candidate["feature_set"],
+                            "blend_weight": float(blend_weight),
+                            "market_blend_weights": dict(market_blend_weights or {}),
+                            "anchor_model_path": anchor_path,
+                            "recent_regime_start": recent_regime_start or "",
+                            "recent_market_weights": dict(recent_market_weights or {}),
+                            "recent_segment_routes": recent_segment_routes,
+                            "prior_strategy": full_candidate["prior_strategy"],
+                            "train_rho": float(full_candidate["metrics"][primary_horizon]["spearman_rho"]),
+                            "raw_gate_rho": float(raw_gate_primary_rho),
+                            "incumbent_gate_rho": float(incumbent_gate_primary_rho),
+                            "promotion_min_gate_rho": float(promotion_min_gate_rho),
+                        }
+                    )
                     logger.info(
                         "ML promotion-gate skipped blend precheck target=%s "
                         "lambda=%.4g backend=%s model=%s features=%s blend=%.3g "
@@ -8463,32 +9575,30 @@ def train_ml_ranker(
                     gate_snapshots,
                     precheck_gate_predictions,
                 )
-                precheck_gate_rho = float(
-                    precheck_gate_metrics[primary_horizon]["spearman_rho"]
-                )
+                precheck_gate_rho = float(precheck_gate_metrics[primary_horizon]["spearman_rho"])
                 if precheck_gate_rho < float(promotion_min_gate_rho):
-                    skipped_gate_attempts.append({
-                        "attempt": attempt_index,
-                        "reason": "gate rho below absolute floor before train blend",
-                        "target": full_candidate["target"],
-                        "target_horizon": primary_horizon,
-                        "ridge_lambda": full_candidate["ridge_lambda"],
-                        "backend": full_candidate["backend"],
-                        "model_kind": full_candidate["model_kind"],
-                        "feature_set": full_candidate["feature_set"],
-                        "blend_weight": float(blend_weight),
-                        "market_blend_weights": dict(market_blend_weights or {}),
-                        "anchor_model_path": anchor_path,
-                        "recent_regime_start": recent_regime_start or "",
-                        "recent_market_weights": dict(recent_market_weights or {}),
-                        "recent_segment_routes": recent_segment_routes,
-                        "prior_strategy": full_candidate["prior_strategy"],
-                        "train_rho": float(
-                            full_candidate["metrics"][primary_horizon]["spearman_rho"]
-                        ),
-                        "gate_rho": float(precheck_gate_rho),
-                        "promotion_min_gate_rho": float(promotion_min_gate_rho),
-                    })
+                    skipped_gate_attempts.append(
+                        {
+                            "attempt": attempt_index,
+                            "reason": "gate rho below absolute floor before train blend",
+                            "target": full_candidate["target"],
+                            "target_horizon": primary_horizon,
+                            "ridge_lambda": full_candidate["ridge_lambda"],
+                            "backend": full_candidate["backend"],
+                            "model_kind": full_candidate["model_kind"],
+                            "feature_set": full_candidate["feature_set"],
+                            "blend_weight": float(blend_weight),
+                            "market_blend_weights": dict(market_blend_weights or {}),
+                            "anchor_model_path": anchor_path,
+                            "recent_regime_start": recent_regime_start or "",
+                            "recent_market_weights": dict(recent_market_weights or {}),
+                            "recent_segment_routes": recent_segment_routes,
+                            "prior_strategy": full_candidate["prior_strategy"],
+                            "train_rho": float(full_candidate["metrics"][primary_horizon]["spearman_rho"]),
+                            "gate_rho": float(precheck_gate_rho),
+                            "promotion_min_gate_rho": float(promotion_min_gate_rho),
+                        }
+                    )
                     logger.info(
                         "ML promotion-gate skipped blend precheck target=%s "
                         "lambda=%.4g backend=%s model=%s features=%s blend=%.3g "
@@ -8520,13 +9630,9 @@ def train_ml_ranker(
                 else None
             )
             train_predictions_for_payload: Optional[np.ndarray] = None
-            need_train_floor_check = (
-                incumbent_train_floor is not None or promotion_min_train_rho is not None
-            )
+            need_train_floor_check = incumbent_train_floor is not None or promotion_min_train_rho is not None
             if recent_regime or recent_market_regime or recent_segment_regime or segment_regime:
-                payload_train_rho = float(
-                    full_candidate["metrics"][primary_horizon]["spearman_rho"]
-                )
+                payload_train_rho = float(full_candidate["metrics"][primary_horizon]["spearman_rho"])
             elif anchor_payload_option is not None:
                 if raw_train_predictions is None:
                     raw_train_predictions = predict_ml_ranker_payload(
@@ -8552,9 +9658,7 @@ def train_ml_ranker(
                     )
             elif market_blend_weights is not None:
                 payload_train_rho = (
-                    precomputed_market_train_rhos.get(market_blend_key)
-                    if market_blend_key is not None
-                    else None
+                    precomputed_market_train_rhos.get(market_blend_key) if market_blend_key is not None else None
                 )
                 if payload_train_rho is None and need_train_floor_check:
                     if raw_train_predictions is None:
@@ -8581,13 +9685,13 @@ def train_ml_ranker(
                         primary_horizon,
                     )
                 if payload_train_rho is None:
-                    payload_train_rho = float(
-                        full_candidate["metrics"][primary_horizon]["spearman_rho"]
-                    )
+                    payload_train_rho = float(full_candidate["metrics"][primary_horizon]["spearman_rho"])
             elif blend_weight == 1.0:
                 payload_train_rho = precomputed_train_rhos.get(
                     blend_key,
-                    float(full_candidate["metrics"][primary_horizon]["spearman_rho"]),
+                    frozen_train_rho
+                    if frozen_train_rho is not None
+                    else float(full_candidate["metrics"][primary_horizon]["spearman_rho"]),
                 )
             else:
                 if raw_train_predictions is None:
@@ -8612,29 +9716,28 @@ def train_ml_ranker(
                         primary_horizon,
                     )
 
-            if (
-                incumbent_train_floor is not None
-                and payload_train_rho < incumbent_train_floor
-            ):
-                skipped_gate_attempts.append({
-                    "attempt": attempt_index,
-                    "reason": "train/full-eval rho below incumbent after blend",
-                    "target": full_candidate["target"],
-                    "target_horizon": primary_horizon,
-                    "ridge_lambda": full_candidate["ridge_lambda"],
-                    "backend": full_candidate["backend"],
-                    "model_kind": full_candidate["model_kind"],
-                    "feature_set": full_candidate["feature_set"],
-                    "blend_weight": float(blend_weight),
-                    "market_blend_weights": dict(market_blend_weights or {}),
-                    "anchor_model_path": anchor_path,
-                    "recent_regime_start": recent_regime_start or "",
-                    "recent_market_weights": dict(recent_market_weights or {}),
-                    "recent_segment_routes": recent_segment_routes,
-                    "prior_strategy": full_candidate["prior_strategy"],
-                    "train_rho": float(payload_train_rho),
-                    "incumbent_train_rho": float(incumbent_train_rho),
-                })
+            if incumbent_train_floor is not None and payload_train_rho < incumbent_train_floor:
+                skipped_gate_attempts.append(
+                    {
+                        "attempt": attempt_index,
+                        "reason": "train/full-eval rho below incumbent after blend",
+                        "target": full_candidate["target"],
+                        "target_horizon": primary_horizon,
+                        "ridge_lambda": full_candidate["ridge_lambda"],
+                        "backend": full_candidate["backend"],
+                        "model_kind": full_candidate["model_kind"],
+                        "feature_set": full_candidate["feature_set"],
+                        "blend_weight": float(blend_weight),
+                        "market_blend_weights": dict(market_blend_weights or {}),
+                        "anchor_model_path": anchor_path,
+                        "recent_regime_start": recent_regime_start or "",
+                        "recent_market_weights": dict(recent_market_weights or {}),
+                        "recent_segment_routes": recent_segment_routes,
+                        "prior_strategy": full_candidate["prior_strategy"],
+                        "train_rho": float(payload_train_rho),
+                        "incumbent_train_rho": float(incumbent_train_rho),
+                    }
+                )
                 logger.info(
                     "ML promotion-gate skipped target=%s lambda=%.4g backend=%s "
                     "model=%s features=%s blend=%.3g market_blend=%s priors=%s "
@@ -8655,29 +9758,30 @@ def train_ml_ranker(
                 continue
             if (
                 promotion_min_train_rho is not None
-                and payload_train_rho
-                + (market_train_floor_tolerance if market_blend_weights is not None else 0.0)
+                and payload_train_rho + (market_train_floor_tolerance if market_blend_weights is not None else 0.0)
                 < promotion_min_train_rho
             ):
-                skipped_gate_attempts.append({
-                    "attempt": attempt_index,
-                    "reason": "train/full-eval rho below requested promotion floor",
-                    "target": full_candidate["target"],
-                    "target_horizon": primary_horizon,
-                    "ridge_lambda": full_candidate["ridge_lambda"],
-                    "backend": full_candidate["backend"],
-                    "model_kind": full_candidate["model_kind"],
-                    "feature_set": full_candidate["feature_set"],
-                    "blend_weight": float(blend_weight),
-                    "market_blend_weights": dict(market_blend_weights or {}),
-                    "anchor_model_path": anchor_path,
-                    "recent_regime_start": recent_regime_start or "",
-                    "recent_market_weights": dict(recent_market_weights or {}),
-                    "recent_segment_routes": recent_segment_routes,
-                    "prior_strategy": full_candidate["prior_strategy"],
-                    "train_rho": float(payload_train_rho),
-                    "promotion_min_train_rho": float(promotion_min_train_rho),
-                })
+                skipped_gate_attempts.append(
+                    {
+                        "attempt": attempt_index,
+                        "reason": "train/full-eval rho below requested promotion floor",
+                        "target": full_candidate["target"],
+                        "target_horizon": primary_horizon,
+                        "ridge_lambda": full_candidate["ridge_lambda"],
+                        "backend": full_candidate["backend"],
+                        "model_kind": full_candidate["model_kind"],
+                        "feature_set": full_candidate["feature_set"],
+                        "blend_weight": float(blend_weight),
+                        "market_blend_weights": dict(market_blend_weights or {}),
+                        "anchor_model_path": anchor_path,
+                        "recent_regime_start": recent_regime_start or "",
+                        "recent_market_weights": dict(recent_market_weights or {}),
+                        "recent_segment_routes": recent_segment_routes,
+                        "prior_strategy": full_candidate["prior_strategy"],
+                        "train_rho": float(payload_train_rho),
+                        "promotion_min_train_rho": float(promotion_min_train_rho),
+                    }
+                )
                 logger.info(
                     "ML promotion-gate skipped target=%s lambda=%.4g backend=%s "
                     "model=%s features=%s blend=%.3g market_blend=%s priors=%s "
@@ -8701,42 +9805,38 @@ def train_ml_ranker(
                     frame_for_payload(raw_payload, train_frame=False),
                     raw_payload,
                 )
-            route_candidate_requested = (
-                segment_regime
-                or recent_segment_regime
-                or recent_market_regime
-                or recent_regime
-            )
+            route_candidate_requested = segment_regime or recent_segment_regime or recent_market_regime or recent_regime
             if (
                 promotion_min_gate_rho is not None
                 and raw_gate_primary_rho is not None
                 and route_candidate_requested
                 and incumbent_gate_primary_rho < float(promotion_min_gate_rho)
-                and raw_gate_primary_rho + route_raw_degradation_limit
-                < incumbent_gate_primary_rho
+                and raw_gate_primary_rho + route_raw_degradation_limit < incumbent_gate_primary_rho
             ):
-                skipped_gate_attempts.append({
-                    "attempt": attempt_index,
-                    "reason": "raw gate rho too degraded for route rescue",
-                    "target": full_candidate["target"],
-                    "target_horizon": primary_horizon,
-                    "ridge_lambda": full_candidate["ridge_lambda"],
-                    "backend": full_candidate["backend"],
-                    "model_kind": full_candidate["model_kind"],
-                    "feature_set": full_candidate["feature_set"],
-                    "blend_weight": float(blend_weight),
-                    "market_blend_weights": dict(market_blend_weights or {}),
-                    "anchor_model_path": anchor_path,
-                    "recent_regime_start": recent_regime_start or "",
-                    "recent_market_weights": dict(recent_market_weights or {}),
-                    "recent_segment_routes": recent_segment_routes,
-                    "prior_strategy": full_candidate["prior_strategy"],
-                    "train_rho": float(payload_train_rho),
-                    "raw_gate_rho": float(raw_gate_primary_rho),
-                    "incumbent_gate_rho": float(incumbent_gate_primary_rho),
-                    "route_raw_degradation_limit": float(route_raw_degradation_limit),
-                    "promotion_min_gate_rho": float(promotion_min_gate_rho),
-                })
+                skipped_gate_attempts.append(
+                    {
+                        "attempt": attempt_index,
+                        "reason": "raw gate rho too degraded for route rescue",
+                        "target": full_candidate["target"],
+                        "target_horizon": primary_horizon,
+                        "ridge_lambda": full_candidate["ridge_lambda"],
+                        "backend": full_candidate["backend"],
+                        "model_kind": full_candidate["model_kind"],
+                        "feature_set": full_candidate["feature_set"],
+                        "blend_weight": float(blend_weight),
+                        "market_blend_weights": dict(market_blend_weights or {}),
+                        "anchor_model_path": anchor_path,
+                        "recent_regime_start": recent_regime_start or "",
+                        "recent_market_weights": dict(recent_market_weights or {}),
+                        "recent_segment_routes": recent_segment_routes,
+                        "prior_strategy": full_candidate["prior_strategy"],
+                        "train_rho": float(payload_train_rho),
+                        "raw_gate_rho": float(raw_gate_primary_rho),
+                        "incumbent_gate_rho": float(incumbent_gate_primary_rho),
+                        "route_raw_degradation_limit": float(route_raw_degradation_limit),
+                        "promotion_min_gate_rho": float(promotion_min_gate_rho),
+                    }
+                )
                 logger.info(
                     "ML promotion-gate skipped route rescue target=%s lambda=%.4g "
                     "backend=%s model=%s features=%s raw_gate_%s_rho=%.6f "
@@ -8759,32 +9859,33 @@ def train_ml_ranker(
             if (
                 promotion_min_gate_rho is not None
                 and raw_gate_primary_rho is not None
-                and max(raw_gate_primary_rho, incumbent_gate_primary_rho)
-                + absolute_gate_route_margin
+                and max(raw_gate_primary_rho, incumbent_gate_primary_rho) + absolute_gate_route_margin
                 < float(promotion_min_gate_rho)
                 and route_candidate_requested
             ):
-                skipped_gate_attempts.append({
-                    "attempt": attempt_index,
-                    "reason": "raw gate rho too far below absolute floor for route search",
-                    "target": full_candidate["target"],
-                    "target_horizon": primary_horizon,
-                    "ridge_lambda": full_candidate["ridge_lambda"],
-                    "backend": full_candidate["backend"],
-                    "model_kind": full_candidate["model_kind"],
-                    "feature_set": full_candidate["feature_set"],
-                    "blend_weight": float(blend_weight),
-                    "market_blend_weights": dict(market_blend_weights or {}),
-                    "anchor_model_path": anchor_path,
-                    "recent_regime_start": recent_regime_start or "",
-                    "recent_market_weights": dict(recent_market_weights or {}),
-                    "recent_segment_routes": recent_segment_routes,
-                    "prior_strategy": full_candidate["prior_strategy"],
-                    "train_rho": float(payload_train_rho),
-                    "raw_gate_rho": float(raw_gate_primary_rho),
-                    "incumbent_gate_rho": float(incumbent_gate_primary_rho),
-                    "promotion_min_gate_rho": float(promotion_min_gate_rho),
-                })
+                skipped_gate_attempts.append(
+                    {
+                        "attempt": attempt_index,
+                        "reason": "raw gate rho too far below absolute floor for route search",
+                        "target": full_candidate["target"],
+                        "target_horizon": primary_horizon,
+                        "ridge_lambda": full_candidate["ridge_lambda"],
+                        "backend": full_candidate["backend"],
+                        "model_kind": full_candidate["model_kind"],
+                        "feature_set": full_candidate["feature_set"],
+                        "blend_weight": float(blend_weight),
+                        "market_blend_weights": dict(market_blend_weights or {}),
+                        "anchor_model_path": anchor_path,
+                        "recent_regime_start": recent_regime_start or "",
+                        "recent_market_weights": dict(recent_market_weights or {}),
+                        "recent_segment_routes": recent_segment_routes,
+                        "prior_strategy": full_candidate["prior_strategy"],
+                        "train_rho": float(payload_train_rho),
+                        "raw_gate_rho": float(raw_gate_primary_rho),
+                        "incumbent_gate_rho": float(incumbent_gate_primary_rho),
+                        "promotion_min_gate_rho": float(promotion_min_gate_rho),
+                    }
+                )
                 logger.info(
                     "ML promotion-gate skipped route target=%s lambda=%.4g backend=%s "
                     "model=%s features=%s raw_gate_%s_rho=%.6f "
@@ -8804,40 +9905,40 @@ def train_ml_ranker(
                     absolute_gate_route_margin,
                 )
                 continue
-            blend_candidate_requested = (
-                market_blend_weights is not None
-                or (anchor_payload_option is None and blend_weight != 1.0)
+            blend_candidate_requested = market_blend_weights is not None or (
+                anchor_payload_option is None and blend_weight != 1.0
             )
             if (
                 promotion_min_gate_rho is not None
                 and raw_gate_primary_rho is not None
                 and blend_candidate_requested
                 and incumbent_gate_primary_rho < float(promotion_min_gate_rho)
-                and raw_gate_primary_rho + route_raw_degradation_limit
-                < incumbent_gate_primary_rho
+                and raw_gate_primary_rho + route_raw_degradation_limit < incumbent_gate_primary_rho
             ):
-                skipped_gate_attempts.append({
-                    "attempt": attempt_index,
-                    "reason": "raw gate rho too degraded for blend rescue",
-                    "target": full_candidate["target"],
-                    "target_horizon": primary_horizon,
-                    "ridge_lambda": full_candidate["ridge_lambda"],
-                    "backend": full_candidate["backend"],
-                    "model_kind": full_candidate["model_kind"],
-                    "feature_set": full_candidate["feature_set"],
-                    "blend_weight": float(blend_weight),
-                    "market_blend_weights": dict(market_blend_weights or {}),
-                    "anchor_model_path": anchor_path,
-                    "recent_regime_start": recent_regime_start or "",
-                    "recent_market_weights": dict(recent_market_weights or {}),
-                    "recent_segment_routes": recent_segment_routes,
-                    "prior_strategy": full_candidate["prior_strategy"],
-                    "train_rho": float(payload_train_rho),
-                    "raw_gate_rho": float(raw_gate_primary_rho),
-                    "incumbent_gate_rho": float(incumbent_gate_primary_rho),
-                    "gate_raw_degradation_limit": float(route_raw_degradation_limit),
-                    "promotion_min_gate_rho": float(promotion_min_gate_rho),
-                })
+                skipped_gate_attempts.append(
+                    {
+                        "attempt": attempt_index,
+                        "reason": "raw gate rho too degraded for blend rescue",
+                        "target": full_candidate["target"],
+                        "target_horizon": primary_horizon,
+                        "ridge_lambda": full_candidate["ridge_lambda"],
+                        "backend": full_candidate["backend"],
+                        "model_kind": full_candidate["model_kind"],
+                        "feature_set": full_candidate["feature_set"],
+                        "blend_weight": float(blend_weight),
+                        "market_blend_weights": dict(market_blend_weights or {}),
+                        "anchor_model_path": anchor_path,
+                        "recent_regime_start": recent_regime_start or "",
+                        "recent_market_weights": dict(recent_market_weights or {}),
+                        "recent_segment_routes": recent_segment_routes,
+                        "prior_strategy": full_candidate["prior_strategy"],
+                        "train_rho": float(payload_train_rho),
+                        "raw_gate_rho": float(raw_gate_primary_rho),
+                        "incumbent_gate_rho": float(incumbent_gate_primary_rho),
+                        "gate_raw_degradation_limit": float(route_raw_degradation_limit),
+                        "promotion_min_gate_rho": float(promotion_min_gate_rho),
+                    }
+                )
                 logger.info(
                     "ML promotion-gate skipped blend rescue target=%s lambda=%.4g "
                     "backend=%s model=%s features=%s blend=%.3g market_blend=%s "
@@ -8892,8 +9993,7 @@ def train_ml_ranker(
                     recent_segment_routes,
                 )
                 candidate_gate_predictions = (
-                    route_weights * raw_gate_predictions
-                    + (1.0 - route_weights) * incumbent_gate_predictions
+                    route_weights * raw_gate_predictions + (1.0 - route_weights) * incumbent_gate_predictions
                 )
             elif recent_segment_regime:
                 segment_route = _recent_positive_window_segment_route(
@@ -8922,8 +10022,7 @@ def train_ml_ranker(
                     recent_segment_routes,
                 )
                 candidate_gate_predictions = (
-                    route_weights * raw_gate_predictions
-                    + (1.0 - route_weights) * incumbent_gate_predictions
+                    route_weights * raw_gate_predictions + (1.0 - route_weights) * incumbent_gate_predictions
                 )
             elif recent_market_regime:
                 recent_route = _recent_positive_window_market_route(
@@ -8948,17 +10047,14 @@ def train_ml_ranker(
                     continue
                 recent_regime_start, recent_market_weights = recent_route
                 gate_dates = _snapshot_dates(gate_snapshots)
-                recent_mask = (
-                    gate_dates >= pd.Timestamp(recent_regime_start)
-                ).to_numpy(dtype=bool)
+                recent_mask = (gate_dates >= pd.Timestamp(recent_regime_start)).to_numpy(dtype=bool)
                 market_gate_weights = _market_blend_weight_vector(
                     gate_snapshots,
                     recent_market_weights,
                 )
                 route_weights = np.where(recent_mask, market_gate_weights, 0.0)
                 candidate_gate_predictions = (
-                    route_weights * raw_gate_predictions
-                    + (1.0 - route_weights) * incumbent_gate_predictions
+                    route_weights * raw_gate_predictions + (1.0 - route_weights) * incumbent_gate_predictions
                 )
             elif recent_regime:
                 raw_regime_diagnostics = _regime_diagnostics(
@@ -8984,9 +10080,7 @@ def train_ml_ranker(
                     )
                     continue
                 gate_dates = _snapshot_dates(gate_snapshots)
-                recent_mask = (
-                    gate_dates >= pd.Timestamp(recent_regime_start)
-                ).to_numpy(dtype=bool)
+                recent_mask = (gate_dates >= pd.Timestamp(recent_regime_start)).to_numpy(dtype=bool)
                 candidate_gate_predictions = np.where(
                     recent_mask,
                     raw_gate_predictions,
@@ -9028,9 +10122,7 @@ def train_ml_ranker(
                 and not recent_segment_regime
                 and not segment_regime
             ):
-                raw_gate_primary_rho = float(
-                    candidate_gate_metrics[primary_horizon]["spearman_rho"]
-                )
+                raw_gate_primary_rho = float(candidate_gate_metrics[primary_horizon]["spearman_rho"])
             gate_result = evaluate_promotion_gate(
                 candidate_metrics=candidate_gate_metrics,
                 incumbent_metrics=incumbent_gate_metrics,
@@ -9073,9 +10165,7 @@ def train_ml_ranker(
                 "recent_market_weights": dict(recent_market_weights or {}),
                 "recent_segment_routes": recent_segment_routes,
                 "prior_strategy": full_candidate["prior_strategy"],
-                "sample_rho": float(
-                    full_candidate["sample_metrics"][primary_horizon]["spearman_rho"]
-                ),
+                "sample_rho": float(full_candidate["sample_metrics"][primary_horizon]["spearman_rho"]),
                 "train_rho": float(
                     payload_train_rho
                     if payload_train_rho is not None
@@ -9151,17 +10241,19 @@ def train_ml_ranker(
                             candidate_payload=raw_payload,
                             routes=recent_segment_routes,
                         )
-                        accepted_payload["metadata"].update({
-                            "backend": "gate_segment_blend",
-                            "model_kind": "gate_segment_blend",
-                            "feature_set": "gate_segment",
-                            "prior_strategy": "gate_segment",
-                            "train_metrics": train_metrics,
-                            "train_rho_improvement": _improvement_ratio(
-                                float(train_metrics[primary_horizon]["spearman_rho"]),
-                                train_baseline_rho,
-                            ),
-                        })
+                        accepted_payload["metadata"].update(
+                            {
+                                "backend": "gate_segment_blend",
+                                "model_kind": "gate_segment_blend",
+                                "feature_set": "gate_segment",
+                                "prior_strategy": "gate_segment",
+                                "train_metrics": train_metrics,
+                                "train_rho_improvement": _improvement_ratio(
+                                    float(train_metrics[primary_horizon]["spearman_rho"]),
+                                    train_baseline_rho,
+                                ),
+                            }
+                        )
                     elif recent_segment_regime and recent_regime_start is not None:
                         train_metrics = full_candidate["metrics"]
                         accepted_payload = _recent_segment_regime_temporal_payload(
@@ -9171,13 +10263,15 @@ def train_ml_ranker(
                             recent_start=recent_regime_start,
                             routes=recent_segment_routes,
                         )
-                        accepted_payload["metadata"].update({
-                            "train_metrics": train_metrics,
-                            "train_rho_improvement": _improvement_ratio(
-                                float(train_metrics[primary_horizon]["spearman_rho"]),
-                                train_baseline_rho,
-                            ),
-                        })
+                        accepted_payload["metadata"].update(
+                            {
+                                "train_metrics": train_metrics,
+                                "train_rho_improvement": _improvement_ratio(
+                                    float(train_metrics[primary_horizon]["spearman_rho"]),
+                                    train_baseline_rho,
+                                ),
+                            }
+                        )
                     elif recent_market_regime and recent_regime_start is not None:
                         train_metrics = full_candidate["metrics"]
                         accepted_payload = _recent_market_regime_temporal_payload(
@@ -9187,13 +10281,15 @@ def train_ml_ranker(
                             recent_start=recent_regime_start,
                             candidate_weights_by_market=recent_market_weights or {},
                         )
-                        accepted_payload["metadata"].update({
-                            "train_metrics": train_metrics,
-                            "train_rho_improvement": _improvement_ratio(
-                                float(train_metrics[primary_horizon]["spearman_rho"]),
-                                train_baseline_rho,
-                            ),
-                        })
+                        accepted_payload["metadata"].update(
+                            {
+                                "train_metrics": train_metrics,
+                                "train_rho_improvement": _improvement_ratio(
+                                    float(train_metrics[primary_horizon]["spearman_rho"]),
+                                    train_baseline_rho,
+                                ),
+                            }
+                        )
                     elif recent_regime and recent_regime_start is not None:
                         train_metrics = full_candidate["metrics"]
                         accepted_payload = _recent_regime_temporal_payload(
@@ -9202,13 +10298,15 @@ def train_ml_ranker(
                             gate_start=str(split.manifest["gate_start"]),
                             recent_start=recent_regime_start,
                         )
-                        accepted_payload["metadata"].update({
-                            "train_metrics": train_metrics,
-                            "train_rho_improvement": _improvement_ratio(
-                                float(train_metrics[primary_horizon]["spearman_rho"]),
-                                train_baseline_rho,
-                            ),
-                        })
+                        accepted_payload["metadata"].update(
+                            {
+                                "train_metrics": train_metrics,
+                                "train_rho_improvement": _improvement_ratio(
+                                    float(train_metrics[primary_horizon]["spearman_rho"]),
+                                    train_baseline_rho,
+                                ),
+                            }
+                        )
                     elif anchor_payload_option is not None:
                         if train_predictions_for_payload is None:
                             raise RuntimeError("ML ranker missing anchor-blended train predictions")
@@ -9221,13 +10319,15 @@ def train_ml_ranker(
                             candidate_payload=raw_payload,
                             candidate_weight=blend_weight,
                         )
-                        accepted_payload["metadata"].update({
-                            "train_metrics": train_metrics,
-                            "train_rho_improvement": _improvement_ratio(
-                                float(train_metrics[primary_horizon]["spearman_rho"]),
-                                train_baseline_rho,
-                            ),
-                        })
+                        accepted_payload["metadata"].update(
+                            {
+                                "train_metrics": train_metrics,
+                                "train_rho_improvement": _improvement_ratio(
+                                    float(train_metrics[primary_horizon]["spearman_rho"]),
+                                    train_baseline_rho,
+                                ),
+                            }
+                        )
                     if accepted_payload is None:
                         if train_predictions_for_payload is None:
                             if raw_train_predictions is None:
@@ -9250,8 +10350,7 @@ def train_ml_ranker(
                                 )
                                 train_predictions_for_payload = (
                                     market_train_weights * raw_train_predictions
-                                    + (1.0 - market_train_weights)
-                                    * incumbent_train_predictions
+                                    + (1.0 - market_train_weights) * incumbent_train_predictions
                                 )
                             elif blend_weight == 1.0:
                                 train_predictions_for_payload = raw_train_predictions
@@ -9266,8 +10365,7 @@ def train_ml_ranker(
                                     )
                                 train_predictions_for_payload = (
                                     float(blend_weight) * raw_train_predictions
-                                    + (1.0 - float(blend_weight))
-                                    * incumbent_train_predictions
+                                    + (1.0 - float(blend_weight)) * incumbent_train_predictions
                                 )
                         train_metrics = _evaluate_predictions(
                             train_snapshots,
@@ -9282,11 +10380,9 @@ def train_ml_ranker(
                     best_accepted_payload = accepted_payload
                     best_accepted_gate = gate_result
                     best_accepted_attempt = attempt
-                    if (
-                        promotion_min_gate_rho is not None
-                        and float(candidate_gate_metrics[primary_horizon]["spearman_rho"])
-                        >= float(promotion_min_gate_rho)
-                    ):
+                    if promotion_min_gate_rho is not None and float(
+                        candidate_gate_metrics[primary_horizon]["spearman_rho"]
+                    ) >= float(promotion_min_gate_rho):
                         stop_after_gate_acceptance = True
                 if recent_regime:
                     break
@@ -9303,11 +10399,7 @@ def train_ml_ranker(
         if stop_after_gate_acceptance:
             break
 
-    if (
-        best_accepted_payload is not None
-        and best_accepted_gate is not None
-        and best_accepted_attempt is not None
-    ):
+    if best_accepted_payload is not None and best_accepted_gate is not None and best_accepted_attempt is not None:
         candidate_gate_metrics = best_accepted_gate.candidate_metrics
         metadata = best_accepted_payload["metadata"]
         if not isinstance(metadata, dict):

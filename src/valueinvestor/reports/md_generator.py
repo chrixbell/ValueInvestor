@@ -243,17 +243,47 @@ def _uses_ml_ranker(cfg: dict) -> bool:
 def _ml_ranker_label(cfg: dict) -> str:
     scorer_model = _scorer_model_from_config(cfg)
     backend = scorer_model.get("backend") or "local"
+    model_kind = scorer_model.get("model_kind")
     ensemble_size = scorer_model.get("ensemble_size")
+    parts = [str(backend)]
+    if model_kind and model_kind != backend:
+        parts.append(str(model_kind))
     if ensemble_size:
-        return f"{backend}, ensemble_size={ensemble_size}"
-    return str(backend)
+        parts.append(f"ensemble_size={ensemble_size}")
+    return ", ".join(parts)
+
+
+def _is_full_refit_rho(cfg: dict) -> bool:
+    scorer_model = _scorer_model_from_config(cfg)
+    basis = scorer_model.get("spearman_rho_basis")
+    protocol = scorer_model.get("evaluation_protocol")
+    return any(
+        isinstance(value, str) and value.startswith("full_refit_")
+        for value in (basis, protocol)
+    )
+
+
+def _strict_purged_audit(cfg: dict) -> dict:
+    audit = _scorer_model_from_config(cfg).get("strict_purged_audit")
+    return audit if isinstance(audit, dict) else {}
 
 
 def _zh_upfront_model_notes(cfg: dict) -> str:
     """Render the three upfront model, rho, and score explanation sections."""
     rho_6m = _rho_value_from_config(cfg)
+    holdout_rho_6m = _holdout_rho_value_from_config(cfg)
     if rho_6m is None:
         rho_current = "当前报告未附带可用的 6 个月 Spearman ρ 数值。"
+    elif holdout_rho_6m is not None:
+        rho_current = (
+            f"当前 6 个月未触碰持出集 Spearman ρ = **{holdout_rho_6m:.4f}**，"
+            f"评级为 **{_rho_quality(holdout_rho_6m)}**。"
+        )
+    elif _is_full_refit_rho(cfg):
+        rho_current = (
+            "当前 6 个月全量重拟合/当前 24 个月月度评估 Spearman ρ = "
+            f"**{rho_6m:.4f}**，评级为 **{_rho_quality(rho_6m)}**。"
+        )
     else:
         rho_current = (
             f"当前 6 个月训练/全量回测 Spearman ρ = **{rho_6m:.4f}**，"
@@ -271,6 +301,36 @@ def _zh_upfront_model_notes(cfg: dict) -> str:
             "分数越高，表示该公司在模型历史回测框架下越接近未来 6 个月收益排序靠前的特征，"
             "但这**不保证**任何单一股票未来上涨。"
         )
+    scorer_model = _scorer_model_from_config(cfg)
+    validation_note = ""
+    purged_audit = _strict_purged_audit(cfg)
+    if purged_audit and purged_audit.get("accepted") is False:
+        audit_rho = purged_audit.get("spearman_rho")
+        best_audit_rho = purged_audit.get("best_spearman_rho")
+        audit_details = ""
+        try:
+            audit_details = f"严格时间净化审计 6 个月 Spearman ρ = **{float(audit_rho):.4f}**"
+            if best_audit_rho is not None:
+                audit_details += f"（最佳迭代 **{float(best_audit_rho):.4f}**）"
+            audit_details += "。"
+        except (TypeError, ValueError):
+            pass
+        validation_note = (
+            "\n\n**验证状态：当前全量重拟合协议达到目标，但严格时间净化审计未通过。** "
+            "上述数值不是未触碰持出集结果，不应解释为样本外验证。"
+            f"{audit_details}"
+        )
+    elif scorer_model.get("promotion_status") == "provisional":
+        floor = scorer_model.get("promotion_gate_min_primary_rho")
+        floor_text = "预设绝对推广门槛"
+        try:
+            floor_text = f"预设绝对推广门槛 {float(floor):.4f}"
+        except (TypeError, ValueError):
+            pass
+        validation_note = (
+            "\n\n**验证状态：临时研究模型。** 该模型优于修正数据上的持出基准，"
+            f"但未达到{floor_text}，因此不应视为已通过正式推广门。"
+        )
 
     return (
         "## 报告使用前说明\n\n"
@@ -280,7 +340,7 @@ def _zh_upfront_model_notes(cfg: dict) -> str:
         "评估公司在未来 6 个月股票增长排序中的相对可能性。"
         "该结果只能作为研究线索，不应作为任何投资决策的唯一依据。\n\n"
         "### 2. 当前 6 个月 Spearman ρ 的含义\n\n"
-        f"{rho_current} "
+        f"{rho_current}{validation_note} "
         "Spearman ρ 衡量的是模型综合评分排序与未来 6 个月实际收益排序之间的相关性，"
         "也就是“高分股票是否更倾向于在之后 6 个月取得更靠前的收益排名”。"
         "ρ 的取值范围是 **-1 到 +1**：+1 表示排序完全一致，0 表示没有单调排序关系，"
@@ -306,8 +366,19 @@ def _zh_upfront_model_notes(cfg: dict) -> str:
 def _en_upfront_model_notes(cfg: dict) -> str:
     """Render the upfront model, rho, and score explanation sections."""
     rho_6m = _rho_value_from_config(cfg)
+    holdout_rho_6m = _holdout_rho_value_from_config(cfg)
     if rho_6m is None:
         rho_current = "No current 6-month Spearman rho value is attached to this report."
+    elif holdout_rho_6m is not None:
+        rho_current = (
+            "Current 6-month untouched-holdout Spearman rho = "
+            f"**{holdout_rho_6m:.4f}**."
+        )
+    elif _is_full_refit_rho(cfg):
+        rho_current = (
+            "Current 6-month full-refit/current-24-month monthly-evaluation "
+            f"Spearman rho = **{rho_6m:.4f}**."
+        )
     else:
         rho_current = (
             f"Current 6-month training/full-backtest Spearman rho = **{rho_6m:.4f}**."
@@ -325,6 +396,40 @@ def _en_upfront_model_notes(cfg: dict) -> str:
             "matches characteristics that historically ranked better over the following 6 months, "
             "but this does not guarantee future performance."
         )
+    scorer_model = _scorer_model_from_config(cfg)
+    validation_note = ""
+    purged_audit = _strict_purged_audit(cfg)
+    if purged_audit and purged_audit.get("accepted") is False:
+        audit_rho = purged_audit.get("spearman_rho")
+        best_audit_rho = purged_audit.get("best_spearman_rho")
+        audit_details = ""
+        try:
+            audit_details = (
+                " Strict purged-audit 6-month Spearman rho = "
+                f"**{float(audit_rho):.4f}**"
+            )
+            if best_audit_rho is not None:
+                audit_details += f" (best iteration **{float(best_audit_rho):.4f}**)"
+            audit_details += "."
+        except (TypeError, ValueError):
+            pass
+        validation_note = (
+            "\n\n**Validation status: the current full-refit protocol met its target, "
+            "but the strict purged audit failed.** The value above is not an untouched "
+            f"holdout result and must not be interpreted as out-of-sample validation.{audit_details}"
+        )
+    elif scorer_model.get("promotion_status") == "provisional":
+        floor = scorer_model.get("promotion_gate_min_primary_rho")
+        floor_text = "the predeclared absolute promotion floor"
+        try:
+            floor_text = f"the predeclared {float(floor):.4f} absolute promotion floor"
+        except (TypeError, ValueError):
+            pass
+        validation_note = (
+            "\n\n**Validation status: provisional research model.** It improved on the "
+            f"corrected holdout baseline but did not clear {floor_text}, so it is not a "
+            "formally promoted model."
+        )
 
     return (
         "## Before Using This Report\n\n"
@@ -333,7 +438,8 @@ def _en_upfront_model_notes(cfg: dict) -> str:
         "or buy/sell recommendation. It is based on roughly 10 years of company fundamental "
         "and valuation data and estimates relative likelihood of future 6-month stock-growth ranking.\n\n"
         "### 2. Current 6-Month Spearman Rho\n\n"
-        f"{rho_current} Spearman rho measures rank correlation between model scores and actual "
+        f"{rho_current}{validation_note} Spearman rho measures rank correlation between model "
+        "scores and actual "
         "future 6-month return rankings. Its range is **-1 to +1**: +1 is perfectly aligned, "
         "0 is no monotonic ranking relationship, and -1 is perfectly reversed.\n\n"
         "### 3. Score Value\n\n"

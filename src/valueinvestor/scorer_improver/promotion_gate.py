@@ -25,6 +25,7 @@ DEFAULT_MIN_GATE_SNAPSHOTS = 4
 DEFAULT_MIN_TRAIN_SNAPSHOTS = 4
 DEFAULT_MIN_REGIME_6M_WIN_RATE = 0.50
 DEFAULT_MAX_REGIME_6M_DEGRADATION = 0.05
+DEFAULT_MIN_RECENT_PRIMARY_RHO = 0.0
 PROMOTION_GATE_LEDGER_PATH = TRAINER_DIR / "promotion_gate_ledger.jsonl"
 
 _HORIZON_WEIGHTS = {"1m": 0.25, "3m": 0.35, "6m": 0.40}
@@ -63,6 +64,7 @@ class HoldoutGateConfig:
     min_primary_rho: Optional[float] = None
     min_regime_6m_win_rate: float = DEFAULT_MIN_REGIME_6M_WIN_RATE
     max_regime_6m_degradation: float = DEFAULT_MAX_REGIME_6M_DEGRADATION
+    min_recent_primary_rho: float = DEFAULT_MIN_RECENT_PRIMARY_RHO
     require_6m_top20_excess_non_degradation: bool = True
 
 
@@ -105,6 +107,13 @@ def _snapshot_series(df: pd.DataFrame) -> pd.Series:
 
 def _date_str(value: pd.Timestamp) -> str:
     return value.date().isoformat()
+
+
+def _source_fingerprint(path: Optional[Path]) -> str:
+    if path is None or not path.exists():
+        return ""
+    stat = path.stat()
+    return f"{path.name}:{stat.st_size}:{stat.st_mtime_ns}"
 
 
 def make_holdout_split(
@@ -159,6 +168,7 @@ def make_holdout_split(
     manifest = {
         "schema_version": PROMOTION_GATE_SCHEMA_VERSION,
         "source_path": str(source_path) if source_path is not None else "",
+        "source_fingerprint": _source_fingerprint(source_path),
         "snapshot_min": _date_str(pd.Timestamp(unique_dates[0])),
         "snapshot_max": _date_str(max_date),
         "train_start": _date_str(pd.Timestamp(_snapshot_series(train).min())),
@@ -244,7 +254,27 @@ def evaluate_promotion_gate(
     ):
         reason = f"{primary_horizon} top20 and excess return degraded"
     elif regime_diagnostics:
+        year_records = regime_diagnostics.get("year", [])
+        recent_records = []
+        if isinstance(year_records, list):
+            for record in year_records:
+                if not isinstance(record, Mapping):
+                    continue
+                try:
+                    recent_records.append(
+                        (int(str(record.get("label"))), float(record["candidate_primary"]))
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
+        if (
+            recent_records
+            and max(recent_records)[1] < config.min_recent_primary_rho
+        ):
+            reason = f"recent-year {primary_horizon} rho below gate"
+
         for dimension, records in regime_diagnostics.items():
+            if reason != "accepted":
+                break
             if not isinstance(records, list) or len(records) < 2:
                 continue
             primary_deltas = [

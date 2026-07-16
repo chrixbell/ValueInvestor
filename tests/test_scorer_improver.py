@@ -17,6 +17,751 @@ import pandas as pd
 import pytest
 
 
+def test_lightgbm_payload_prediction_matches_runtime_model() -> None:
+    import lightgbm as lgb
+
+    from valueinvestor.scorer_improver.ml_trainer import (
+        build_feature_matrix,
+        predict_ml_ranker_payload,
+    )
+    from valueinvestor.screener.ml_ranker import (
+        MODEL_SCHEMA_VERSION,
+        _model_from_payload,
+        expected_feature_names,
+    )
+
+    feature_names = expected_feature_names()
+    frame = pd.DataFrame({
+        "ticker": [f"T{index}" for index in range(8)],
+        "snapshot_date": ["2025-01-02"] * 8,
+        "value_score": np.linspace(10.0, 80.0, 8),
+    })
+    features = build_feature_matrix(frame, {}, feature_names=feature_names)
+    target = np.linspace(-1.0, 1.0, len(frame))
+    booster = lgb.train(
+        {
+            "objective": "regression_l2",
+            "verbosity": -1,
+            "num_threads": 1,
+            "num_leaves": 4,
+            "min_data_in_leaf": 1,
+            "min_data_in_bin": 1,
+            "feature_pre_filter": False,
+        },
+        lgb.Dataset(features, label=target, feature_name=feature_names),
+        num_boost_round=3,
+    )
+    payload = {
+        "schema_version": MODEL_SCHEMA_VERSION,
+        "feature_names": feature_names,
+        "lightgbm_model": booster.model_to_string(),
+        "ticker_priors": {},
+        "metadata": {},
+    }
+
+    offline = predict_ml_ranker_payload(frame, payload)
+    runtime = _model_from_payload(payload).predict_matrix(features)
+
+    assert offline.tolist() == pytest.approx(runtime.tolist())
+
+
+def test_rank_payload_member_blend_matches_offline_and_live_runtime(tmp_path: Path) -> None:
+    from valueinvestor.data.models import (
+        Company,
+        Financials,
+        Market,
+        ScreeningResult,
+        ValuationMetrics,
+    )
+    from valueinvestor.scorer_improver.ml_trainer import predict_ml_ranker_payload
+    from valueinvestor.screener.ml_ranker import (
+        MODEL_SCHEMA_VERSION,
+        clear_model_cache,
+        expected_feature_names,
+        score_results_with_ml_ranker,
+    )
+
+    feature_names = expected_feature_names()
+
+    def member_payload(direction: float) -> dict[str, object]:
+        coefficients = [0.0] * len(feature_names)
+        coefficients[feature_names.index("value_score")] = direction
+        return {
+            "schema_version": MODEL_SCHEMA_VERSION,
+            "feature_names": feature_names,
+            "clip_low": [-100.0] * len(feature_names),
+            "clip_high": [100.0] * len(feature_names),
+            "mean": [0.0] * len(feature_names),
+            "scale": [1.0] * len(feature_names),
+            "coef": coefficients,
+            "intercept": 0.0,
+            "ticker_priors": {},
+            "metadata": {},
+        }
+
+    payload = {
+        "schema_version": MODEL_SCHEMA_VERSION,
+        "feature_names": [],
+        "rank_payload_members": [
+            {"weight": 0.75, "payload": member_payload(1.0)},
+            {"weight": 0.25, "payload": member_payload(-1.0)},
+        ],
+        "ticker_priors": {},
+        "metadata": {},
+    }
+    frame = pd.DataFrame({
+        "ticker": ["AAA", "BBB", "CCC"],
+        "snapshot_date": ["2025-01-02"] * 3,
+        "value_score": [10.0, 20.0, 30.0],
+    })
+    offline = predict_ml_ranker_payload(frame, payload)
+    assert offline.tolist() == pytest.approx([-0.25, 0.0, 0.25])
+
+    model_path = tmp_path / "rank_blend.json"
+    model_path.write_text(json.dumps(payload), encoding="utf-8")
+    results = [
+        ScreeningResult(
+            company=Company(ticker=ticker, name=ticker, market=Market.A_SHARE),
+            financials=Financials(ticker=ticker, period="snapshot"),
+            valuation=ValuationMetrics(ticker=ticker, date="2025-01-02", price=1.0),
+            value_score=value_score,
+            composite_score=50.0,
+        )
+        for ticker, value_score in zip(frame["ticker"], frame["value_score"])
+    ]
+    clear_model_cache()
+    assert score_results_with_ml_ranker(results, model_path)
+    live = [float(result._ml_ranker_raw_score) for result in results]
+
+    assert live == pytest.approx(offline.tolist())
+
+
+def test_training_data_complete_requires_current_fetch_date(tmp_path: Path) -> None:
+    from valueinvestor.scorer_improver.data_prep import _training_data_complete
+
+    prices = tmp_path / "prices.parquet"
+    prices.write_text("stub", encoding="utf-8")
+
+    kwargs = {
+        "force": False,
+        "stored_start": "20160714",
+        "required_start": "20160714",
+        "required_fetch_date": "2026-07-12",
+        "required_files": (prices,),
+    }
+
+    assert not _training_data_complete(last_fetch="2026-07-11", **kwargs)
+    assert _training_data_complete(last_fetch="2026-07-12", **kwargs)
+
+
+def test_hk_price_refresh_keeps_tickers_from_existing_history(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import yfinance as yf
+
+    from valueinvestor.data.models import Company, Market
+    from valueinvestor.scorer_improver import data_prep
+
+    prices_path = tmp_path / "hkshare_prices.parquet"
+    pd.DataFrame(
+        {
+            "ticker": ["0002.HK"],
+            "date": [pd.Timestamp("2026-01-01")],
+            "open": [10.0],
+            "close": [10.0],
+            "high": [10.0],
+            "low": [10.0],
+            "volume": [100.0],
+        }
+    ).to_parquet(prices_path, index=False)
+    calls: list[str] = []
+
+    class FakeTicker:
+        def __init__(self, ticker: str) -> None:
+            self.ticker = ticker
+
+        def history(self, *, start: str, end: str) -> pd.DataFrame:
+            del start, end
+            calls.append(self.ticker)
+            return pd.DataFrame(
+                {
+                    "Open": [11.0],
+                    "Close": [11.0],
+                    "High": [11.0],
+                    "Low": [11.0],
+                    "Volume": [110.0],
+                },
+                index=pd.DatetimeIndex(["2026-01-20"], name="Date"),
+            )
+
+    monkeypatch.setattr(data_prep, "_HKSHARE_PRICES_FILE", prices_path)
+    monkeypatch.setattr(data_prep, "_YF_WORKERS", 1)
+    monkeypatch.setattr(data_prep, "_SAVE_INTERVAL", 1_000)
+    monkeypatch.setattr(yf, "Ticker", FakeTicker)
+
+    result = data_prep._fetch_hkshare_prices(
+        [Company(ticker="0001.HK", name="New", market=Market.HK_SHARE)],
+        "20260101",
+        "20260120",
+    )
+
+    assert set(calls) == {"0001.HK", "0002.HK"}
+    assert set(result["ticker"]) == {"0001.HK", "0002.HK"}
+
+
+def test_latest_supported_daily_end_date_uses_calendar_horizon() -> None:
+    from valueinvestor.scorer_improver.ground_truth import FORWARD_HORIZON_6M_DAYS
+    from valueinvestor.scorer_improver.ml_trainer import (
+        _latest_supported_daily_end_date_from_prices,
+    )
+
+    ashare_dates = pd.bdate_range("2025-12-01", periods=140)
+    hkshare_dates = pd.bdate_range("2025-12-03", periods=135)
+    prices = pd.concat(
+        [
+            pd.DataFrame({"ticker": "000001.SZ", "date": ashare_dates}),
+            pd.DataFrame({"ticker": "0001.HK", "date": hkshare_dates}),
+        ],
+        ignore_index=True,
+    )
+
+    resolved = _latest_supported_daily_end_date_from_prices(prices)
+    expected_by_market = []
+    for dates in (ashare_dates, hkshare_dates):
+        cutoff = dates[-1] - pd.Timedelta(days=FORWARD_HORIZON_6M_DAYS)
+        expected_by_market.append(dates[dates <= cutoff][-1].date())
+    expected = min(expected_by_market)
+
+    assert resolved == expected
+
+
+def test_six_month_target_is_182_calendar_days() -> None:
+    from valueinvestor.scorer_improver.ground_truth import (
+        FORWARD_HORIZON_6M_DAYS,
+        _compute_forward_returns,
+    )
+
+    assert FORWARD_HORIZON_6M_DAYS == 182
+    prices = pd.DataFrame(
+        {
+            "ticker": ["AAA", "AAA", "AAA"],
+            "date": ["2024-01-01", "2024-05-06", "2024-07-01"],
+            "close": [10.0, 20.0, 30.0],
+        }
+    )
+
+    result = _compute_forward_returns(
+        prices,
+        horizon_days=FORWARD_HORIZON_6M_DAYS,
+    ).set_index("date")
+
+    assert result.loc[pd.Timestamp("2024-01-01").date(), "forward_return_6m"] == pytest.approx(2.0)
+
+
+def test_application_universe_mask_matches_production_filters() -> None:
+    from valueinvestor.scorer_improver.ml_trainer import _application_universe_mask
+
+    frame = pd.DataFrame(
+        {
+            "market_cap_rmb": [5e9, 4.9e9, 5e9, 5e9, 5e9, 5e9, 5e9],
+            "pe_ratio": [30.0, 10.0, 0.0, 31.0, 10.0, 10.0, 10.0],
+            "pb_ratio": [5.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0],
+            "roe": [0.08, 0.20, 0.20, 0.20, 0.20, 0.079, 0.20],
+            "debt_to_equity": [None, None, None, None, None, None, 0.71],
+        }
+    )
+
+    assert _application_universe_mask(frame).tolist() == [
+        True,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+    ]
+
+
+def test_application_universe_rejects_missing_valuation_history() -> None:
+    from valueinvestor.scorer_improver.ml_trainer import (
+        _filter_application_training_universe,
+    )
+
+    frame = pd.DataFrame(
+        {
+            "ticker": ["AAA", "BBB"],
+            "snapshot_date": ["2024-01-31", "2024-01-31"],
+            "market_cap_rmb": [10e9, 10e9],
+            "pe_ratio": [None, None],
+            "pb_ratio": [None, None],
+            "roe": [0.2, 0.2],
+            "debt_to_equity": [0.2, 0.2],
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="cannot represent the production stock screen"):
+        _filter_application_training_universe(
+            frame,
+            min_rows_per_snapshot=1,
+            min_snapshots=1,
+        )
+
+
+def test_application_universe_reranks_after_filtering() -> None:
+    from valueinvestor.scorer_improver.ml_trainer import (
+        _filter_application_training_universe,
+    )
+
+    frame = pd.DataFrame(
+        {
+            "ticker": ["AAA", "BBB", "CCC"],
+            "snapshot_date": ["2024-01-31"] * 3,
+            "market_cap_rmb": [10e9] * 3,
+            "pe_ratio": [10.0, 20.0, 40.0],
+            "pb_ratio": [1.0, 2.0, 1.0],
+            "roe": [0.2, 0.2, 0.2],
+            "debt_to_equity": [0.2, 0.2, 0.2],
+            "forward_return_1w": [0.1, 0.3, 0.9],
+            "forward_return_1m": [0.1, 0.3, 0.9],
+            "forward_return_3m": [0.1, 0.3, 0.9],
+            "forward_return_6m": [0.1, 0.3, 0.9],
+        }
+    )
+
+    filtered = _filter_application_training_universe(
+        frame,
+        min_rows_per_snapshot=2,
+        min_snapshots=1,
+    )
+
+    assert filtered["ticker"].tolist() == ["AAA", "BBB"]
+    assert filtered["target_rank_6m"].tolist() == pytest.approx([-1 / 3, 1 / 3])
+
+
+def test_monthly_rebalance_uses_well_populated_snapshot() -> None:
+    from valueinvestor.scorer_improver.ml_trainer import _monthly_rebalance_snapshots
+
+    frame = pd.DataFrame(
+        {
+            "ticker": ["A", "B", "A", "B", "C", "A"],
+            "snapshot_date": [
+                "2024-01-30",
+                "2024-01-30",
+                "2024-01-31",
+                "2024-01-31",
+                "2024-01-31",
+                "2024-02-29",
+            ],
+        }
+    )
+
+    selected = _monthly_rebalance_snapshots(frame)
+
+    assert sorted(pd.to_datetime(selected["snapshot_date"]).dt.date.unique()) == [
+        pd.Timestamp("2024-01-31").date(),
+        pd.Timestamp("2024-02-29").date(),
+    ]
+
+
+def test_ashare_financial_parser_preserves_per_share_history() -> None:
+    from valueinvestor.scorer_improver.data_prep import (
+        _ashare_financial_records_from_frame,
+    )
+
+    records = _ashare_financial_records_from_frame(
+        "000001",
+        pd.DataFrame(
+            {
+                "报告期": ["2024-12-31"],
+                "基本每股收益": ["2.00"],
+                "每股净资产": ["10.00"],
+                "每股经营现金流": ["1.20"],
+                "净资产收益率": ["20%"],
+                "资产负债率": ["60%"],
+            }
+        ),
+    )
+
+    assert records[0]["report_date"] == pd.Timestamp("2025-04-30").date()
+    assert records[0]["eps"] == pytest.approx(2.0)
+    assert records[0]["book_value_per_share"] == pytest.approx(10.0)
+    assert records[0]["operating_cash_flow"] is None
+    assert records[0]["operating_cash_flow_per_share"] == pytest.approx(1.2)
+
+
+def test_ashare_bulk_financial_parser_normalizes_codes_and_percentages() -> None:
+    from valueinvestor.scorer_improver.data_prep import (
+        _ashare_bulk_financial_records_from_frame,
+    )
+
+    records = _ashare_bulk_financial_records_from_frame(
+        pd.Timestamp("2024-09-30").date(),
+        pd.DataFrame(
+            {
+                "股票代码": ["1.0", "invalid"],
+                "营业总收入-营业总收入": [1_000_000.0, 2_000_000.0],
+                "净利润-净利润": [100_000.0, 200_000.0],
+                "销售毛利率": ["35.5%", "20%"],
+                "净资产收益率": ["12.5%", "10%"],
+                "每股收益": ["0.50", "1.00"],
+                "每股净资产": ["4.00", "5.00"],
+                "每股经营现金流量": ["0.75", "0.80"],
+            }
+        ),
+    )
+
+    assert len(records) == 1
+    assert records[0]["ticker"] == "000001"
+    assert records[0]["report_date"] == pd.Timestamp("2024-11-29").date()
+    assert records[0]["gross_margin"] == pytest.approx(0.355)
+    assert records[0]["roe"] == pytest.approx(0.125)
+    assert records[0]["eps"] == pytest.approx(0.5)
+    assert records[0]["book_value_per_share"] == pytest.approx(4.0)
+    assert records[0]["operating_cash_flow_per_share"] == pytest.approx(0.75)
+
+
+def test_hk_financial_parser_preserves_currency_and_statement_duration() -> None:
+    from valueinvestor.scorer_improver.data_prep import (
+        _hk_financial_records_from_statements,
+    )
+
+    period = pd.Timestamp("2024-12-31")
+    income = pd.DataFrame(
+        {period: [1_000.0, 100.0, 0.50]},
+        index=["Total Revenue", "Net Income", "Basic EPS"],
+    )
+    balance = pd.DataFrame(
+        {period: [2_000.0, 500.0, 200.0]},
+        index=["Total Assets", "Stockholders Equity", "Ordinary Shares Number"],
+    )
+    cashflow = pd.DataFrame(
+        {period: [120.0]},
+        index=["Operating Cash Flow"],
+    )
+
+    records = _hk_financial_records_from_statements(
+        "0700.HK",
+        income,
+        balance,
+        cashflow,
+        statement_months=12,
+        currency_to_rmb=1.0,
+    )
+
+    assert records[0]["report_date"] == pd.Timestamp("2025-04-30").date()
+    assert records[0]["eps"] == pytest.approx(0.5)
+    assert records[0]["book_value_per_share"] == pytest.approx(2.5)
+    assert records[0]["operating_cash_flow_per_share"] == pytest.approx(0.6)
+    assert records[0]["statement_months"] == 12
+    assert records[0]["currency_to_rmb"] == pytest.approx(1.0)
+
+
+def test_ashare_statement_parser_merges_quality_and_cashflow_features() -> None:
+    from valueinvestor.scorer_improver.data_prep import (
+        _ashare_statement_financial_records_from_frames,
+    )
+
+    balance = pd.DataFrame(
+        [
+            {
+                "股票代码": "000001",
+                "资产-总资产": 1_000.0,
+                "负债-总负债": 400.0,
+                "股东权益合计": 600.0,
+                "资产负债率": 40.0,
+            }
+        ]
+    )
+    cashflow = pd.DataFrame(
+        [
+            {
+                "股票代码": "000001",
+                "经营性现金流-现金流量净额": 80.0,
+            }
+        ]
+    )
+    income = pd.DataFrame(
+        [
+            {
+                "股票代码": "000001",
+                "营业总收入": 500.0,
+                "净利润": 60.0,
+                "营业总支出-营业支出": 300.0,
+            }
+        ]
+    )
+
+    records = _ashare_statement_financial_records_from_frames(
+        pd.Timestamp("2024-06-30").date(),
+        balance=balance,
+        cashflow=cashflow,
+        income=income,
+    )
+
+    assert len(records) == 1
+    record = records[0]
+    assert record["report_date"] == pd.Timestamp("2024-09-28").date()
+    assert record["statement_months"] == pytest.approx(6.0)
+    assert record["total_assets"] == pytest.approx(1_000.0)
+    assert record["total_equity"] == pytest.approx(600.0)
+    assert record["operating_cash_flow"] == pytest.approx(80.0)
+    assert record["gross_margin"] == pytest.approx(0.4)
+    assert record["net_margin"] == pytest.approx(0.12)
+    assert record["roe"] == pytest.approx(0.2)
+    assert record["roa"] == pytest.approx(0.12)
+    assert record["debt_to_equity"] == pytest.approx(0.4)
+
+
+def test_financial_flow_features_are_annualized_from_statement_duration() -> None:
+    from valueinvestor.scorer_improver.ground_truth import (
+        annualize_financial_feature_frame,
+    )
+
+    frame = pd.DataFrame(
+        {
+            "statement_months": [3.0, 6.0, 12.0, None],
+            "revenue": [10.0, 20.0, 40.0, 50.0],
+            "net_income": [1.0, 2.0, 4.0, 5.0],
+            "total_assets": [100.0, 100.0, 100.0, 100.0],
+        }
+    )
+
+    result = annualize_financial_feature_frame(frame)
+
+    assert result["revenue"].tolist() == pytest.approx([40.0, 40.0, 40.0, 50.0])
+    assert result["net_income"].tolist() == pytest.approx([4.0, 4.0, 4.0, 5.0])
+    assert result["total_assets"].tolist() == pytest.approx([100.0] * 4)
+
+
+def test_financial_history_matches_live_annual_period_policy() -> None:
+    from valueinvestor.scorer_improver.ground_truth import (
+        align_financial_history_to_live_periods,
+    )
+
+    frame = pd.DataFrame(
+        {
+            "ticker": ["NEW", "NEW", "NEW", "FISCAL.HK", "FISCAL.HK", "NOANNUAL"],
+            "period": [
+                "2023-06-30",
+                "2023-12-31",
+                "2024-03-31",
+                "2023-06-30",
+                "2023-09-30",
+                "2024-06-30",
+            ],
+            "report_date": [
+                "2023-08-30",
+                "2024-03-30",
+                "2024-04-30",
+                "2023-09-30",
+                "2023-12-30",
+                "2024-08-30",
+            ],
+            "statement_months": [6.0, 12.0, 3.0, 12.0, 3.0, 6.0],
+        }
+    )
+
+    result = align_financial_history_to_live_periods(frame)
+
+    assert list(result.loc[result["ticker"] == "NEW", "period"]) == [
+        "2023-06-30",
+        "2023-12-31",
+    ]
+    assert list(result.loc[result["ticker"] == "FISCAL.HK", "period"]) == ["2023-06-30"]
+    assert list(result.loc[result["ticker"] == "NOANNUAL", "period"]) == ["2024-06-30"]
+
+
+def test_valuation_merge_preserves_complementary_fields() -> None:
+    from valueinvestor.scorer_improver.data_prep import _ordered_valuation_frame
+
+    merged = _ordered_valuation_frame(
+        [
+            {"ticker": "AAA", "date": "2024-01-31", "price": 10.0, "market_cap_rmb": 9e9},
+            {"ticker": "AAA", "date": "2024-01-31", "pe_ratio": 8.0, "pb_ratio": 1.2},
+        ]
+    )
+
+    assert len(merged) == 1
+    assert merged.loc[0, "price"] == pytest.approx(10.0)
+    assert merged.loc[0, "market_cap_rmb"] == pytest.approx(9e9)
+    assert merged.loc[0, "pe_ratio"] == pytest.approx(8.0)
+    assert merged.loc[0, "pb_ratio"] == pytest.approx(1.2)
+
+
+def test_derived_valuation_ratios_obey_report_availability() -> None:
+    from valueinvestor.scorer_improver.data_prep import (
+        _derive_historical_valuation_ratios,
+        _ordered_financial_frame,
+    )
+
+    financials = _ordered_financial_frame(
+        [
+            {
+                "ticker": "AAA",
+                "period": "2023-12-31",
+                "report_date": "2024-04-29",
+                "eps": 2.0,
+                "book_value_per_share": 8.0,
+                "revenue": 100.0,
+            },
+        ]
+    )
+    valuations = pd.DataFrame(
+        [
+            {"ticker": "AAA", "date": "2024-04-01", "price": 20.0, "market_cap_rmb": 1000.0},
+            {"ticker": "AAA", "date": "2024-05-01", "price": 20.0, "market_cap_rmb": 1000.0},
+        ]
+    )
+
+    derived = _derive_historical_valuation_ratios(valuations, financials)
+
+    assert pd.isna(derived.loc[0, "pe_ratio"])
+    assert derived.loc[1, "pe_ratio"] == pytest.approx(10.0)
+    assert derived.loc[1, "pb_ratio"] == pytest.approx(2.5)
+    assert derived.loc[1, "ps_ratio"] == pytest.approx(10.0)
+
+
+def test_hk_valuation_ratios_use_currency_adjusted_statements() -> None:
+    from valueinvestor.scorer_improver.data_prep import (
+        _derive_historical_valuation_ratios,
+        _ordered_financial_frame,
+    )
+
+    financials = _ordered_financial_frame(
+        [
+            {
+                "ticker": "0005.HK",
+                "period": "2024-12-31",
+                "report_date": "2025-04-30",
+                "net_income": 10.0,
+                "total_equity": 100.0,
+                "revenue": 200.0,
+                "statement_months": 12,
+                "currency_to_rmb": 7.2,
+            },
+        ]
+    )
+    valuations = pd.DataFrame(
+        [
+            {
+                "ticker": "0005.HK",
+                "date": "2025-05-01",
+                "price": 10.0,
+                "market_cap_rmb": 720.0,
+            },
+        ]
+    )
+
+    derived = _derive_historical_valuation_ratios(valuations, financials)
+
+    assert derived.loc[0, "pe_ratio"] == pytest.approx(10.0)
+    assert derived.loc[0, "pb_ratio"] == pytest.approx(1.0)
+    assert derived.loc[0, "ps_ratio"] == pytest.approx(0.5)
+
+
+def test_promotion_gate_rejects_negative_latest_year_rho() -> None:
+    from valueinvestor.scorer_improver.promotion_gate import evaluate_promotion_gate
+
+    def metrics(rho: float) -> dict[str, dict[str, float]]:
+        return {
+            horizon: {
+                "spearman_rho": rho,
+                "hit_rate_top20": 0.6,
+                "mean_excess_return": 0.1,
+            }
+            for horizon in ("1m", "3m", "6m")
+        }
+
+    result = evaluate_promotion_gate(
+        candidate_metrics=metrics(0.2),
+        incumbent_metrics=metrics(0.1),
+        manifest={"gate_snapshots": 24},
+        regime_diagnostics={
+            "year": [
+                {"label": "2024", "candidate_primary": 0.3, "deltas": {"6m": 0.1}},
+                {"label": "2025", "candidate_primary": -0.01, "deltas": {"6m": 0.01}},
+            ],
+        },
+    )
+
+    assert not result.accepted
+    assert result.reason == "recent-year 6m rho below gate"
+
+
+def test_strict_outer_gate_records_exactly_one_candidate_attempt(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from valueinvestor.scorer_improver import ml_trainer
+    from valueinvestor.scorer_improver.promotion_gate import HoldoutGateConfig
+
+    rows = []
+    for date_index, snapshot_date in enumerate(pd.date_range("2015-01-31", periods=120, freq="ME").date):
+        for ticker_index in range(20):
+            rank = ticker_index / 19.0
+            rows.append(
+                {
+                    "ticker": f"T{ticker_index:03d}",
+                    "snapshot_date": snapshot_date,
+                    "close": 10.0 + rank,
+                    "market_cap_rmb": 10e9 + ticker_index,
+                    "pe_ratio": 5.0 + rank,
+                    "pb_ratio": 1.0 + rank,
+                    "roe": 0.10 + rank / 10.0,
+                    "debt_to_equity": 0.2,
+                    "forward_return_1w": rank + date_index * 1e-5,
+                    "forward_return_1m": rank + date_index * 1e-5,
+                    "forward_return_3m": rank + date_index * 1e-5,
+                    "forward_return_6m": rank + date_index * 1e-5,
+                }
+            )
+    snapshots = pd.DataFrame(rows)
+    ledger_records = []
+    monkeypatch.setattr(
+        ml_trainer,
+        "prepare_ml_training_snapshots",
+        lambda **kwargs: snapshots,
+    )
+    monkeypatch.setattr(
+        ml_trainer,
+        "append_gate_ledger",
+        lambda result, **kwargs: ledger_records.append((result, kwargs)),
+    )
+
+    metadata = ml_trainer.train_ml_ranker(
+        output_model_path=tmp_path / "model.json",
+        backend="numpy",
+        model_kind="ridge-only",
+        snapshot_frequency="quarterly",
+        target_improvement=-999.0,
+        max_training_rows=0,
+        candidate_feature_sets=("core",),
+        candidate_prior_strategies=("no-ticker-priors",),
+        candidate_targets=("target-rank-6m",),
+        candidate_ridge_lambdas=("10",),
+        walk_forward_folds=1,
+        walk_forward_validation_months=24,
+        walk_forward_min_6m_delta=-999.0,
+        walk_forward_max_horizon_degradation=999.0,
+        gate_config=HoldoutGateConfig(
+            holdout_months=12,
+            embargo_days=197,
+            min_6m_delta=-999.0,
+            max_horizon_degradation=999.0,
+            min_weighted_utility=-999.0,
+            min_gate_snapshots=4,
+            min_train_snapshots=60,
+            require_6m_top20_excess_non_degradation=False,
+        ),
+        strict_outer_gate=True,
+    )
+
+    assert metadata["strict_outer_gate"] is True
+    assert len(metadata["promotion_gate_attempts"]) == 1
+    assert len(ledger_records) == 1
+
+
 # ── ExperimentLog tests ─────────────────────────────────────────────────────
 
 
@@ -382,6 +1127,482 @@ class TestAgentHelpers:
 
         assert matrix[:, 0].tolist() == pytest.approx([-0.5, 0.0, 0.5, 0.0])
         assert matrix[:, 1].tolist() == pytest.approx([-0.5, 0.5, 0.0, 0.0])
+
+    def test_ml_ranker_cross_sectional_ties_are_order_invariant(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import build_feature_matrix
+
+        frame = pd.DataFrame(
+            {
+                "ticker": ["AAA", "BBB", "CCC"],
+                "snapshot_date": ["2024-01-01"] * 3,
+                "value_score": [10.0, 10.0, 20.0],
+            }
+        )
+        feature_names = ["cs_rank_value_score"]
+
+        original = build_feature_matrix(
+            frame,
+            {},
+            feature_names=feature_names,
+        )[:, 0]
+        shuffled_frame = frame.iloc[[2, 0, 1]].reset_index(drop=True)
+        shuffled = build_feature_matrix(
+            shuffled_frame,
+            {},
+            feature_names=feature_names,
+        )[:, 0]
+        shuffled_by_ticker = dict(zip(shuffled_frame["ticker"], shuffled))
+
+        assert original.tolist() == pytest.approx([-0.25, -0.25, 0.5])
+        assert [shuffled_by_ticker[ticker] for ticker in frame["ticker"]] == pytest.approx(original)
+
+    def test_ml_ranker_application_blend_matches_offline_and_runtime(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from valueinvestor.data.models import (
+            Company,
+            Financials,
+            Market,
+            ScreeningResult,
+            ValuationMetrics,
+        )
+        from valueinvestor.scorer_improver.ml_trainer import predict_ml_ranker_payload
+        from valueinvestor.screener.ml_ranker import (
+            MODEL_SCHEMA_VERSION,
+            clear_model_cache,
+            expected_feature_names,
+            score_results_with_ml_ranker,
+        )
+
+        feature_names = expected_feature_names()
+        coef = [0.0] * len(feature_names)
+        coef[feature_names.index("value_score")] = 1.0
+        payload = {
+            "schema_version": MODEL_SCHEMA_VERSION,
+            "feature_names": feature_names,
+            "clip_low": [-100.0] * len(feature_names),
+            "clip_high": [100.0] * len(feature_names),
+            "mean": [0.0] * len(feature_names),
+            "scale": [1.0] * len(feature_names),
+            "coef": coef,
+            "intercept": 0.0,
+            "ticker_priors": {},
+            "metadata": {
+                "application_blend_candidate_weight": 0.25,
+                "application_blend_scale": "snapshot_rank",
+            },
+        }
+        frame = pd.DataFrame(
+            {
+                "ticker": ["AAA", "BBB", "CCC", "DDD", "EEE"],
+                "snapshot_date": ["2025-01-02"] * 5,
+                "value_score": [10.0, 30.0, 50.0, 70.0, 90.0],
+                "composite_score": [90.0, 70.0, 50.0, 30.0, 10.0],
+            }
+        )
+
+        offline = predict_ml_ranker_payload(frame, payload)
+        assert offline.tolist() == pytest.approx([1.0 / 3.0, 1.0 / 6.0, 0.0, -1.0 / 6.0, -1.0 / 3.0])
+
+        model_path = tmp_path / "application_blend.json"
+        model_path.write_text(json.dumps(payload), encoding="utf-8")
+        results = [
+            ScreeningResult(
+                company=Company(ticker=ticker, name=ticker, market=Market.A_SHARE),
+                financials=Financials(ticker=ticker, period="snapshot"),
+                valuation=ValuationMetrics(
+                    ticker=ticker,
+                    date="2025-01-02",
+                    price=1.0,
+                ),
+                value_score=value_score,
+                composite_score=composite_score,
+            )
+            for ticker, value_score, composite_score in zip(
+                frame["ticker"],
+                frame["value_score"],
+                frame["composite_score"],
+            )
+        ]
+        clear_model_cache()
+        assert score_results_with_ml_ranker(results, model_path=model_path)
+        clear_model_cache()
+
+        assert [result._ml_ranker_raw_score for result in results] == pytest.approx(offline)
+        assert results[0].composite_score > results[4].composite_score
+
+    def test_ml_ranker_application_factor_blend_matches_offline_and_runtime(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        from valueinvestor.data.models import (
+            Company,
+            Financials,
+            Market,
+            ScreeningResult,
+            ValuationMetrics,
+        )
+        from valueinvestor.scorer_improver.ml_trainer import predict_ml_ranker_payload
+        from valueinvestor.screener import ml_ranker
+
+        feature_names = ml_ranker.expected_feature_names()
+        coef = [0.0] * len(feature_names)
+        coef[feature_names.index("value_score")] = 1.0
+        components = [
+            {"signal": "model", "weight": 0.10},
+            {"signal": "quality_de_crowding", "weight": 0.135},
+            {"signal": "book_yield", "weight": 0.18},
+            {"signal": "sales_yield", "weight": 0.045},
+            {"signal": "liability_yield", "weight": 0.135},
+            {"signal": "momentum_63d", "weight": 0.27},
+            {"signal": "low_current_ratio", "weight": 0.135},
+        ]
+        payload = {
+            "schema_version": ml_ranker.MODEL_SCHEMA_VERSION,
+            "feature_names": feature_names,
+            "clip_low": [-100.0] * len(feature_names),
+            "clip_high": [100.0] * len(feature_names),
+            "mean": [0.0] * len(feature_names),
+            "scale": [1.0] * len(feature_names),
+            "coef": coef,
+            "intercept": 0.0,
+            "ticker_priors": {},
+            "metadata": {
+                "application_factor_template": "value_momentum",
+                "application_factor_components": components,
+                "application_factor_scale": "snapshot_rank",
+            },
+        }
+        frame = pd.DataFrame(
+            {
+                "ticker": ["AAA", "BBB", "CCC", "DDD", "EEE"],
+                "snapshot_date": ["2025-01-02"] * 5,
+                "value_score": [10.0, 20.0, 30.0, 40.0, 50.0],
+                "quality_score": [50.0, 40.0, 30.0, 20.0, 10.0],
+                "pb_ratio": [5.0, 4.0, 3.0, 2.0, 1.0],
+                "ps_ratio": [5.0, 1.0, 4.0, 2.0, 3.0],
+                "total_liabilities": [10.0, 20.0, 30.0, 40.0, 50.0],
+                "market_cap_rmb": [100.0] * 5,
+                "relative_return_63d": [-0.2, -0.1, 0.0, 0.1, 0.2],
+                "current_ratio": [5.0, None, 3.0, 2.0, 1.0],
+            }
+        )
+
+        offline = predict_ml_ranker_payload(frame, payload)
+        assert np.isfinite(offline).all()
+
+        model_path = tmp_path / "application_factor_blend.json"
+        model_path.write_text(json.dumps(payload), encoding="utf-8")
+        results = [
+            ScreeningResult(
+                company=Company(ticker=row.ticker, name=row.ticker, market=Market.A_SHARE),
+                financials=Financials(
+                    ticker=row.ticker,
+                    period="snapshot",
+                    total_liabilities=row.total_liabilities,
+                    current_ratio=row.current_ratio,
+                ),
+                valuation=ValuationMetrics(
+                    ticker=row.ticker,
+                    date="2025-01-02",
+                    price=1.0,
+                    pb_ratio=row.pb_ratio,
+                    ps_ratio=row.ps_ratio,
+                    market_cap_rmb=row.market_cap_rmb,
+                ),
+                value_score=row.value_score,
+                quality_score=row.quality_score,
+                composite_score=50.0,
+            )
+            for row in frame.itertuples(index=False)
+        ]
+        momentum = frame["relative_return_63d"].tolist()
+        monkeypatch.setattr(
+            ml_ranker,
+            "_recent_price_features_for_results",
+            lambda _results: {
+                index: {"relative_return_63d": value}
+                for index, value in enumerate(momentum)
+            },
+        )
+        ml_ranker.clear_model_cache()
+        assert ml_ranker.score_results_with_ml_ranker(results, model_path=model_path)
+        ml_ranker.clear_model_cache()
+
+        assert [result._ml_ranker_raw_score for result in results] == pytest.approx(offline)
+
+    def test_ml_ranker_quality_residual_matches_offline_and_runtime(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from valueinvestor.data.models import (
+            Company,
+            Financials,
+            Market,
+            ScreeningResult,
+            ValuationMetrics,
+        )
+        from valueinvestor.scorer_improver.ml_trainer import predict_ml_ranker_payload
+        from valueinvestor.screener.ml_ranker import (
+            MODEL_SCHEMA_VERSION,
+            clear_model_cache,
+            expected_feature_names,
+            score_results_with_ml_ranker,
+        )
+
+        feature_names = expected_feature_names()
+        coef = [0.0] * len(feature_names)
+        coef[feature_names.index("value_score")] = 1.0
+        payload = {
+            "schema_version": MODEL_SCHEMA_VERSION,
+            "feature_names": feature_names,
+            "clip_low": [-100.0] * len(feature_names),
+            "clip_high": [100.0] * len(feature_names),
+            "mean": [0.0] * len(feature_names),
+            "scale": [1.0] * len(feature_names),
+            "coef": coef,
+            "intercept": 0.0,
+            "ticker_priors": {},
+            "metadata": {
+                "application_quality_residual_candidate_weight": 0.5,
+                "application_quality_residual_direction": "inverse",
+                "application_quality_residual_scale": "snapshot_rank",
+            },
+        }
+        frame = pd.DataFrame(
+            {
+                "ticker": ["AAA", "BBB", "CCC", "DDD", "EEE"],
+                "snapshot_date": ["2025-01-02"] * 5,
+                "value_score": [10.0, 30.0, 50.0, 70.0, 90.0],
+                "quality_score": [10.0, 90.0, 50.0, 30.0, 70.0],
+            }
+        )
+
+        offline = predict_ml_ranker_payload(frame, payload)
+        assert offline.tolist() == pytest.approx([0.0, -0.5, 0.0, 1.0 / 3.0, 1.0 / 6.0])
+
+        model_path = tmp_path / "quality_residual.json"
+        model_path.write_text(json.dumps(payload), encoding="utf-8")
+        results = [
+            ScreeningResult(
+                company=Company(ticker=ticker, name=ticker, market=Market.A_SHARE),
+                financials=Financials(ticker=ticker, period="snapshot"),
+                valuation=ValuationMetrics(
+                    ticker=ticker,
+                    date="2025-01-02",
+                    price=1.0,
+                ),
+                value_score=value_score,
+                quality_score=quality_score,
+                composite_score=50.0,
+            )
+            for ticker, value_score, quality_score in zip(
+                frame["ticker"],
+                frame["value_score"],
+                frame["quality_score"],
+            )
+        ]
+        clear_model_cache()
+        assert score_results_with_ml_ranker(results, model_path=model_path)
+        clear_model_cache()
+
+        assert [result._ml_ranker_raw_score for result in results] == pytest.approx(offline)
+        assert results[3].composite_score > results[4].composite_score
+        assert results[4].composite_score > results[1].composite_score
+
+    def test_ml_ranker_gross_profitability_de_crowding_matches_runtime(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        from valueinvestor.data.models import (
+            Company,
+            Financials,
+            Market,
+            ScreeningResult,
+            ValuationMetrics,
+        )
+        from valueinvestor.scorer_improver.ml_trainer import (
+            _prediction_rank_by_snapshot,
+            predict_ml_ranker_payload,
+        )
+        from valueinvestor.screener import ml_ranker
+
+        feature_names = ml_ranker.expected_feature_names()
+        coef = [0.0] * len(feature_names)
+        coef[feature_names.index("value_score")] = 1.0
+        metadata = {
+            "application_gross_profitability_de_crowding_factor_weight": 0.16,
+            "application_gross_profitability_de_crowding_max_model_rank": 0.4,
+            "application_gross_profitability_de_crowding_min_market_return_63d": 0.0,
+        }
+        payload = {
+            "schema_version": ml_ranker.MODEL_SCHEMA_VERSION,
+            "feature_names": feature_names,
+            "clip_low": [-100.0] * len(feature_names),
+            "clip_high": [100.0] * len(feature_names),
+            "mean": [0.0] * len(feature_names),
+            "scale": [1.0] * len(feature_names),
+            "coef": coef,
+            "intercept": 0.0,
+            "ticker_priors": {},
+            "metadata": metadata,
+        }
+        tickers = [f"T{index:02d}" for index in range(10)]
+        value_scores = [float(index * 10) for index in range(1, 11)]
+        gross_margins = [float(index) / 20.0 for index in range(1, 11)]
+        frame = pd.DataFrame({
+            "ticker": tickers,
+            "snapshot_date": ["2025-01-02"] * len(tickers),
+            "value_score": value_scores,
+            "revenue": [100.0] * len(tickers),
+            "gross_margin": gross_margins,
+            "total_assets": [100.0] * len(tickers),
+            "market_return_63d": [0.05] * len(tickers),
+        })
+
+        base_payload = {**payload, "metadata": {}}
+        base_predictions = predict_ml_ranker_payload(frame, base_payload)
+        base_rank = _prediction_rank_by_snapshot(frame, base_predictions)
+        offline = predict_ml_ranker_payload(frame, payload)
+        protected = base_rank > 0.4
+
+        assert offline[protected].tolist() == pytest.approx(base_rank[protected])
+        assert not np.allclose(offline[~protected], base_rank[~protected])
+        inactive_frame = frame.assign(market_return_63d=-0.05)
+        assert predict_ml_ranker_payload(inactive_frame, payload).tolist() == pytest.approx(
+            base_rank
+        )
+
+        model_path = tmp_path / "gross_profitability_de_crowding.json"
+        model_path.write_text(json.dumps(payload), encoding="utf-8")
+        results = [
+            ScreeningResult(
+                company=Company(ticker=ticker, name=ticker, market=Market.A_SHARE),
+                financials=Financials(
+                    ticker=ticker,
+                    period="snapshot",
+                    revenue=100.0,
+                    gross_margin=gross_margin,
+                    total_assets=100.0,
+                ),
+                valuation=ValuationMetrics(
+                    ticker=ticker,
+                    date="2025-01-02",
+                    price=1.0,
+                ),
+                value_score=value_score,
+                composite_score=50.0,
+            )
+            for ticker, value_score, gross_margin in zip(
+                tickers,
+                value_scores,
+                gross_margins,
+            )
+        ]
+        monkeypatch.setattr(
+            ml_ranker,
+            "_recent_price_features_for_results",
+            lambda _results: {
+                index: {"market_return_63d": 0.05}
+                for index in range(len(_results))
+            },
+        )
+
+        ml_ranker.clear_model_cache()
+        assert ml_ranker.score_results_with_ml_ranker(results, model_path=model_path)
+        ml_ranker.clear_model_cache()
+
+        assert [result._ml_ranker_raw_score for result in results] == pytest.approx(offline)
+
+    def test_ml_ranker_book_yield_residual_matches_offline_and_runtime(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from valueinvestor.data.models import (
+            Company,
+            Financials,
+            Market,
+            ScreeningResult,
+            ValuationMetrics,
+        )
+        from valueinvestor.scorer_improver.ml_trainer import predict_ml_ranker_payload
+        from valueinvestor.screener.ml_ranker import (
+            MODEL_SCHEMA_VERSION,
+            clear_model_cache,
+            expected_feature_names,
+            score_results_with_ml_ranker,
+        )
+
+        feature_names = expected_feature_names()
+        coef = [0.0] * len(feature_names)
+        coef[feature_names.index("value_score")] = 1.0
+        payload = {
+            "schema_version": MODEL_SCHEMA_VERSION,
+            "feature_names": feature_names,
+            "clip_low": [-100.0] * len(feature_names),
+            "clip_high": [100.0] * len(feature_names),
+            "mean": [0.0] * len(feature_names),
+            "scale": [1.0] * len(feature_names),
+            "coef": coef,
+            "intercept": 0.0,
+            "ticker_priors": {},
+            "metadata": {
+                "application_residual_candidate_weight": 0.7,
+                "application_residual_signal": "book_yield",
+                "application_residual_column": "pb_ratio",
+                "application_residual_direction": -1.0,
+                "application_residual_scale": "snapshot_rank",
+            },
+        }
+        frame = pd.DataFrame(
+            {
+                "ticker": ["AAA", "BBB", "CCC", "DDD", "EEE"],
+                "snapshot_date": ["2025-01-02"] * 5,
+                "value_score": [10.0, 30.0, 50.0, 70.0, 90.0],
+                "pb_ratio": [5.0, 1.0, 3.0, 4.0, 2.0],
+            }
+        )
+
+        offline = predict_ml_ranker_payload(frame, payload)
+        assert offline.tolist() == pytest.approx(
+            [
+                -2.0 / 3.0,
+                -1.0 / 30.0,
+                0.0,
+                2.0 / 15.0,
+                17.0 / 30.0,
+            ]
+        )
+
+        model_path = tmp_path / "book_yield_residual.json"
+        model_path.write_text(json.dumps(payload), encoding="utf-8")
+        results = [
+            ScreeningResult(
+                company=Company(ticker=ticker, name=ticker, market=Market.A_SHARE),
+                financials=Financials(ticker=ticker, period="snapshot"),
+                valuation=ValuationMetrics(
+                    ticker=ticker,
+                    date="2025-01-02",
+                    price=1.0,
+                    pb_ratio=pb_ratio,
+                ),
+                value_score=value_score,
+                composite_score=50.0,
+            )
+            for ticker, value_score, pb_ratio in zip(
+                frame["ticker"],
+                frame["value_score"],
+                frame["pb_ratio"],
+            )
+        ]
+        clear_model_cache()
+        assert score_results_with_ml_ranker(results, model_path=model_path)
+        clear_model_cache()
+
+        assert [result._ml_ranker_raw_score for result in results] == pytest.approx(offline)
 
     def test_ml_ranker_cross_sectional_prior_interaction_features(self) -> None:
         from valueinvestor.scorer_improver.ml_trainer import build_feature_matrix
@@ -760,7 +1981,6 @@ class TestAgentHelpers:
         bbb = valuations.loc[valuations["ticker"] == "BBB"].iloc[0]
         assert aaa["market_cap_rmb"] == pytest.approx(10_000_000.0)
         assert pd.isna(bbb["market_cap_rmb"])
-
 
     def test_ml_ranker_scores_results_from_artifact(self, tmp_path: Path) -> None:
         from valueinvestor.data.models import (
@@ -1545,16 +2765,21 @@ class TestAgentHelpers:
         assert first_scores != second_scores
         assert second_scores[1] < second_scores[0]
 
-    def test_promotion_gate_split_keeps_holdout_untouched(self) -> None:
+    def test_promotion_gate_split_keeps_holdout_untouched(
+        self,
+        tmp_path: Path,
+    ) -> None:
         from valueinvestor.scorer_improver.promotion_gate import (
             HoldoutGateConfig,
             make_holdout_split,
         )
 
-        df = pd.DataFrame({
-            "snapshot_date": pd.date_range("2020-01-01", periods=36, freq="MS"),
-            "ticker": ["T"] * 36,
-        })
+        df = pd.DataFrame(
+            {
+                "snapshot_date": pd.date_range("2020-01-01", periods=36, freq="MS"),
+                "ticker": ["T"] * 36,
+            }
+        )
         config = HoldoutGateConfig(
             holdout_months=6,
             embargo_days=45,
@@ -1562,7 +2787,9 @@ class TestAgentHelpers:
             min_train_snapshots=4,
         )
 
-        split = make_holdout_split(df, config=config)
+        source_path = tmp_path / "snapshots.parquet"
+        source_path.write_bytes(b"snapshot-data")
+        split = make_holdout_split(df, config=config, source_path=source_path)
         train_dates = pd.to_datetime(split.train["snapshot_date"])
         gate_dates = pd.to_datetime(split.gate["snapshot_date"])
         gate_start = pd.Timestamp(split.manifest["gate_start"])
@@ -1573,6 +2800,8 @@ class TestAgentHelpers:
         assert set(split.train.index).isdisjoint(split.gate.index)
         assert split.manifest["embargo_days"] == 45
         assert split.manifest["gate_snapshots"] >= 4
+        assert split.manifest["source_path"] == str(source_path)
+        assert split.manifest["source_fingerprint"].startswith("snapshots.parquet:13:")
 
     def test_promotion_gate_requires_holdout_6m_improvement(self) -> None:
         from valueinvestor.scorer_improver.promotion_gate import (
@@ -1843,6 +3072,345 @@ class TestAgentHelpers:
 
         assert result["accepted"] is False
         assert result["reason"] == "mean 6m delta below walk-forward gate"
+
+    def test_ml_trainer_walk_forward_decision_allows_one_bounded_bad_fold(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _walk_forward_decision
+
+        fold_deltas = [
+            {"1w": 0.09, "1m": 0.03, "3m": -0.02, "6m": -0.08},
+            {"1w": -0.01, "1m": -0.04, "3m": -0.03, "6m": 0.07},
+            {"1w": 0.05, "1m": 0.11, "3m": 0.18, "6m": 0.18},
+            {"1w": 0.04, "1m": 0.05, "3m": 0.02, "6m": 0.04},
+        ]
+
+        bounded_result = _walk_forward_decision(
+            fold_deltas,
+            min_6m_delta=0.001,
+            max_horizon_degradation=0.10,
+        )
+        strict_result = _walk_forward_decision(
+            fold_deltas,
+            min_6m_delta=0.001,
+            max_horizon_degradation=0.01,
+        )
+
+        assert bounded_result["accepted"] is True
+        assert bounded_result["min_deltas"]["6m"] == pytest.approx(-0.08)
+        assert strict_result["accepted"] is False
+        assert strict_result["reason"] == "fold 6m degradation"
+
+    def test_walk_forward_blend_search_fits_each_fold_once_and_selects_best(
+        self,
+        monkeypatch,
+    ) -> None:
+        from valueinvestor.scorer_improver import ml_trainer
+
+        rows = []
+        for snapshot_date, reverse in (
+            ("2020-01-02", False),
+            ("2021-01-04", True),
+        ):
+            for index in range(10):
+                rank = float(index)
+                rows.append(
+                    {
+                        "ticker": f"T{index:02d}",
+                        "snapshot_date": snapshot_date,
+                        "composite_score": float(9 - index) if reverse else rank,
+                        "forward_return_1w": rank,
+                        "forward_return_1m": rank,
+                        "forward_return_3m": rank,
+                        "forward_return_6m": rank,
+                        "target_rank_1w": rank,
+                        "target_rank_1m": rank,
+                        "target_rank_3m": rank,
+                        "target_rank_6m": rank,
+                    }
+                )
+        snapshots = pd.DataFrame(rows)
+        fit_calls = []
+
+        def fake_fit(*args, **kwargs):
+            fit_calls.append(1)
+            return {}, {}, "numpy", False
+
+        monkeypatch.setattr(ml_trainer, "_fit_candidate_model", fake_fit)
+        monkeypatch.setattr(
+            ml_trainer,
+            "_predict_from_linear_model",
+            lambda frame, *args, **kwargs: np.arange(len(frame), dtype="float64"),
+        )
+
+        result = ml_trainer._walk_forward_validate_candidate(
+            snapshots,
+            [
+                {
+                    "index": 1,
+                    "train_end_exclusive": "2020-07-01",
+                    "validation_start": "2021-01-01",
+                    "validation_end": "2021-01-31",
+                }
+            ],
+            target_name="target_rank_6m",
+            ridge_lambda=1.0,
+            backend="numpy",
+            max_rows=None,
+            prior_strategy="no_ticker_priors",
+            model_kind="ridge",
+            feature_names=[],
+            incumbent_payload=None,
+            min_6m_delta=0.001,
+            max_horizon_degradation=2.0,
+            blend_weights=(0.5, 1.0),
+        )
+
+        assert len(fit_calls) == 1
+        assert result["accepted"] is True
+        assert result["blend_weight"] == pytest.approx(1.0)
+        assert result["blend_scale"] == "snapshot_rank"
+        assert result["blend_candidates_evaluated"] == 2
+
+    def test_walk_forward_selects_stronger_residual_candidate(
+        self,
+        monkeypatch,
+    ) -> None:
+        from valueinvestor.scorer_improver import ml_trainer
+
+        snapshots = pd.DataFrame(
+            {
+                "ticker": [f"T{index:02d}" for index in range(20)],
+                "snapshot_date": ["2020-01-02"] * 10 + ["2021-01-04"] * 10,
+                "quality_score": list(range(10)) * 2,
+                "composite_score": list(reversed(range(10))) * 2,
+                "forward_return_1w": list(range(10)) * 2,
+                "forward_return_1m": list(range(10)) * 2,
+                "forward_return_3m": list(range(10)) * 2,
+                "forward_return_6m": list(range(10)) * 2,
+                "target_rank_1w": list(range(10)) * 2,
+                "target_rank_1m": list(range(10)) * 2,
+                "target_rank_3m": list(range(10)) * 2,
+                "target_rank_6m": list(range(10)) * 2,
+            }
+        )
+
+        monkeypatch.setattr(
+            ml_trainer,
+            "_fit_candidate_model",
+            lambda *args, **kwargs: ({}, {}, "numpy", False),
+        )
+        monkeypatch.setattr(
+            ml_trainer,
+            "_predict_from_linear_model",
+            lambda frame, *args, **kwargs: np.arange(len(frame), dtype="float64"),
+        )
+
+        def overlay_result(marker: str, mean_delta: float) -> dict[str, object]:
+            deltas = {horizon: mean_delta for horizon in ml_trainer.EVAL_HORIZONS}
+            return {
+                "accepted": True,
+                "blend_weight": 1.0,
+                "mean_deltas": deltas,
+                "median_deltas": deltas,
+                "min_deltas": deltas,
+                marker: marker,
+            }
+
+        monkeypatch.setattr(
+            ml_trainer,
+            "_select_application_residual_blend",
+            lambda *args, **kwargs: overlay_result("application_residual_signal", 20.0),
+        )
+
+        result = ml_trainer._walk_forward_validate_candidate(
+            snapshots,
+            [
+                {
+                    "index": 1,
+                    "train_end_exclusive": "2020-07-01",
+                    "validation_start": "2021-01-01",
+                    "validation_end": "2021-01-31",
+                }
+            ],
+            target_name="target_rank_6m",
+            ridge_lambda=1.0,
+            backend="numpy",
+            max_rows=None,
+            prior_strategy="no_ticker_priors",
+            model_kind="ridge",
+            feature_names=[],
+            incumbent_payload=None,
+            min_6m_delta=0.001,
+            max_horizon_degradation=2.0,
+            blend_weights=(1.0,),
+            quality_residual_weights=(1.0, 0.5),
+        )
+
+        assert result["application_residual_signal"] == "application_residual_signal"
+
+        rejected_residual = overlay_result("application_residual_signal", 20.0)
+        rejected_residual["accepted"] = False
+        monkeypatch.setattr(
+            ml_trainer,
+            "_select_application_residual_blend",
+            lambda *args, **kwargs: rejected_residual,
+        )
+        fallback = ml_trainer._walk_forward_validate_candidate(
+            snapshots,
+            [
+                {
+                    "index": 1,
+                    "train_end_exclusive": "2020-07-01",
+                    "validation_start": "2021-01-01",
+                    "validation_end": "2021-01-31",
+                }
+            ],
+            target_name="target_rank_6m",
+            ridge_lambda=1.0,
+            backend="numpy",
+            max_rows=None,
+            prior_strategy="no_ticker_priors",
+            model_kind="ridge",
+            feature_names=[],
+            incumbent_payload=None,
+            min_6m_delta=0.001,
+            max_horizon_degradation=2.0,
+            blend_weights=(1.0,),
+            quality_residual_weights=(1.0, 0.5),
+        )
+
+        assert fallback["accepted"] is True
+        assert "application_residual_signal" not in fallback
+
+    def test_quality_residual_selection_maximizes_worst_fold_rho(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import (
+            _select_quality_residual_blend,
+        )
+
+        fold_predictions = []
+        for reverse_candidate in (False, True):
+            rank = np.arange(10, dtype="float64")
+            centered_rank = np.linspace(-0.5, 0.5, 10)
+            validation = pd.DataFrame(
+                {
+                    "ticker": [f"T{index:02d}" for index in range(10)],
+                    "snapshot_date": ["2025-01-02"] * 10,
+                    "quality_score": rank[::-1],
+                    "forward_return_1w": rank,
+                    "forward_return_1m": rank,
+                    "forward_return_3m": rank,
+                    "forward_return_6m": rank,
+                }
+            )
+            candidate = centered_rank[::-1] if reverse_candidate else centered_rank
+            incumbent = centered_rank[::-1]
+            fold_predictions.append((validation, candidate, incumbent))
+
+        selected = _select_quality_residual_blend(
+            fold_predictions,
+            base_blend_weight=1.0,
+            residual_weights=(1.0, 0.5),
+            min_6m_delta=0.001,
+            max_horizon_degradation=2.0,
+            primary_horizon="6m",
+            blend_candidates_evaluated=1,
+        )
+
+        assert selected["accepted"] is True
+        assert selected["quality_residual_candidate_weight"] == pytest.approx(0.5)
+        assert selected["quality_residual_min_rhos"]["6m"] >= 0.0
+        assert selected["quality_residual_candidates_evaluated"] == 2
+
+    def test_application_residual_selection_chooses_practical_book_yield(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import (
+            _select_application_residual_blend,
+        )
+
+        fold_predictions = []
+        for snapshot_date in ("2024-01-02", "2024-07-02"):
+            rank = np.arange(10, dtype="float64")
+            validation = pd.DataFrame(
+                {
+                    "ticker": [f"T{index:02d}" for index in range(10)],
+                    "snapshot_date": [snapshot_date] * 10,
+                    "quality_score": rank,
+                    "pb_ratio": rank[::-1] + 1.0,
+                    "forward_return_1w": rank,
+                    "forward_return_1m": rank,
+                    "forward_return_3m": rank,
+                    "forward_return_6m": rank,
+                }
+            )
+            candidate = np.linspace(0.5, -0.5, 10)
+            incumbent = candidate.copy()
+            fold_predictions.append((validation, candidate, incumbent))
+
+        selected = _select_application_residual_blend(
+            fold_predictions,
+            base_blend_weight=1.0,
+            residual_weights=(1.0, 0.5),
+            residual_signals=(
+                ("quality_de_crowding", "quality_score", -1.0),
+                ("book_yield", "pb_ratio", -1.0),
+            ),
+            min_6m_delta=0.001,
+            max_horizon_degradation=2.0,
+            primary_horizon="6m",
+            blend_candidates_evaluated=1,
+            require_primary_top20_excess_non_degradation=True,
+        )
+
+        assert selected["accepted"] is True
+        assert selected["application_residual_signal"] == "book_yield"
+        assert selected["application_residual_candidate_weight"] == pytest.approx(0.5)
+        assert selected["application_residual_fold_practical_passes"] == [True, True]
+
+    def test_application_factor_selection_uses_purged_fold_templates(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import (
+            SIX_MONTH_APPLICATION_FACTOR_TEMPLATES,
+            _select_practical_factor_blend,
+        )
+
+        fold_predictions = []
+        for snapshot_date in ("2024-01-02", "2024-07-02"):
+            rank = np.arange(30, dtype="float64")
+            reverse_rank = rank[::-1]
+            validation = pd.DataFrame(
+                {
+                    "ticker": [f"T{index:02d}" for index in range(30)],
+                    "snapshot_date": [snapshot_date] * 30,
+                    "quality_score": reverse_rank,
+                    "pb_ratio": reverse_rank + 1.0,
+                    "ps_ratio": reverse_rank + 1.0,
+                    "total_liabilities": rank + 1.0,
+                    "market_cap_rmb": np.full(30, 100.0),
+                    "relative_return_63d": rank,
+                    "current_ratio": reverse_rank + 1.0,
+                    "forward_return_1w": rank,
+                    "forward_return_1m": rank,
+                    "forward_return_3m": rank,
+                    "forward_return_6m": rank,
+                }
+            )
+            candidate = np.linspace(-0.5, 0.5, 30)
+            incumbent = candidate[::-1]
+            fold_predictions.append((validation, candidate, incumbent))
+
+        selected = _select_practical_factor_blend(
+            fold_predictions,
+            base_blend_weight=1.0,
+            factor_templates=SIX_MONTH_APPLICATION_FACTOR_TEMPLATES,
+            min_6m_delta=0.001,
+            max_horizon_degradation=2.0,
+            primary_horizon="6m",
+            blend_candidates_evaluated=1,
+            require_primary_top20_excess_non_degradation=True,
+        )
+
+        assert selected is not None
+        assert selected["accepted"] is True
+        assert selected["application_factor_template"] == "value_momentum"
+        assert selected["application_factor_candidates_evaluated"] == 3
+        assert selected["application_factor_fold_practical_passes"] == [True, True]
 
     def test_ml_trainer_target_values_supports_one_week_target(self) -> None:
         from valueinvestor.scorer_improver.ml_trainer import _target_values
@@ -2707,20 +4275,6 @@ class TestAgentHelpers:
             monkeypatch.setenv("VALUEINVESTOR_ML_6M_SAMPLE_SEEDS", "0,29,0")
             assert _six_month_sample_seeds() == (0, 29)
 
-    def test_latest_supported_daily_end_date_uses_lagging_market(self) -> None:
-        from valueinvestor.scorer_improver.ml_trainer import (
-            _latest_supported_daily_end_date_from_prices,
-        )
-
-        prices = pd.DataFrame({
-            "ticker": ["000001.SZ", "00700.HK"],
-            "date": ["2026-04-30", "2026-05-05"],
-        })
-
-        assert _latest_supported_daily_end_date_from_prices(prices) == pd.Timestamp(
-            "2025-12-25"
-        ).date()
-
     def test_market_blend_helpers_apply_market_specific_weights(self) -> None:
         from valueinvestor.scorer_improver.ml_trainer import (
             _market_blend_weight_vector,
@@ -3356,26 +4910,144 @@ class TestAgentHelpers:
 
     def test_primary_spearman_helper_matches_full_evaluation(self) -> None:
         from valueinvestor.scorer_improver.ml_trainer import (
+            _evaluate_prepared_primary_spearman_rho,
             _evaluate_predictions,
             _evaluate_primary_spearman_rho,
+            _prepare_primary_spearman_context,
         )
 
         rows = []
         predictions = []
         for snap_idx, snap_date in enumerate(pd.date_range("2024-01-01", periods=3, freq="D")):
             for stock_idx in range(12):
-                rows.append({
-                    "snapshot_date": snap_date.date(),
-                    "forward_return_6m": stock_idx + snap_idx * 0.01,
-                })
+                rows.append(
+                    {
+                        "snapshot_date": snap_date.date(),
+                        "forward_return_6m": stock_idx + snap_idx * 0.01,
+                    }
+                )
                 predictions.append(float(11 - stock_idx if snap_idx == 1 else stock_idx))
         frame = pd.DataFrame(rows)
-        prediction_array = pd.Series(predictions).to_numpy(dtype="float64")
+        prediction_array = pd.Series(predictions).to_numpy(dtype="float64", copy=True)
 
         full_metrics = _evaluate_predictions(frame, prediction_array)
         primary_rho = _evaluate_primary_spearman_rho(frame, prediction_array, "6m")
+        context = _prepare_primary_spearman_context(frame, "6m")
+        prepared_rho = _evaluate_prepared_primary_spearman_rho(context, prediction_array)
 
         assert primary_rho == pytest.approx(full_metrics["6m"]["spearman_rho"])
+        assert prepared_rho == pytest.approx(primary_rho)
+
+        prediction_array[0] = float("nan")
+        primary_rho = _evaluate_primary_spearman_rho(frame, prediction_array, "6m")
+        prepared_rho = _evaluate_prepared_primary_spearman_rho(context, prediction_array)
+
+        assert prepared_rho == pytest.approx(primary_rho)
+
+    def test_routed_model_preselection_matches_runtime_fallback(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import (
+            build_feature_matrix,
+            _predict_scaled_linear_models,
+            _runtime_feature_parity,
+        )
+        from valueinvestor.screener.ml_ranker import (
+            MODEL_SCHEMA_VERSION,
+            expected_feature_names,
+        )
+
+        snapshots = pd.DataFrame(
+            {
+                "ticker": ["000001", "0700.HK", "000002"],
+                "snapshot_date": [pd.Timestamp("2025-01-31").date()] * 3,
+                "market_cap_rmb": [6e9, 60e9, 20e9],
+                "pe_ratio": [1.0, 2.0, 3.0],
+            }
+        )
+        feature_names = expected_feature_names()
+        n_features = len(feature_names)
+        normalizer = {
+            "clip_low": [-1e12] * n_features,
+            "clip_high": [1e12] * n_features,
+            "mean": [0.0] * n_features,
+            "scale": [1.0] * n_features,
+        }
+        first_coef = [0.0] * n_features
+        first_coef[0] = 1.0
+        second_coef = [0.0] * n_features
+        second_coef[0] = 2.0
+        models = [
+            {
+                **normalizer,
+                "coef": first_coef,
+                "intercept": 0.0,
+                "market": "ashare",
+                "cap_bucket": "small",
+            },
+            {
+                **normalizer,
+                "coef": second_coef,
+                "intercept": 0.0,
+                "market": "hk",
+                "cap_bucket": "large",
+            },
+        ]
+
+        feature_matrix = build_feature_matrix(
+            snapshots,
+            {},
+            feature_names=feature_names,
+        )
+        preselection = _predict_scaled_linear_models(
+            feature_matrix,
+            snapshots,
+            models,
+        )
+        payload = {
+            "schema_version": MODEL_SCHEMA_VERSION,
+            "feature_names": feature_names,
+            "models": models,
+            "ticker_priors": {},
+            "metadata": {"target_horizon": "6m"},
+        }
+        parity = _runtime_feature_parity(snapshots, payload)
+
+        expected = [
+            feature_matrix[0, 0],
+            2.0 * feature_matrix[1, 0],
+            1.5 * feature_matrix[2, 0],
+        ]
+        assert preselection.tolist() == pytest.approx(expected)
+        assert parity["matched"] is True
+        assert parity["prediction_max_abs_error"] == pytest.approx(0.0)
+
+    def test_strict_walk_forward_panel_balances_configuration_axes(self) -> None:
+        from itertools import product
+
+        from valueinvestor.scorer_improver.ml_trainer import (
+            _select_balanced_walk_forward_specs,
+        )
+
+        fields = (
+            "model_kind",
+            "prior_strategy",
+            "feature_set",
+            "target",
+            "ridge_lambda",
+        )
+        values = (
+            ("ridge", "market_ridge", "segment_ridge"),
+            ("rolling_ticker_priors", "no_ticker_priors"),
+            ("cross_sectional", "cross_sectional_interactions"),
+            ("target_rank_6m", "target_rank_6m_market", "target_rank_6m_soft"),
+            (30.0, 1_000.0),
+        )
+        candidates = [dict(zip(fields, combination)) for combination in product(*values)]
+
+        selected = _select_balanced_walk_forward_specs(candidates, limit=12)
+
+        assert len(selected) == 12
+        for field, expected_values in zip(fields, values):
+            assert {candidate[field] for candidate in selected} == set(expected_values)
 
     def test_full_eval_candidate_selection_prioritizes_current_1w_winning_family(self) -> None:
         from valueinvestor.scorer_improver.ml_trainer import _select_full_eval_candidates
@@ -3586,42 +5258,44 @@ class TestAgentHelpers:
         for date_idx, snap_date in enumerate(dates):
             for ticker_idx in range(20):
                 rank = ticker_idx / 19.0
-                rows.append({
-                    "ticker": f"T{ticker_idx:03d}",
-                    "snapshot_date": snap_date,
-                    "close": 10.0 + ticker_idx,
-                    "pe_ratio": 8.0 + rank,
-                    "pe_forward": 7.5 + rank,
-                    "pb_ratio": 1.0 + rank,
-                    "ps_ratio": 0.5 + rank,
-                    "peg_ratio": 0.8 + rank,
-                    "dividend_yield": 0.01 + rank / 100.0,
-                    "ev_to_ebitda": 5.0 + rank,
-                    "market_cap_rmb": 1_000_000_000.0 + ticker_idx * 1_000_000.0,
-                    "revenue": 100_000_000.0 + ticker_idx,
-                    "net_income": 10_000_000.0 + ticker_idx,
-                    "total_assets": 200_000_000.0 + ticker_idx,
-                    "total_liabilities": 50_000_000.0,
-                    "total_equity": 150_000_000.0,
-                    "operating_cash_flow": 12_000_000.0 + ticker_idx,
-                    "free_cash_flow": 8_000_000.0 + ticker_idx,
-                    "gross_margin": 0.30 + rank / 10.0,
-                    "roe": 0.10 + rank / 10.0,
-                    "roa": 0.05 + rank / 20.0,
-                    "net_margin": 0.08 + rank / 20.0,
-                    "debt_to_equity": 0.30,
-                    "current_ratio": 1.5,
-                    "composite_score": 100.0 - ticker_idx,
-                    "value_score": 50.0 + ticker_idx,
-                    "quality_score": 50.0 + ticker_idx,
-                    "growth_score": 50.0 + ticker_idx,
-                    "forward_return_1m": rank + date_idx * 0.001,
-                    "forward_return_3m": rank + date_idx * 0.002,
-                    "forward_return_6m": rank + date_idx * 0.003,
-                    "target_rank_1m": rank * 2.0 - 1.0,
-                    "target_rank_3m": rank * 2.0 - 1.0,
-                    "target_rank_6m": rank * 2.0 - 1.0,
-                })
+                rows.append(
+                    {
+                        "ticker": f"T{ticker_idx:03d}",
+                        "snapshot_date": snap_date,
+                        "close": 10.0 + ticker_idx,
+                        "pe_ratio": 8.0 + rank,
+                        "pe_forward": 7.5 + rank,
+                        "pb_ratio": 1.0 + rank,
+                        "ps_ratio": 0.5 + rank,
+                        "peg_ratio": 0.8 + rank,
+                        "dividend_yield": 0.01 + rank / 100.0,
+                        "ev_to_ebitda": 5.0 + rank,
+                        "market_cap_rmb": 10_000_000_000.0 + ticker_idx * 1_000_000.0,
+                        "revenue": 100_000_000.0 + ticker_idx,
+                        "net_income": 10_000_000.0 + ticker_idx,
+                        "total_assets": 200_000_000.0 + ticker_idx,
+                        "total_liabilities": 50_000_000.0,
+                        "total_equity": 150_000_000.0,
+                        "operating_cash_flow": 12_000_000.0 + ticker_idx,
+                        "free_cash_flow": 8_000_000.0 + ticker_idx,
+                        "gross_margin": 0.30 + rank / 10.0,
+                        "roe": 0.10 + rank / 10.0,
+                        "roa": 0.05 + rank / 20.0,
+                        "net_margin": 0.08 + rank / 20.0,
+                        "debt_to_equity": 0.30,
+                        "current_ratio": 1.5,
+                        "composite_score": 100.0 - ticker_idx,
+                        "value_score": 50.0 + ticker_idx,
+                        "quality_score": 50.0 + ticker_idx,
+                        "growth_score": 50.0 + ticker_idx,
+                        "forward_return_1m": rank + date_idx * 0.001,
+                        "forward_return_3m": rank + date_idx * 0.002,
+                        "forward_return_6m": rank + date_idx * 0.003,
+                        "target_rank_1m": rank * 2.0 - 1.0,
+                        "target_rank_3m": rank * 2.0 - 1.0,
+                        "target_rank_6m": rank * 2.0 - 1.0,
+                    }
+                )
         snapshots = pd.DataFrame(rows)
         config = HoldoutGateConfig(
             holdout_months=2,
@@ -3653,12 +5327,12 @@ class TestAgentHelpers:
             target_improvement=-999.0,
             max_training_rows=0,
             gate_config=config,
+            snapshot_frequency="quarterly",
+            strict_outer_gate=False,
         )
 
         assert seen["rows"] == len(expected_split.train)
-        assert seen["max_snapshot_date"] == pd.to_datetime(
-            expected_split.train["snapshot_date"]
-        ).max().date()
+        assert seen["max_snapshot_date"] == pd.to_datetime(expected_split.train["snapshot_date"]).max().date()
         assert "promotion_gate" in metadata
         assert metadata["promotion_gate"]["accepted"] is True
 
@@ -3671,49 +5345,51 @@ class TestAgentHelpers:
         from valueinvestor.scorer_improver.promotion_gate import HoldoutGateConfig
 
         rows = []
-        dates = pd.date_range("2020-01-01", periods=8, freq="MS").date
+        dates = pd.date_range("2020-01-01", periods=12, freq="MS").date
         for date_idx, snap_date in enumerate(dates):
-            for ticker_idx in range(16):
-                rank = ticker_idx / 15.0
+            for ticker_idx in range(20):
+                rank = ticker_idx / 19.0
                 target = rank * 2.0 - 1.0
-                rows.append({
-                    "ticker": f"T{ticker_idx:03d}",
-                    "snapshot_date": snap_date,
-                    "close": 10.0 + ticker_idx,
-                    "pe_ratio": 8.0 + rank,
-                    "pe_forward": 7.5 + rank,
-                    "pb_ratio": 1.0 + rank,
-                    "ps_ratio": 0.5 + rank,
-                    "peg_ratio": 0.8 + rank,
-                    "dividend_yield": 0.01 + rank / 100.0,
-                    "ev_to_ebitda": 5.0 + rank,
-                    "market_cap_rmb": 1_000_000_000.0 + ticker_idx * 1_000_000.0,
-                    "revenue": 100_000_000.0 + ticker_idx,
-                    "net_income": 10_000_000.0 + ticker_idx,
-                    "total_assets": 200_000_000.0 + ticker_idx,
-                    "total_liabilities": 50_000_000.0,
-                    "total_equity": 150_000_000.0,
-                    "operating_cash_flow": 12_000_000.0 + ticker_idx,
-                    "free_cash_flow": 8_000_000.0 + ticker_idx,
-                    "gross_margin": 0.30 + rank / 10.0,
-                    "roe": 0.10 + rank / 10.0,
-                    "roa": 0.05 + rank / 20.0,
-                    "net_margin": 0.08 + rank / 20.0,
-                    "debt_to_equity": 0.30,
-                    "current_ratio": 1.5,
-                    "composite_score": 100.0 - ticker_idx,
-                    "value_score": 50.0 + ticker_idx,
-                    "quality_score": 50.0 + ticker_idx,
-                    "growth_score": 50.0 + ticker_idx,
-                    "forward_return_1w": rank + date_idx * 0.001,
-                    "forward_return_1m": rank + date_idx * 0.001,
-                    "forward_return_3m": rank + date_idx * 0.002,
-                    "forward_return_6m": rank + date_idx * 0.003,
-                    "target_rank_1w": target,
-                    "target_rank_1m": target,
-                    "target_rank_3m": target,
-                    "target_rank_6m": target,
-                })
+                rows.append(
+                    {
+                        "ticker": f"T{ticker_idx:03d}",
+                        "snapshot_date": snap_date,
+                        "close": 10.0 + ticker_idx,
+                        "pe_ratio": 8.0 + rank,
+                        "pe_forward": 7.5 + rank,
+                        "pb_ratio": 1.0 + rank,
+                        "ps_ratio": 0.5 + rank,
+                        "peg_ratio": 0.8 + rank,
+                        "dividend_yield": 0.01 + rank / 100.0,
+                        "ev_to_ebitda": 5.0 + rank,
+                        "market_cap_rmb": 10_000_000_000.0 + ticker_idx * 1_000_000.0,
+                        "revenue": 100_000_000.0 + ticker_idx,
+                        "net_income": 10_000_000.0 + ticker_idx,
+                        "total_assets": 200_000_000.0 + ticker_idx,
+                        "total_liabilities": 50_000_000.0,
+                        "total_equity": 150_000_000.0,
+                        "operating_cash_flow": 12_000_000.0 + ticker_idx,
+                        "free_cash_flow": 8_000_000.0 + ticker_idx,
+                        "gross_margin": 0.30 + rank / 10.0,
+                        "roe": 0.10 + rank / 10.0,
+                        "roa": 0.05 + rank / 20.0,
+                        "net_margin": 0.08 + rank / 20.0,
+                        "debt_to_equity": 0.30,
+                        "current_ratio": 1.5,
+                        "composite_score": 100.0 - ticker_idx,
+                        "value_score": 50.0 + ticker_idx,
+                        "quality_score": 50.0 + ticker_idx,
+                        "growth_score": 50.0 + ticker_idx,
+                        "forward_return_1w": rank + date_idx * 0.001,
+                        "forward_return_1m": rank + date_idx * 0.001,
+                        "forward_return_3m": rank + date_idx * 0.002,
+                        "forward_return_6m": rank + date_idx * 0.003,
+                        "target_rank_1w": target,
+                        "target_rank_1m": target,
+                        "target_rank_3m": target,
+                        "target_rank_6m": target,
+                    }
+                )
         snapshots = pd.DataFrame(rows)
 
         def fail_if_rolling_priors(*args, **kwargs):
@@ -3741,6 +5417,8 @@ class TestAgentHelpers:
             walk_forward_folds=0,
             target_horizon="1w",
             full_eval_candidate_limit=2,
+            snapshot_frequency="quarterly",
+            strict_outer_gate=False,
         )
 
         assert metadata["target_horizon"] == "1w"

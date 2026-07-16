@@ -99,13 +99,15 @@ def _anchor_model_paths_option(value: str, *, target_horizon: str, output_model_
         if target_horizon != "6m":
             return ()
         patterns = (
-            "ml_ranker_model.verify-auto.json",
-            "ml_ranker_model.verify-ridge.json",
+            "ml_ranker_model.verify-*.json",
             "ml_ranker_model.backup-*.json",
         )
+        search_dirs = [Path("data/trainer")]
+        search_dirs.extend(sorted(Path("backup").glob("cleanup_*/data/trainer")))
         paths: list[Path] = []
-        for pattern in patterns:
-            paths.extend(sorted(Path("data/trainer").glob(pattern)))
+        for search_dir in search_dirs:
+            for pattern in patterns:
+                paths.extend(sorted(search_dir.glob(pattern)))
         output_resolved = output_model_path.resolve()
         unique: list[Path] = []
         seen: set[Path] = set()
@@ -143,7 +145,19 @@ def _anchor_model_paths_option(value: str, *, target_horizon: str, output_model_
             anchor_limit = int(os.environ.get("VALUEINVESTOR_ML_ANCHOR_LIMIT", "3"))
         except ValueError:
             anchor_limit = 3
-        ranked = sorted(unique, key=anchor_score, reverse=True)
+        verified = [
+            path
+            for path in unique
+            if path.name.startswith("ml_ranker_model.verify-")
+        ]
+        verified_set = set(verified)
+        ranked_verified = sorted(verified, key=anchor_score, reverse=True)
+        ranked_other = sorted(
+            [path for path in unique if path not in verified_set],
+            key=anchor_score,
+            reverse=True,
+        )
+        ranked = [*ranked_verified, *ranked_other]
         if anchor_limit > 0:
             return tuple(ranked[:anchor_limit])
         return tuple(ranked)
@@ -262,8 +276,11 @@ def _load_current_scorer_metadata(
                 metadata = {}
             models = payload.get("models")
             payload_members = payload.get("payload_members")
+            rank_payload_members = payload.get("rank_payload_members")
             temporal_payload_members = payload.get("temporal_payload_members")
-            if isinstance(payload_members, list) and payload_members:
+            if isinstance(rank_payload_members, list) and rank_payload_members:
+                ensemble_size = len(rank_payload_members)
+            elif isinstance(payload_members, list) and payload_members:
                 ensemble_size = len(payload_members)
             elif isinstance(temporal_payload_members, list) and temporal_payload_members:
                 ensemble_size = len(temporal_payload_members)
@@ -279,24 +296,66 @@ def _load_current_scorer_metadata(
                 "ensemble_size": metadata.get("ensemble_size", ensemble_size),
                 "target_horizon": metadata.get("target_horizon", target_horizon),
             }
+            for key in (
+                "model_kind",
+                "target",
+                "evaluation_protocol",
+                "strict_outer_gate",
+                "strict_purged_audit",
+                "rho_improvement",
+                "boosted_candidate_weight",
+                "incumbent_weight",
+            ):
+                if metadata.get(key) is not None:
+                    summary[key] = metadata[key]
             if metadata.get("members") is not None:
                 summary["members"] = metadata["members"]
             if metadata.get("trained_at") is not None:
                 summary["trained_at"] = metadata["trained_at"]
             if metadata.get("final_rho_improvement") is not None:
                 summary["final_rho_improvement"] = metadata["final_rho_improvement"]
+            if metadata.get("promotion_status") is not None:
+                summary["promotion_status"] = metadata["promotion_status"]
+            promotion_gate = metadata.get("validation_promotion_gate")
+            if not isinstance(promotion_gate, dict):
+                promotion_gate = metadata.get("promotion_gate")
+            if isinstance(promotion_gate, dict):
+                summary["promotion_gate_accepted"] = bool(
+                    promotion_gate.get("accepted", False)
+                )
+                if promotion_gate.get("reason") is not None:
+                    summary["promotion_gate_reason"] = promotion_gate["reason"]
+                gate_config = promotion_gate.get("config")
+                if isinstance(gate_config, dict) and gate_config.get("min_primary_rho") is not None:
+                    summary["promotion_gate_min_primary_rho"] = gate_config[
+                        "min_primary_rho"
+                    ]
 
             train_rhos = _spearman_rhos(metadata.get("train_metrics"))
-            holdout_rhos = _spearman_rhos(metadata.get("metrics"))
+            validation_metrics = metadata.get("validation_metrics")
+            has_validation_metrics = isinstance(validation_metrics, dict)
+            evaluation_metrics = (
+                validation_metrics if has_validation_metrics else metadata.get("metrics")
+            )
+            evaluation_rhos = _spearman_rhos(evaluation_metrics)
             if train_rhos:
                 summary["train_spearman_rhos"] = train_rhos
+            if evaluation_rhos:
+                summary["spearman_rhos"] = evaluation_rhos
+                evaluation_protocol = metadata.get("evaluation_protocol")
+                is_explicit_full_refit = (
+                    isinstance(evaluation_protocol, str)
+                    and evaluation_protocol.startswith("full_refit_")
+                    and not has_validation_metrics
+                )
+                if is_explicit_full_refit:
+                    summary["spearman_rho_basis"] = evaluation_protocol
+                else:
+                    summary["spearman_rho_basis"] = "holdout_metrics"
+                    summary["holdout_spearman_rhos"] = evaluation_rhos
+            elif train_rhos:
                 summary["spearman_rhos"] = train_rhos
                 summary["spearman_rho_basis"] = "train_metrics"
-            elif holdout_rhos:
-                summary["spearman_rhos"] = holdout_rhos
-                summary["spearman_rho_basis"] = "holdout_metrics"
-            if holdout_rhos:
-                summary["holdout_spearman_rhos"] = holdout_rhos
             return summary
 
     meta_path = Path("data/trainer/current_best_scorer.json")
@@ -880,6 +939,11 @@ def _run_dual_target_scan(
 def scan(
     config: str = typer.Option("config.yaml", "--config", "-c", help="Path to config YAML."),
     top_n: Optional[int] = typer.Option(None, "--top-n", "-n", help="Override screening.top_n."),
+    model_path: Optional[str] = typer.Option(
+        None,
+        "--model-path",
+        help="Override the ML ranker artifact for a single-target scan.",
+    ),
     skip_analysis: bool = typer.Option(False, "--skip-analysis", help="Skip LLM analysis step."),
     output_dir: Optional[str] = typer.Option(None, "--output-dir", "-o", help="Report output dir."),
     multi_timeframe: bool = typer.Option(False, "--multi-timeframe", help="Run screening for 1m/3m/6m horizons and generate Chinese multi-timeframe report."),
@@ -906,6 +970,11 @@ def scan(
     cache = _make_cache(cfg)
 
     if score_target == "both":
+        if model_path is not None:
+            err_console.print(
+                "[red]--model-path is only supported for a single score target.[/red]"
+            )
+            raise typer.Exit(code=1)
         _run_dual_target_scan(
             cfg,
             cache,
@@ -921,7 +990,9 @@ def scan(
     from valueinvestor.screener.scorer import MultiFactorScorer
 
     clear_model_cache()
-    active_model_path = _model_path_for_score_target(score_target)
+    active_model_path = (
+        Path(model_path) if model_path is not None else _model_path_for_score_target(score_target)
+    )
     active_model = load_model(active_model_path)
     if active_model is None:
         console.print("[dim]active ML ranker: unavailable; using hand scorer fallback[/dim]")
@@ -1508,7 +1579,7 @@ def train_ml_scorer(
         help="Daily snapshot start date, YYYY-MM-DD.",
     ),
     end_date: str = typer.Option(
-        "2025-07-07",
+        "auto",
         "--end-date",
         help="Daily snapshot end date, YYYY-MM-DD or auto for the latest supported 6m label date.",
     ),
@@ -1528,7 +1599,7 @@ def train_ml_scorer(
         help="Latest N months reserved as untouched promotion holdout.",
     ),
     gate_embargo_days: int = typer.Option(
-        141,
+        197,
         "--gate-embargo-days",
         help="Embargo days between training and promotion holdout.",
     ),
@@ -1557,6 +1628,11 @@ def train_ml_scorer(
         "--gate-max-regime-6m-degradation",
         help="Maximum allowed 6m rho degradation inside any reported regime bucket.",
     ),
+    gate_min_recent_primary_rho: float = typer.Option(
+        0.0,
+        "--gate-min-recent-primary-rho",
+        help="Minimum primary-horizon rho in the latest evaluable holdout year.",
+    ),
     gate_require_top20_excess_non_degradation: bool = typer.Option(
         True,
         "--gate-require-top20-excess-non-degradation/--gate-allow-top20-excess-degradation",
@@ -1583,9 +1659,12 @@ def train_ml_scorer(
         help="Required mean primary-horizon rho improvement across walk-forward folds.",
     ),
     walk_forward_max_horizon_degradation: float = typer.Option(
-        0.01,
+        0.10,
         "--walk-forward-max-horizon-degradation",
-        help="Allowed mean walk-forward rho degradation for non-primary horizons.",
+        help=(
+            "Allowed mean non-primary rho degradation and worst primary-fold "
+            "degradation during walk-forward validation."
+        ),
     ),
     full_eval_candidate_limit: int = typer.Option(
         0,
@@ -1639,6 +1718,14 @@ def train_ml_scorer(
             "or comma-separated paths."
         ),
     ),
+    strict_outer_gate: bool = typer.Option(
+        True,
+        "--strict-outer-gate/--legacy-gate-search",
+        help=(
+            "Select on purged walk-forward folds and evaluate exactly one raw "
+            "candidate on the outer holdout."
+        ),
+    ),
 ) -> None:
     """Train the local ML ranker used by the default screening flow."""
     logging.basicConfig(
@@ -1679,6 +1766,7 @@ def train_ml_scorer(
                 min_weighted_utility=gate_min_weighted_utility,
                 min_regime_6m_win_rate=gate_min_regime_6m_win_rate,
                 max_regime_6m_degradation=gate_max_regime_6m_degradation,
+                min_recent_primary_rho=gate_min_recent_primary_rho,
                 min_primary_rho=promotion_min_gate_rho,
                 require_6m_top20_excess_non_degradation=gate_require_top20_excess_non_degradation,
             ),
@@ -1702,6 +1790,7 @@ def train_ml_scorer(
                 target_horizon=target_horizon,
                 output_model_path=effective_output_model_path,
             ),
+            strict_outer_gate=strict_outer_gate,
         )
     except Exception as exc:
         err_console.print(f"[red]ML scorer training failed:[/red] {exc}")

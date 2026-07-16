@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from functools import lru_cache
 import json
 import logging
 import math
@@ -112,6 +113,16 @@ SHORT_HORIZON_FEATURES = (
     "relative_volatility_63d",
 )
 
+APPLICATION_FACTOR_SIGNALS = (
+    "model",
+    "quality_de_crowding",
+    "book_yield",
+    "sales_yield",
+    "liability_yield",
+    "momentum_63d",
+    "low_current_ratio",
+)
+
 INTERACTION_FEATURES = (
     ("value_quality_score", "value_score", "quality_score"),
     ("value_growth_score", "value_score", "growth_score"),
@@ -197,6 +208,7 @@ CROSS_SECTIONAL_INTERACTION_FEATURES = (
     ),
 )
 
+
 def cross_sectional_feature_names() -> List[str]:
     names: List[str] = []
     for source in CROSS_SECTIONAL_FEATURES:
@@ -204,8 +216,10 @@ def cross_sectional_feature_names() -> List[str]:
         names.append(f"market_cs_rank_{source}")
     return names
 
+
 def cross_sectional_interaction_feature_names() -> List[str]:
     return [name for name, _left, _right in CROSS_SECTIONAL_INTERACTION_FEATURES]
+
 
 def expected_feature_names(
     *,
@@ -434,6 +448,8 @@ class MLRankerModel:
     linear_models: Sequence[MLRankerLinearModel]
     ticker_priors: Mapping[str, Mapping[str, float]]
     metadata: Mapping[str, object]
+    lightgbm_model_text: Optional[str] = None
+    rank_member_models: Sequence[tuple[float, "MLRankerModel"]] = ()
     member_models: Sequence[tuple[float, "MLRankerModel"]] = ()
     market_member_models: Sequence[tuple[Mapping[str, float], "MLRankerModel"]] = ()
     temporal_member_models: Sequence[tuple[Optional[date], Optional[date], "MLRankerModel"]] = ()
@@ -455,6 +471,8 @@ class MLRankerModel:
         tickers: Optional[Sequence[str]] = None,
         cap_buckets: Optional[Sequence[str]] = None,
     ) -> np.ndarray:
+        if self.lightgbm_model_text is not None:
+            return predict_lightgbm_model(self.lightgbm_model_text, features)
         if len(self.linear_models) == 1:
             return self.linear_models[0].predict_matrix(features)
         predictions = np.zeros(features.shape[0], dtype="float64")
@@ -516,6 +534,20 @@ _MODEL_CACHE: Dict[str, tuple[tuple[int, int] | None, Optional[MLRankerModel]]] 
 _PRICE_FEATURE_CACHE: Dict[tuple[tuple[str, int, int], ...], object] = {}
 
 
+@lru_cache(maxsize=4)
+def _load_lightgbm_booster(model_text: str) -> object:
+    try:
+        import lightgbm as lgb
+    except ImportError as exc:  # pragma: no cover - dependency validation covers this
+        raise RuntimeError("LightGBM model requires the lightgbm package") from exc
+    return lgb.Booster(model_str=model_text)
+
+
+def predict_lightgbm_model(model_text: str, features: np.ndarray) -> np.ndarray:
+    booster = _load_lightgbm_booster(model_text)
+    return np.asarray(booster.predict(features), dtype="float64")
+
+
 def _parse_temporal_date(value: object) -> Optional[date]:
     if value is None or value == "":
         return None
@@ -566,10 +598,205 @@ def _centered_rank(values: np.ndarray) -> np.ndarray:
         return output
     finite_values = values[finite]
     order = np.argsort(finite_values, kind="mergesort")
+    sorted_values = finite_values[order]
+    group_starts = np.r_[0, np.flatnonzero(sorted_values[1:] != sorted_values[:-1]) + 1]
+    group_ends = np.r_[group_starts[1:], n]
+    sorted_ranks = np.empty(n, dtype="float64")
+    for start, end in zip(group_starts, group_ends):
+        sorted_ranks[start:end] = (float(start) + float(end - 1)) / 2.0
     ranks = np.empty(n, dtype="float64")
-    ranks[order] = np.arange(n, dtype="float64")
+    ranks[order] = sorted_ranks
     output[finite] = ranks / float(n - 1) - 0.5
     return output
+
+
+def _application_snapshot_rank(values: np.ndarray) -> np.ndarray:
+    """Match the trainer's one-based snapshot rank used for application blends."""
+    output = np.full(values.shape[0], np.nan, dtype="float64")
+    finite = np.isfinite(values)
+    n = int(finite.sum())
+    if n <= 1:
+        return output
+    finite_values = values[finite]
+    order = np.argsort(finite_values, kind="mergesort")
+    sorted_values = finite_values[order]
+    group_starts = np.r_[0, np.flatnonzero(sorted_values[1:] != sorted_values[:-1]) + 1]
+    group_ends = np.r_[group_starts[1:], n]
+    sorted_ranks = np.empty(n, dtype="float64")
+    for start, end in zip(group_starts, group_ends):
+        sorted_ranks[start:end] = (float(start + 1) + float(end)) / 2.0
+    ranks = np.empty(n, dtype="float64")
+    ranks[order] = sorted_ranks
+    output[finite] = ranks / float(n + 1) * 2.0 - 1.0
+    return output
+
+
+def _application_factor_config(
+    metadata: Mapping[str, object],
+) -> tuple[dict[str, object], ...]:
+    raw_components = metadata.get("application_factor_components")
+    if not isinstance(raw_components, list):
+        return ()
+    components: list[dict[str, object]] = []
+    for component in raw_components:
+        if not isinstance(component, Mapping):
+            continue
+        signal = str(component.get("signal", "")).strip()
+        try:
+            weight = float(component.get("weight", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if signal in APPLICATION_FACTOR_SIGNALS and np.isfinite(weight) and weight > 0.0:
+            components.append({"signal": signal, "weight": weight})
+    return tuple(components)
+
+
+def _application_factor_value(values: Mapping[str, object], signal: str) -> float:
+    if signal == "quality_de_crowding":
+        return -_to_float(values.get("quality_score"))
+    if signal == "book_yield":
+        return -_to_float(values.get("pb_ratio"))
+    if signal == "sales_yield":
+        return -_to_float(values.get("ps_ratio"))
+    if signal == "liability_yield":
+        return _safe_div(
+            _to_float(values.get("total_liabilities")),
+            _to_float(values.get("market_cap_rmb")),
+        )
+    if signal == "momentum_63d":
+        return _to_float(values.get("relative_return_63d"))
+    if signal == "low_current_ratio":
+        return -_to_float(values.get("current_ratio"))
+    return float("nan")
+
+
+def _application_factor_predictions(
+    model_predictions: np.ndarray,
+    values_by_result: Sequence[Mapping[str, object]],
+    components: Sequence[Mapping[str, object]],
+) -> np.ndarray:
+    model_rank = _application_snapshot_rank(model_predictions)
+    blended = np.zeros(len(model_predictions), dtype="float64")
+    total_weight = 0.0
+    for component in components:
+        signal = str(component.get("signal", "")).strip()
+        try:
+            weight = float(component.get("weight", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if signal not in APPLICATION_FACTOR_SIGNALS or not np.isfinite(weight) or weight <= 0.0:
+            continue
+        if signal == "model":
+            factor_rank = model_rank
+        else:
+            factor_values = np.asarray(
+                [_application_factor_value(values, signal) for values in values_by_result],
+                dtype="float64",
+            )
+            factor_rank = _application_snapshot_rank(factor_values)
+            factor_rank = np.where(np.isfinite(factor_rank), factor_rank, 0.0)
+        blended += weight * factor_rank
+        total_weight += weight
+    if total_weight <= 0.0:
+        return model_predictions
+    return blended / total_weight
+
+
+def _application_residual_config(
+    metadata: Mapping[str, object],
+) -> tuple[float, str, float]:
+    if "application_residual_candidate_weight" not in metadata:
+        raw_weight = metadata.get(
+            "application_quality_residual_candidate_weight",
+            1.0,
+        )
+        column = "quality_score"
+        direction = -1.0
+    else:
+        raw_weight = metadata.get("application_residual_candidate_weight", 1.0)
+        column = str(metadata.get("application_residual_column", "")).strip()
+        raw_direction = metadata.get("application_residual_direction", 1.0)
+        try:
+            direction = float(raw_direction)
+        except (TypeError, ValueError):
+            return 1.0, "", 1.0
+    try:
+        weight = float(raw_weight)
+    except (TypeError, ValueError):
+        return 1.0, "", 1.0
+    if not np.isfinite(weight) or not np.isfinite(direction) or not column:
+        return 1.0, "", 1.0
+    return float(np.clip(weight, 0.0, 1.0)), column, direction
+
+
+def _application_gross_profitability_de_crowding_config(
+    metadata: Mapping[str, object],
+) -> tuple[float, float, float]:
+    try:
+        factor_weight = float(
+            metadata.get(
+                "application_gross_profitability_de_crowding_factor_weight",
+                0.0,
+            )
+        )
+        max_model_rank = float(
+            metadata.get(
+                "application_gross_profitability_de_crowding_max_model_rank",
+                0.4,
+            )
+        )
+        min_market_return = float(
+            metadata.get(
+                "application_gross_profitability_de_crowding_min_market_return_63d",
+                0.0,
+            )
+        )
+    except (TypeError, ValueError):
+        return 0.0, 0.4, 0.0
+    if not all(np.isfinite(value) for value in (factor_weight, max_model_rank, min_market_return)):
+        return 0.0, 0.4, 0.0
+    return (
+        float(np.clip(factor_weight, 0.0, 1.0)),
+        float(np.clip(max_model_rank, -1.0, 1.0)),
+        min_market_return,
+    )
+
+
+def _application_gross_profitability_de_crowding_predictions(
+    model_predictions: np.ndarray,
+    gross_profit_assets: np.ndarray,
+    market_return_63d: np.ndarray,
+    *,
+    factor_weight: float,
+    max_model_rank: float,
+    min_market_return: float,
+) -> np.ndarray:
+    """Re-rank lower-confidence stocks when the 63-day market regime is positive."""
+    model_rank = _application_snapshot_rank(np.asarray(model_predictions, dtype="float64"))
+    market_returns = np.asarray(market_return_63d, dtype="float64")
+    finite_market = market_returns[np.isfinite(market_returns)]
+    if not len(finite_market) or float(finite_market.mean()) <= min_market_return:
+        return model_rank
+
+    factor_rank = _application_snapshot_rank(
+        np.asarray(gross_profit_assets, dtype="float64")
+    )
+    blended = model_rank.copy()
+    usable = (
+        np.isfinite(model_rank)
+        & np.isfinite(factor_rank)
+        & (model_rank <= max_model_rank)
+    )
+    if usable.any():
+        blended[usable] = (
+            (1.0 - factor_weight) * model_rank[usable]
+            - factor_weight * factor_rank[usable]
+        )
+        blended[usable] = np.minimum(
+            blended[usable],
+            np.nextafter(max_model_rank, float("-inf")),
+        )
+    return blended
 
 
 def _cross_sectional_feature_matrix(
@@ -663,6 +890,32 @@ def _model_from_payload(payload: Mapping[str, object]) -> MLRankerModel:
             temporal_member_models=tuple(temporal_models),
         )
 
+    rank_member_payloads = payload.get("rank_payload_members")
+    if isinstance(rank_member_payloads, list) and rank_member_payloads:
+        rank_member_models: list[tuple[float, MLRankerModel]] = []
+        for member in rank_member_payloads:
+            if not isinstance(member, Mapping):
+                continue
+            child_payload = member.get("payload")
+            if not isinstance(child_payload, Mapping):
+                continue
+            try:
+                weight = float(member.get("weight", 1.0))
+            except (TypeError, ValueError):
+                weight = 1.0
+            if not math.isfinite(weight) or weight <= 0.0:
+                continue
+            rank_member_models.append((weight, _model_from_payload(child_payload)))
+        if not rank_member_models:
+            raise ValueError("rank payload-member ensemble contains no valid members")
+        return MLRankerModel(
+            feature_names=(),
+            linear_models=(),
+            ticker_priors={},
+            metadata=payload.get("metadata", {}),
+            rank_member_models=tuple(rank_member_models),
+        )
+
     member_payloads = payload.get("payload_members")
     if isinstance(member_payloads, list) and member_payloads:
         member_models: list[tuple[float, MLRankerModel]] = []
@@ -723,6 +976,15 @@ def _model_from_payload(payload: Mapping[str, object]) -> MLRankerModel:
     if list(feature_names) not in _valid_feature_schemas():
         raise ValueError("model feature schema does not match runtime feature schema")
     expected_len = len(feature_names)
+    lightgbm_model_text = payload.get("lightgbm_model")
+    if isinstance(lightgbm_model_text, str) and lightgbm_model_text:
+        return MLRankerModel(
+            feature_names=feature_names,
+            linear_models=(),
+            ticker_priors=payload.get("ticker_priors", {}),
+            metadata=payload.get("metadata", {}),
+            lightgbm_model_text=lightgbm_model_text,
+        )
     model_payloads = payload.get("models")
     if model_payloads is None:
         model_payloads = [payload]
@@ -994,30 +1256,25 @@ def _recent_price_features_for_results(
     return output
 
 
-def feature_matrix_for_results(results: Sequence[ScreeningResult], model: MLRankerModel) -> np.ndarray:
-    short_features = (
-        _recent_price_features_for_results(results)
-        if _needs_short_horizon_features(model.feature_names)
-        else {}
-    )
-    values_by_result = [
-        {**values_from_result(result), **short_features.get(index, {})}
-        for index, result in enumerate(results)
-    ]
-    if any(
-        name.startswith(("cs_rank_", "market_cs_rank_"))
-        for name in model.feature_names
-    ):
+def feature_matrix_from_values(
+    values_by_result: Sequence[Mapping[str, object]],
+    tickers: Sequence[str],
+    model: MLRankerModel,
+) -> np.ndarray:
+    """Build the production feature matrix from already-resolved value rows."""
+    if len(values_by_result) != len(tickers):
+        raise ValueError("values_by_result and tickers must have equal lengths")
+    if any(name.startswith(("cs_rank_", "market_cs_rank_")) for name in model.feature_names):
         source_features = {
             source: np.asarray(
                 [
                     feature_vector_from_values(
                         values,
-                        result.company.ticker,
+                        ticker,
                         model.ticker_priors,
                         feature_names=[source],
                     )[0]
-                    for values, result in zip(values_by_result, results)
+                    for values, ticker in zip(values_by_result, tickers)
                 ],
                 dtype="float64",
             )
@@ -1025,7 +1282,7 @@ def feature_matrix_for_results(results: Sequence[ScreeningResult], model: MLRank
         }
         cross_sectional_features = _cross_sectional_feature_matrix(
             source_features,
-            [result.company.ticker for result in results],
+            tickers,
             model.feature_names,
         )
     else:
@@ -1036,10 +1293,10 @@ def feature_matrix_for_results(results: Sequence[ScreeningResult], model: MLRank
         if feature_name in model.feature_names
     }
     rows = []
-    for index, result in enumerate(results):
+    for index, ticker in enumerate(tickers):
         row = feature_vector_from_values(
             values_by_result[index],
-            result.company.ticker,
+            ticker,
             model.ticker_priors,
             feature_names=model.feature_names,
         )
@@ -1047,6 +1304,20 @@ def feature_matrix_for_results(results: Sequence[ScreeningResult], model: MLRank
             row[feature_index] = float(cross_sectional_features[feature_name][index])
         rows.append(row)
     return np.asarray(rows, dtype="float64")
+
+
+def feature_matrix_for_results(results: Sequence[ScreeningResult], model: MLRankerModel) -> np.ndarray:
+    short_features = (
+        _recent_price_features_for_results(results) if _needs_short_horizon_features(model.feature_names) else {}
+    )
+    values_by_result = [
+        {**values_from_result(result), **short_features.get(index, {})} for index, result in enumerate(results)
+    ]
+    return feature_matrix_from_values(
+        values_by_result,
+        [result.company.ticker for result in results],
+        model,
+    )
 
 
 def _percentile_scores(predictions: np.ndarray) -> np.ndarray:
@@ -1174,6 +1445,17 @@ def _predict_results_with_model(
             )
         return predictions
 
+    if model.rank_member_models:
+        predictions = np.zeros(len(results), dtype="float64")
+        total_weight = 0.0
+        for weight, member_model in model.rank_member_models:
+            member_predictions = _predict_results_with_model(results, member_model)
+            predictions += weight * _application_snapshot_rank(member_predictions)
+            total_weight += weight
+        if total_weight <= 0.0:
+            raise ValueError("rank payload-member ensemble has no positive weights")
+        return predictions / total_weight
+
     if model.member_models:
         predictions = np.zeros(len(results), dtype="float64")
         total_weight = 0.0
@@ -1224,7 +1506,78 @@ def score_results_with_ml_ranker(
     if model is None or not results:
         return False
 
+    hand_scores = np.asarray(
+        [float(result.composite_score) for result in results],
+        dtype="float64",
+    )
     predictions = _predict_results_with_model(results, model)
+    try:
+        application_blend_weight = float(model.metadata.get("application_blend_candidate_weight", 1.0))
+    except (TypeError, ValueError):
+        application_blend_weight = 1.0
+    if 0.0 <= application_blend_weight < 1.0:
+        predictions = application_blend_weight * _application_snapshot_rank(predictions) + (
+            1.0 - application_blend_weight
+        ) * _application_snapshot_rank(hand_scores)
+    factor_components = _application_factor_config(model.metadata)
+    if factor_components:
+        needs_momentum = any(component.get("signal") == "momentum_63d" for component in factor_components)
+        short_features = _recent_price_features_for_results(results) if needs_momentum else {}
+        values_by_result = [
+            {**values_from_result(result), **short_features.get(index, {})}
+            for index, result in enumerate(results)
+        ]
+        predictions = _application_factor_predictions(
+            predictions,
+            values_by_result,
+            factor_components,
+        )
+    residual_weight, residual_column, residual_direction = _application_residual_config(model.metadata)
+    if not factor_components and residual_weight < 1.0:
+        residual_values = residual_direction * np.asarray(
+            [_to_float(values_from_result(result).get(residual_column)) for result in results],
+            dtype="float64",
+        )
+        model_rank = _application_snapshot_rank(predictions)
+        residual_rank = _application_snapshot_rank(residual_values)
+        blended = model_rank.copy()
+        usable = np.isfinite(model_rank) & np.isfinite(residual_rank)
+        blended[usable] = residual_weight * model_rank[usable] + (1.0 - residual_weight) * residual_rank[usable]
+        predictions = blended
+    (
+        de_crowding_weight,
+        de_crowding_max_rank,
+        de_crowding_min_market_return,
+    ) = _application_gross_profitability_de_crowding_config(model.metadata)
+    if de_crowding_weight > 0.0:
+        price_features = _recent_price_features_for_results(results)
+        values_by_result = [
+            {**values_from_result(result), **price_features.get(index, {})}
+            for index, result in enumerate(results)
+        ]
+        gross_profit_assets = np.asarray(
+            [
+                _safe_div(
+                    _to_float(values.get("revenue"))
+                    * _to_float(values.get("gross_margin")),
+                    _to_float(values.get("total_assets")),
+                )
+                for values in values_by_result
+            ],
+            dtype="float64",
+        )
+        market_return_63d = np.asarray(
+            [_to_float(values.get("market_return_63d")) for values in values_by_result],
+            dtype="float64",
+        )
+        predictions = _application_gross_profitability_de_crowding_predictions(
+            predictions,
+            gross_profit_assets,
+            market_return_63d,
+            factor_weight=de_crowding_weight,
+            max_model_rank=de_crowding_max_rank,
+            min_market_return=de_crowding_min_market_return,
+        )
     percentile_scores = _percentile_scores(predictions)
     for result, raw_score, percentile_score in zip(results, predictions, percentile_scores):
         result._ml_ranker_raw_score = float(raw_score)

@@ -12,18 +12,33 @@ stamp() {
 }
 
 run=0
-rows=(1500000 2000000 1500000)
-refit_caps=(2000000 3000000)
-limits=(2 3)
-models=(segment-ridge-recent segment-ridge-recent segment-ridge segment-ridge-recent)
-folds=(0 0 0 0)
+rows=(0)
+refit_caps=(0)
+limits=(1)
+models=(
+  market-ridge-recent-1095
+  market-ridge-recent-730
+  segment-ridge-recent-730
+  segment-ridge-recent-730
+  market-ridge-recent-1460
+  market-ridge-recent-1825
+  ridge-only
+  market-ridge-recent-730
+  market-ridge-recent-1095
+  market-ridge-recent-1095
+)
+folds=(4)
 presets=(
-  "cross_sectional_interactions:ticker-priors:target-rank-weighted-901:0.15,0.2,0.25,0.3"
-  "cross_sectional_interactions:ticker-priors:target-rank-weighted-901,target-rank-weighted-8515:0.1,0.15,0.2,0.25,0.3"
-  "cross_sectional_interactions:ticker-priors:target-rank-weighted-901,target-rank-weighted-802:0.05,0.1,0.15,0.2,0.25"
-  "cross_sectional_interactions:ticker-priors:target-rank-weighted-901-market,target-rank-weighted-8515-market:0.1,0.15,0.2,0.25,0.3"
-  "cross_sectional:ticker-priors:target-rank-weighted-901,target-rank-weighted-8515:0.1,0.15,0.2,0.25,0.3"
-  "poly:ticker-priors:target-rank-weighted-901,target-rank-weighted-8515:0.1,0.2,0.3,0.5"
+  "cross_sectional:rolling-ticker-priors:target-rank-weighted-901:1000"
+  "cross_sectional:rolling-ticker-priors:target-rank-weighted-901:3000"
+  "cross_sectional_interactions:rolling-ticker-priors:target-rank-weighted-802:0.25"
+  "cross_sectional_interactions:rolling-ticker-priors:target-rank-weighted-8515-market:0.3"
+  "cross_sectional:rolling-ticker-priors:target-rank-weighted-901:1000"
+  "cross_sectional:rolling-ticker-priors:target-rank-weighted-901:1000"
+  "core:rolling-ticker-priors:target-rank-6m:100"
+  "cross_sectional_interactions:rolling-ticker-priors:target-rank-6m-soft:1000"
+  "cross_sectional:rolling-ticker-priors:target-rank-weighted-703:1000"
+  "cross_sectional_interactions:rolling-ticker-priors:target-rank-weighted-901:1000"
 )
 requested_backend="${BACKEND:-mlx}"
 backend="$requested_backend"
@@ -47,7 +62,9 @@ PY
   esac
 fi
 force_snapshots_on_first_run="${FORCE_SNAPSHOTS_ON_FIRST_RUN:-0}"
-end_date="${END_DATE:-2025-07-07}"
+end_date="${END_DATE:-auto}"
+gate_holdout_months="${GATE_HOLDOUT_MONTHS:-24}"
+gate_embargo_days="${GATE_EMBARGO_DAYS:-197}"
 gate_min_delta="${GATE_MIN_DELTA:-0.00002}"
 gate_max_degradation="${GATE_MAX_DEGRADATION:-0.001}"
 gate_min_weighted_utility="${GATE_MIN_WEIGHTED_UTILITY:-0.0}"
@@ -57,23 +74,21 @@ auto_raise_promotion_min_train_rho="${AUTO_RAISE_PROMOTION_MIN_TRAIN_RHO:-0}"
 export VALUEINVESTOR_ML_6M_GATE_MARKET_BLEND_LIMIT="${VALUEINVESTOR_ML_6M_GATE_MARKET_BLEND_LIMIT:-0}"
 export VALUEINVESTOR_ML_6M_GATE_ROUTE_RAW_DEGRADATION_LIMIT="${VALUEINVESTOR_ML_6M_GATE_ROUTE_RAW_DEGRADATION_LIMIT:-0.005}"
 export VALUEINVESTOR_ML_6M_RECENCY_HALF_LIVES_DAYS="${VALUEINVESTOR_ML_6M_RECENCY_HALF_LIVES_DAYS:-730,1095,1460,1825,2190}"
-export VALUEINVESTOR_ML_6M_RECENT_SEGMENT_ROUTE_WEIGHTS="${VALUEINVESTOR_ML_6M_RECENT_SEGMENT_ROUTE_WEIGHTS:-1,0.75,0.5}"
-export VALUEINVESTOR_ML_6M_RECENT_SEGMENT_ROUTE_MAX_STARTS="${VALUEINVESTOR_ML_6M_RECENT_SEGMENT_ROUTE_MAX_STARTS:-4}"
-export VALUEINVESTOR_ML_6M_RECENT_SEGMENT_ROUTE_MAX_SEGMENTS="${VALUEINVESTOR_ML_6M_RECENT_SEGMENT_ROUTE_MAX_SEGMENTS:-8}"
-export VALUEINVESTOR_ML_6M_RECENT_SEGMENT_ROUTE_MAX_CANDIDATES="${VALUEINVESTOR_ML_6M_RECENT_SEGMENT_ROUTE_MAX_CANDIDATES:-8}"
-export VALUEINVESTOR_ML_6M_SAMPLE_SEEDS="${VALUEINVESTOR_ML_6M_SAMPLE_SEEDS:-0}"
+export VALUEINVESTOR_ML_6M_RECENT_SEGMENT_ROUTE_WEIGHTS="${VALUEINVESTOR_ML_6M_RECENT_SEGMENT_ROUTE_WEIGHTS:-1,0.5}"
+export VALUEINVESTOR_ML_6M_RECENT_SEGMENT_ROUTE_MAX_STARTS="${VALUEINVESTOR_ML_6M_RECENT_SEGMENT_ROUTE_MAX_STARTS:-1}"
+export VALUEINVESTOR_ML_6M_RECENT_SEGMENT_ROUTE_MAX_SEGMENTS="${VALUEINVESTOR_ML_6M_RECENT_SEGMENT_ROUTE_MAX_SEGMENTS:-2}"
+export VALUEINVESTOR_ML_6M_RECENT_SEGMENT_ROUTE_MAX_CANDIDATES="${VALUEINVESTOR_ML_6M_RECENT_SEGMENT_ROUTE_MAX_CANDIDATES:-2}"
+requested_sample_seeds="${VALUEINVESTOR_ML_6M_SAMPLE_SEEDS:-}"
 export VALUEINVESTOR_ML_6M_SAMPLE_TRAIN_FLOOR_TOLERANCE="${VALUEINVESTOR_ML_6M_SAMPLE_TRAIN_FLOOR_TOLERANCE:-0.002}"
 requested_refit_cap="${VALUEINVESTOR_ML_6M_FULL_EVAL_REFIT_MAX_ROWS:-}"
 walk_forward_min_delta="${WALK_FORWARD_MIN_DELTA:-0.0}"
-walk_forward_max_rows="${WALK_FORWARD_MAX_ROWS:-300000}"
+walk_forward_max_rows="${WALK_FORWARD_MAX_ROWS:-0}"
 walk_forward_validation_months="${WALK_FORWARD_VALIDATION_MONTHS:-6}"
 require_top20_excess="${REQUIRE_TOP20_EXCESS_NON_DEGRADATION:-1}"
-anchor_model_paths="${ANCHOR_MODEL_PATHS:-auto}"
+anchor_model_paths="${ANCHOR_MODEL_PATHS:-none}"
 goal_train_rho="${GOAL_TRAIN_RHO:-}"
 goal_gate_rho="${GOAL_GATE_RHO:-}"
-if [ -z "$promotion_min_gate_rho" ] && [ -n "$goal_gate_rho" ]; then
-  promotion_min_gate_rho="$goal_gate_rho"
-fi
+early_stop_on_goal="${EARLY_STOP_ON_GOAL:-1}"
 output_model_path="${OUTPUT_MODEL_PATH:-data/trainer/ml_ranker_model.json}"
 export OUTPUT_MODEL_PATH="$output_model_path"
 
@@ -188,6 +203,12 @@ while [ "$run" -lt "$rounds" ]; do
   limit=${limits[$(( (schedule_index / (${#presets[@]} * ${#rows[@]})) % ${#limits[@]} ))]}
   model=${models[$(( schedule_index % ${#models[@]} ))]}
   fold=${folds[$(( schedule_index % ${#folds[@]} ))]}
+  if [ -n "$requested_sample_seeds" ]; then
+    sample_seeds="$requested_sample_seeds"
+  else
+    sample_seeds="$schedule_index"
+  fi
+  export VALUEINVESTOR_ML_6M_SAMPLE_SEEDS="$sample_seeds"
   remaining="$preset"
   feature_set="${remaining%%:*}"
   remaining="${remaining#*:}"
@@ -201,9 +222,10 @@ while [ "$run" -lt "$rounds" ]; do
   fi
   run=$((run + 1))
 
-  printf "\n[%s] run=%d rows=%s refit_cap=%s limit=%s model=%s features=%s priors=%s targets=%s lambdas=%s folds=%s backend=%s gate_min_delta=%s gate_max_degradation=%s gate_min_utility=%s promotion_min_train_rho=%s promotion_min_gate_rho=%s top20_excess_guard=%s anchors=%s force_snapshots=%s\n" \
+  printf "\n[%s] run=%d rows=%s refit_cap=%s limit=%s model=%s features=%s priors=%s targets=%s lambdas=%s folds=%s seeds=%s backend=%s holdout_months=%s embargo_days=%s gate_min_delta=%s gate_max_degradation=%s gate_min_utility=%s promotion_min_train_rho=%s promotion_min_gate_rho=%s top20_excess_guard=%s anchors=%s force_snapshots=%s\n" \
     "$(stamp)" "$run" "$row" "$refit_cap" "$limit" "$model" "$feature_set" "$prior_set" "$target_set" \
-    "$lambda_set" "$fold" "$backend" "$gate_min_delta" "$gate_max_degradation" "$gate_min_weighted_utility" \
+    "$lambda_set" "$fold" "$sample_seeds" "$backend" "$gate_holdout_months" "$gate_embargo_days" \
+    "$gate_min_delta" "$gate_max_degradation" "$gate_min_weighted_utility" \
     "${promotion_min_train_rho:-none}" "${promotion_min_gate_rho:-none}" "$require_top20_excess" "$anchor_model_paths" "$force_snapshots"
 
   set -- --target-horizon 6m --end-date "$end_date" --output-model-path "$output_model_path"
@@ -218,6 +240,8 @@ while [ "$run" -lt "$rounds" ]; do
     --candidate-targets "$target_set" \
     --candidate-ridge-lambdas "$lambda_set" \
     --max-training-rows "$row" \
+    --gate-holdout-months "$gate_holdout_months" \
+    --gate-embargo-days "$gate_embargo_days" \
     --gate-min-6m-delta "$gate_min_delta" \
     --gate-max-degradation "$gate_max_degradation" \
     --gate-min-weighted-utility "$gate_min_weighted_utility" \
@@ -226,7 +250,8 @@ while [ "$run" -lt "$rounds" ]; do
     --walk-forward-max-rows "$walk_forward_max_rows" \
     --walk-forward-validation-months "$walk_forward_validation_months" \
     --full-eval-candidate-limit "$limit" \
-    --anchor-model-paths "$anchor_model_paths"
+    --anchor-model-paths "$anchor_model_paths" \
+    --strict-outer-gate
 
   if [ -n "$promotion_min_train_rho" ]; then
     set -- "$@" --promotion-min-train-rho "$promotion_min_train_rho"
@@ -258,7 +283,7 @@ while [ "$run" -lt "$rounds" ]; do
       printf "[%s] raised promotion_min_train_rho=%s\n" "$(stamp)" "$promotion_min_train_rho"
     fi
   fi
-  if [ -n "$goal_train_rho" ] || [ -n "$goal_gate_rho" ]; then
+  if [ "$early_stop_on_goal" != "0" ] && { [ -n "$goal_train_rho" ] || [ -n "$goal_gate_rho" ]; }; then
     if goal_met; then
       printf "[%s] goal thresholds met after run=%d\n" "$(stamp)" "$run"
       break
