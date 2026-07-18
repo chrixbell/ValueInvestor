@@ -695,6 +695,7 @@ def test_strict_outer_gate_records_exactly_one_candidate_attempt(
 ) -> None:
     from valueinvestor.scorer_improver import ml_trainer
     from valueinvestor.scorer_improver.promotion_gate import HoldoutGateConfig
+    from valueinvestor.screener.ml_ranker import MODEL_SCHEMA_VERSION, expected_feature_names
 
     rows = []
     for date_index, snapshot_date in enumerate(pd.date_range("2015-01-31", periods=120, freq="ME").date):
@@ -717,7 +718,36 @@ def test_strict_outer_gate_records_exactly_one_candidate_attempt(
                 }
             )
     snapshots = pd.DataFrame(rows)
+    output_model_path = tmp_path / "model.json"
+    feature_names = expected_feature_names()
+    output_model_path.write_text(
+        json.dumps({
+            "schema_version": MODEL_SCHEMA_VERSION,
+            "feature_names": feature_names,
+            "clip_low": [-100.0] * len(feature_names),
+            "clip_high": [100.0] * len(feature_names),
+            "mean": [0.0] * len(feature_names),
+            "scale": [1.0] * len(feature_names),
+            "coef": [0.0] * len(feature_names),
+            "intercept": 0.0,
+            "ticker_priors": {},
+            "metadata": {"target_horizon": "6m"},
+        }),
+        encoding="utf-8",
+    )
     ledger_records = []
+    walk_forward_references = []
+    original_walk_forward = ml_trainer._walk_forward_validate_candidate
+
+    def capture_walk_forward(*args, **kwargs):
+        walk_forward_references.append(kwargs.get("incumbent_payload"))
+        return original_walk_forward(*args, **kwargs)
+
+    monkeypatch.setattr(
+        ml_trainer,
+        "_walk_forward_validate_candidate",
+        capture_walk_forward,
+    )
     monkeypatch.setattr(
         ml_trainer,
         "prepare_ml_training_snapshots",
@@ -730,7 +760,7 @@ def test_strict_outer_gate_records_exactly_one_candidate_attempt(
     )
 
     metadata = ml_trainer.train_ml_ranker(
-        output_model_path=tmp_path / "model.json",
+        output_model_path=output_model_path,
         backend="numpy",
         model_kind="ridge-only",
         snapshot_frequency="quarterly",
@@ -758,6 +788,8 @@ def test_strict_outer_gate_records_exactly_one_candidate_attempt(
     )
 
     assert metadata["strict_outer_gate"] is True
+    assert walk_forward_references == [None]
+    assert metadata["walk_forward"]["reference"] == "hand_scorer"
     assert len(metadata["promotion_gate_attempts"]) == 1
     assert len(ledger_records) == 1
 
@@ -982,9 +1014,11 @@ class TestAgentHelpers:
             clear_model_cache,
             expected_feature_names,
             load_model,
+            stable_factor_feature_names,
         )
 
         schemas = (
+            stable_factor_feature_names(),
             expected_feature_names(
                 include_short_horizon=True,
                 include_interactions=True,
@@ -5419,6 +5453,60 @@ class TestAgentHelpers:
         numpy_coef, _ = _fit_ridge_numpy(X, y, 10.0)
 
         assert backend == "mlx"
+        assert np.max(np.abs(mlx_coef - numpy_coef)) < 1e-4
+
+    def test_constrained_factor_ridge_enforces_expected_directions(self) -> None:
+        from scipy import stats
+
+        from valueinvestor.scorer_improver.ml_trainer import (
+            _fit_constrained_factor_ridge_numpy,
+        )
+
+        rng = np.random.default_rng(41)
+        X = rng.normal(size=(512, 3))
+        directions = np.asarray([1.0, -1.0, -1.0])
+        target = X @ np.asarray([0.7, -1.2, 0.0])
+
+        coef, backend = _fit_constrained_factor_ridge_numpy(
+            X,
+            target,
+            1.0,
+            directions=directions,
+        )
+
+        assert backend == "constrained_numpy"
+        assert coef[0] > 0.0
+        assert coef[1] < 0.0
+        assert coef[2] <= 0.0
+        assert coef[-1] == 0.0
+        assert stats.spearmanr(X @ coef[:-1], target).statistic > 0.99
+
+    def test_mlx_constrained_factor_ridge_matches_numpy_when_available(self) -> None:
+        pytest.importorskip("mlx.core")
+        from valueinvestor.scorer_improver.ml_trainer import (
+            _fit_constrained_factor_ridge_mlx,
+            _fit_constrained_factor_ridge_numpy,
+        )
+
+        rng = np.random.default_rng(42)
+        X = rng.normal(size=(512, 5))
+        directions = np.asarray([1.0, -1.0, -1.0, -1.0, -1.0])
+        target = X @ np.asarray([0.5, -0.8, 0.0, -0.3, 0.0])
+
+        mlx_coef, backend = _fit_constrained_factor_ridge_mlx(
+            X,
+            target,
+            10.0,
+            directions=directions,
+        )
+        numpy_coef, _ = _fit_constrained_factor_ridge_numpy(
+            X,
+            target,
+            10.0,
+            directions=directions,
+        )
+
+        assert backend == "mlx-constrained"
         assert np.max(np.abs(mlx_coef - numpy_coef)) < 1e-4
 
     def test_mlx_adam_ridge_backend_when_available(self) -> None:

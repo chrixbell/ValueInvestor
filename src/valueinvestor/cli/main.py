@@ -1555,7 +1555,8 @@ def train_ml_scorer(
         "--model-kind",
         help=(
             "Model kind: ridge, ridge-only, market-ridge, market-ridge-only, "
-            "market-ridge-recent, market-ridge-recent-<days>, pairwise, or auto."
+            "market-ridge-recent, market-ridge-recent-<days>, "
+            "constrained-factor-ridge, pairwise, or auto."
         ),
     ),
     force_snapshots: bool = typer.Option(

@@ -224,6 +224,17 @@ def cross_sectional_interaction_feature_names() -> List[str]:
     return [name for name, _left, _right in CROSS_SECTIONAL_INTERACTION_FEATURES]
 
 
+def stable_factor_feature_names() -> List[str]:
+    """Return the compact live factor set used by the constrained 6m ranker."""
+    return [
+        "cs_rank_value_score",
+        "cs_rank_quality_score",
+        "cs_rank_roe",
+        "cs_rank_roa",
+        "cs_rank_pb_ratio",
+    ]
+
+
 def expected_feature_names(
     *,
     include_short_horizon: bool = False,
@@ -566,6 +577,7 @@ def _parse_temporal_date(value: object) -> Optional[date]:
 
 def _valid_feature_schemas() -> tuple[List[str], ...]:
     return (
+        stable_factor_feature_names(),
         expected_feature_names(),
         expected_feature_names(include_short_horizon=True),
         expected_feature_names(

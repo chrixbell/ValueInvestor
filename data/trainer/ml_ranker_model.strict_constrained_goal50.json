@@ -1,0 +1,229 @@
+{
+  "clip_high": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+  ],
+  "clip_low": [
+    -1.0,
+    -1.0,
+    -1.0,
+    -1.0,
+    -1.0
+  ],
+  "coef": [
+    0.10096387565135956,
+    -0.011286544613540173,
+    -0.10403923690319061,
+    -0.01670699194073677,
+    -0.026659514755010605
+  ],
+  "feature_names": [
+    "cs_rank_value_score",
+    "cs_rank_quality_score",
+    "cs_rank_roe",
+    "cs_rank_roa",
+    "cs_rank_pb_ratio"
+  ],
+  "intercept": 0.0,
+  "mean": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "metadata": {
+    "backend": "mlx-constrained",
+    "blend_candidate_weight": 1.0,
+    "candidate_anchor_model_paths": [],
+    "candidate_feature_sets": [
+      "stable_factor"
+    ],
+    "candidate_prior_strategies": [
+      "no_ticker_priors"
+    ],
+    "candidate_ridge_lambdas": [
+      3000.0
+    ],
+    "candidate_targets": [
+      "target_rank_6m"
+    ],
+    "feature_set": "stable_factor",
+    "final_rho_improvement": 0.5097367055998568,
+    "fit_frequency": "monthly",
+    "full_eval_candidate_limit": 1,
+    "full_fit_refit": true,
+    "full_fit_rows": 45029,
+    "metrics": {
+      "1m": {
+        "hit_rate_top20": 0.5619999999999999,
+        "mean_excess_return": 0.025206675138692042,
+        "n_snapshots": 25,
+        "n_stocks_per_snapshot": 744.44,
+        "spearman_rho": 0.03802667340459345
+      },
+      "1w": {
+        "hit_rate_top20": 0.528,
+        "mean_excess_return": 0.005143937468007557,
+        "n_snapshots": 25,
+        "n_stocks_per_snapshot": 744.44,
+        "spearman_rho": 0.029209826258351272
+      },
+      "3m": {
+        "hit_rate_top20": 0.5660000000000001,
+        "mean_excess_return": 0.06336104644194954,
+        "n_snapshots": 25,
+        "n_stocks_per_snapshot": 744.44,
+        "spearman_rho": 0.08373626968918568
+      },
+      "6m": {
+        "hit_rate_top20": 0.582,
+        "mean_excess_return": 0.11988880540447136,
+        "n_snapshots": 25,
+        "n_stocks_per_snapshot": 744.44,
+        "spearman_rho": 0.11408024892238451
+      }
+    },
+    "model_kind": "constrained_factor_ridge",
+    "model_path": "data/trainer/ml_ranker_model.strict_constrained_goal50.json",
+    "n_features": 5,
+    "n_rows": 1294372,
+    "n_snapshots": 1463,
+    "n_training_rows": 45029,
+    "prior_strategy": "no_ticker_priors",
+    "promotion_gate_manifest": {
+      "embargo_days": 197,
+      "embargo_rows": 99350,
+      "embargo_snapshots": 139,
+      "evaluation_frequency": "monthly",
+      "gate_end": "2026-01-09",
+      "gate_rows": 18611,
+      "gate_snapshots": 25,
+      "gate_start": "2024-01-09",
+      "holdout_months": 24,
+      "raw_gate_rows": 356043,
+      "raw_gate_snapshots": 507,
+      "schema_version": "promotion-gate-v1",
+      "snapshot_max": "2026-01-09",
+      "snapshot_min": "2016-09-30",
+      "source_fingerprint": "ml_training_daily_snapshots.parquet:213735109:1784048143745778013",
+      "source_path": "data/trainer/ml_training_daily_snapshots.parquet",
+      "train_end_exclusive": "2023-06-26",
+      "train_rows": 838979,
+      "train_snapshots": 1463,
+      "train_start": "2016-09-30"
+    },
+    "promotion_incumbent_type": "ml_ranker",
+    "ridge_lambda": 3000.0,
+    "runtime_feature_parity": {
+      "features": 5,
+      "matched": true,
+      "max_abs_error": 0.0,
+      "prediction_max_abs_error": 0.0,
+      "reason": "matched",
+      "rows": 633,
+      "snapshot_date": "2026-01-08"
+    },
+    "strict_outer_gate": true,
+    "target": "target_rank_6m",
+    "target_horizon": "6m",
+    "train_metrics": {
+      "1m": {
+        "hit_rate_top20": 0.5384825700615175,
+        "mean_excess_return": 0.01788848056901023,
+        "n_snapshots": 1463,
+        "n_stocks_per_snapshot": 573.4647983595352,
+        "spearman_rho": 0.03716288327638981
+      },
+      "1w": {
+        "hit_rate_top20": 0.5133378932968538,
+        "mean_excess_return": 0.004344158982096791,
+        "n_snapshots": 1462,
+        "n_stocks_per_snapshot": 573.4647983595352,
+        "spearman_rho": 0.013179471433602465
+      },
+      "3m": {
+        "hit_rate_top20": 0.5704716336295284,
+        "mean_excess_return": 0.05135352183649368,
+        "n_snapshots": 1463,
+        "n_stocks_per_snapshot": 573.4647983595352,
+        "spearman_rho": 0.08158190277151375
+      },
+      "6m": {
+        "hit_rate_top20": 0.5852016404647984,
+        "mean_excess_return": 0.08512066917963446,
+        "n_snapshots": 1463,
+        "n_stocks_per_snapshot": 573.4647983595352,
+        "spearman_rho": 0.12015674908558445
+      }
+    },
+    "train_rho_improvement": 0.9987963262508174,
+    "trained_at": "2026-07-18T12:50:34.754354",
+    "uses_rolling_row_priors": false,
+    "walk_forward": {
+      "accepted": true,
+      "blend_candidates_evaluated": 1,
+      "blend_scale": "snapshot_rank",
+      "blend_weight": 1.0,
+      "fold_deltas": [
+        {
+          "1m": 0.019614,
+          "1w": -0.050053,
+          "3m": 0.029226,
+          "6m": 0.038913
+        },
+        {
+          "1m": 0.119164,
+          "1w": -0.012057,
+          "3m": 0.118321,
+          "6m": 0.165068
+        },
+        {
+          "1m": 0.043866,
+          "1w": 0.013957,
+          "3m": 0.01829,
+          "6m": 0.083145
+        },
+        {
+          "1m": 0.087953,
+          "1w": 0.036087,
+          "3m": 0.121315,
+          "6m": 0.149641
+        }
+      ],
+      "mean_deltas": {
+        "1m": 0.067649,
+        "1w": -0.003017,
+        "3m": 0.071788,
+        "6m": 0.109192
+      },
+      "median_deltas": {
+        "1m": 0.065909,
+        "1w": 0.00095,
+        "3m": 0.073773,
+        "6m": 0.116393
+      },
+      "min_deltas": {
+        "1m": 0.019614,
+        "1w": -0.050053,
+        "3m": 0.01829,
+        "6m": 0.038913
+      },
+      "primary_horizon": "6m",
+      "reason": "accepted",
+      "reference": "hand_scorer"
+    }
+  },
+  "scale": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+  ],
+  "schema_version": "ml-ranker-v1",
+  "ticker_priors": {}
+}

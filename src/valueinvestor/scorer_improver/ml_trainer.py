@@ -58,11 +58,13 @@ from valueinvestor.screener.ml_ranker import (
     expected_feature_names,
     feature_matrix_from_values,
     predict_lightgbm_model,
+    stable_factor_feature_names,
 )
 
 logger = logging.getLogger(__name__)
 _MLX_RIDGE_DIAGNOSTIC_LOGGED = False
 _MLX_ADAM_RIDGE_DIAGNOSTIC_LOGGED = False
+_MLX_CONSTRAINED_RIDGE_DIAGNOSTIC_LOGGED = False
 _TICKER_BUCKET_CACHE: dict[str, tuple[str, str, str]] = {}
 
 DAILY_START_DATE = date(2016, 5, 25)
@@ -303,6 +305,8 @@ SIX_MONTH_ANCHOR_BLEND_WEIGHTS = (
 SIX_MONTH_GATE_ANCHOR_BLEND_LIMIT = 3
 SIX_MONTH_GATE_ANCHOR_MODEL_LIMIT = 3
 FEATURE_SET_ALIASES = {
+    "stable_factor": "stable_factor",
+    "stable_factors": "stable_factor",
     "core": "core",
     "short_horizon": "short_horizon",
     "expanded": "expanded",
@@ -311,6 +315,13 @@ FEATURE_SET_ALIASES = {
     "cross_sectional_interactions": "cross_sectional_interactions",
     "cs_interactions": "cross_sectional_interactions",
     "cs": "cross_sectional",
+}
+SIX_MONTH_STABLE_FACTOR_DIRECTIONS = {
+    "cs_rank_value_score": 1.0,
+    "cs_rank_quality_score": -1.0,
+    "cs_rank_roe": -1.0,
+    "cs_rank_roa": -1.0,
+    "cs_rank_pb_ratio": -1.0,
 }
 PRIOR_STRATEGY_ALIASES = {
     "no_ticker_priors": "no_ticker_priors",
@@ -2556,6 +2567,139 @@ def _fit_ridge(
     return _fit_ridge_numpy(X, y, ridge_lambda, sample_weight=sample_weight)
 
 
+def _stable_factor_directions(feature_names: Sequence[str]) -> np.ndarray:
+    expected = stable_factor_feature_names()
+    if list(feature_names) != expected:
+        raise ValueError(
+            "constrained factor ridge requires the stable_factor feature set"
+        )
+    return np.asarray(
+        [SIX_MONTH_STABLE_FACTOR_DIRECTIONS[name] for name in expected],
+        dtype="float64",
+    )
+
+
+def _fit_constrained_factor_ridge_numpy(
+    X: np.ndarray,
+    y: np.ndarray,
+    ridge_lambda: float,
+    *,
+    directions: np.ndarray,
+    sample_weight: Optional[np.ndarray] = None,
+    steps: int = 512,
+) -> tuple[np.ndarray, str]:
+    directed = np.asarray(X, dtype="float64") * directions
+    directed, weighted_target = _apply_sample_weight(directed, y, sample_weight)
+    gram = directed.T @ directed + ridge_lambda * np.eye(
+        directed.shape[1],
+        dtype="float64",
+    )
+    rhs = directed.T @ weighted_target
+    step_size = 1.0 / max(float(np.trace(gram)), 1e-12)
+    coef = np.zeros(directed.shape[1], dtype="float64")
+    for _ in range(steps):
+        coef = np.maximum(coef - step_size * (gram @ coef - rhs), 0.0)
+    directed_coef = coef * directions
+    return np.concatenate([directed_coef, np.asarray([0.0])]), "constrained_numpy"
+
+
+def _fit_constrained_factor_ridge_mlx(
+    X: np.ndarray,
+    y: np.ndarray,
+    ridge_lambda: float,
+    *,
+    directions: np.ndarray,
+    sample_weight: Optional[np.ndarray] = None,
+    steps: int = 512,
+) -> tuple[np.ndarray, str]:
+    import mlx.core as mx  # type: ignore[import-not-found]
+
+    global _MLX_CONSTRAINED_RIDGE_DIAGNOSTIC_LOGGED
+
+    if hasattr(mx, "gpu"):
+        try:
+            mx.set_default_device(mx.gpu)
+        except Exception:
+            logger.debug("Could not set MLX default device to GPU", exc_info=True)
+
+    started = time.perf_counter()
+    directed = np.asarray(X, dtype="float32") * directions.astype("float32")
+    directed, weighted_target = _apply_sample_weight(
+        directed,
+        y,
+        sample_weight,
+    )
+    directed_mx = mx.array(directed.astype("float32", copy=False), dtype=mx.float32)
+    target_mx = mx.array(
+        weighted_target.astype("float32", copy=False),
+        dtype=mx.float32,
+    )
+    gram = directed_mx.T @ directed_mx + np.float32(ridge_lambda) * mx.eye(
+        directed.shape[1],
+        dtype=mx.float32,
+    )
+    rhs = directed_mx.T @ target_mx
+    step_size = 1.0 / (mx.sum(mx.diag(gram)) + np.float32(1e-12))
+    coef = mx.zeros((directed.shape[1],), dtype=mx.float32)
+    for step in range(steps):
+        coef = mx.maximum(coef - step_size * (gram @ coef - rhs), 0.0)
+        if (step + 1) % 64 == 0:
+            mx.eval(coef)
+    mx.eval(coef)
+
+    if not _MLX_CONSTRAINED_RIDGE_DIAGNOSTIC_LOGGED:
+        device = mx.default_device() if hasattr(mx, "default_device") else "unknown"
+        logger.info(
+            "MLX constrained factor ridge using device=%s rows=%d features=%d "
+            "steps=%d elapsed=%.2fs",
+            device,
+            X.shape[0],
+            X.shape[1],
+            steps,
+            time.perf_counter() - started,
+        )
+        _MLX_CONSTRAINED_RIDGE_DIAGNOSTIC_LOGGED = True
+
+    directed_coef = np.asarray(coef, dtype="float64") * directions
+    return np.concatenate([directed_coef, np.asarray([0.0])]), "mlx-constrained"
+
+
+def _fit_constrained_factor_ridge(
+    X: np.ndarray,
+    y: np.ndarray,
+    *,
+    ridge_lambda: float,
+    backend: str,
+    directions: np.ndarray,
+    sample_weight: Optional[np.ndarray] = None,
+) -> tuple[np.ndarray, str]:
+    if backend not in {"auto", "mlx", "mlx-cg", "mlx-adam", "numpy"}:
+        raise ValueError("backend must be one of: auto, mlx, mlx-cg, mlx-adam, numpy")
+    if backend in {"auto", "mlx", "mlx-cg", "mlx-adam"}:
+        try:
+            return _fit_constrained_factor_ridge_mlx(
+                X,
+                y,
+                ridge_lambda,
+                directions=directions,
+                sample_weight=sample_weight,
+            )
+        except Exception as exc:
+            if backend != "auto":
+                raise
+            logger.info(
+                "MLX constrained backend unavailable, falling back to NumPy: %s",
+                exc,
+            )
+    return _fit_constrained_factor_ridge_numpy(
+        X,
+        y,
+        ridge_lambda,
+        directions=directions,
+        sample_weight=sample_weight,
+    )
+
+
 def _linear_model_dict(
     *,
     clip_low: np.ndarray,
@@ -3356,12 +3500,18 @@ def _fit_candidate_model(
     feature_names: Sequence[str],
     random_seed: int = 0,
 ) -> tuple[dict[str, object], Dict[str, Dict[str, float]], str, bool]:
-    priors = _priors_for_strategy(train_snapshots, prior_strategy)
+    fit_model_kind = _fit_model_kind_for_candidate(model_kind)
+    fit_snapshots = (
+        _monthly_rebalance_snapshots(train_snapshots)
+        if fit_model_kind == "constrained_factor_ridge"
+        else train_snapshots
+    )
+    priors = _priors_for_strategy(fit_snapshots, prior_strategy)
     prefer_row_priors = prior_strategy == "rolling_ticker_priors"
     train_frame = (
-        _attach_asof_ticker_priors(train_snapshots, train_snapshots)
+        _attach_asof_ticker_priors(fit_snapshots, fit_snapshots)
         if prefer_row_priors
-        else train_snapshots
+        else fit_snapshots
     )
     sample = _sample_training_snapshots(train_frame, max_rows, random_seed=random_seed)
     X = build_feature_matrix(
@@ -3370,12 +3520,18 @@ def _fit_candidate_model(
         prefer_row_priors=prefer_row_priors,
         feature_names=feature_names,
     )
-    X_scaled, clip_low, clip_high, mean, scale = _standardize_features(X)
+    if fit_model_kind == "constrained_factor_ridge":
+        X_scaled = X
+        clip_low = np.full(X.shape[1], -1.0, dtype="float64")
+        clip_high = np.full(X.shape[1], 1.0, dtype="float64")
+        mean = np.zeros(X.shape[1], dtype="float64")
+        scale = np.ones(X.shape[1], dtype="float64")
+    else:
+        X_scaled, clip_low, clip_high, mean, scale = _standardize_features(X)
     target = _target_values(sample, target_name)
     valid = np.isfinite(target)
     if int(valid.sum()) < 10:
         raise ValueError(f"not enough valid rows for target {target_name}")
-    fit_model_kind = _fit_model_kind_for_candidate(model_kind)
     recency_half_life = _recent_half_life_for_model_kind(model_kind)
     sample_weight = (
         _recency_sample_weights(sample, half_life_days=recency_half_life)
@@ -3390,6 +3546,24 @@ def _fit_candidate_model(
             ridge_lambda=ridge_lambda,
             backend=backend,
             sample_weight=sample_weight[valid] if sample_weight is not None else None,
+        )
+        model = _linear_model_dict(
+            clip_low=clip_low,
+            clip_high=clip_high,
+            mean=mean,
+            scale=scale,
+            coef_with_intercept=coef_with_intercept,
+        )
+    elif fit_model_kind == "constrained_factor_ridge":
+        coef_with_intercept, used_backend = _fit_constrained_factor_ridge(
+            X_scaled[valid],
+            target[valid],
+            ridge_lambda=ridge_lambda,
+            backend=backend,
+            directions=_stable_factor_directions(feature_names),
+            sample_weight=(
+                sample_weight[valid] if sample_weight is not None else None
+            ),
         )
         model = _linear_model_dict(
             clip_low=clip_low,
@@ -5083,6 +5257,7 @@ RUNTIME_METADATA_KEYS = {
     "ensemble_size",
     "evaluation_protocol",
     "feature_set",
+    "fit_frequency",
     "final_rho_improvement",
     "full_eval_candidate_limit",
     "full_fit_refit",
@@ -7804,6 +7979,13 @@ def train_ml_ranker(
     else:
         candidate_lambdas = tuple(dict.fromkeys((ridge_lambda, 10.0, 30.0, 100.0, 300.0, 1_000.0)))
         candidate_feature_sets = (("core", expected_feature_names()),)
+    normalized_requested_model_kind = model_kind.replace("-", "_")
+    if normalized_requested_model_kind == "constrained_factor_ridge":
+        if primary_horizon != "6m":
+            raise ValueError("constrained-factor-ridge is only supported for 6m training")
+        candidate_feature_sets = (
+            ("stable_factor", stable_factor_feature_names()),
+        )
     if candidate_lambda_filter is not None:
         candidate_lambdas = candidate_lambda_filter
     if feature_set_filter is not None:
@@ -7858,6 +8040,8 @@ def train_ml_ranker(
         )
     elif model_kind in {"ridge-only", "ridge_only"}:
         candidate_model_kinds = ("ridge",)
+    elif model_kind in {"constrained-factor-ridge", "constrained_factor_ridge"}:
+        candidate_model_kinds = ("constrained_factor_ridge",)
     elif model_kind in {"ridge", "pairwise"}:
         if model_kind == "ridge" and primary_horizon == "6m":
             candidate_model_kinds = (
@@ -7880,7 +8064,7 @@ def train_ml_ranker(
                 "model_kind must be one of: ridge, market-ridge, market-ridge-recent, "
                 "market-ridge-recent-<days>, market-ridge-only, segment-ridge, "
                 "segment-ridge-recent, segment-ridge-recent-<days>, "
-                "segment-ridge-only, ridge-only, pairwise, auto"
+                "segment-ridge-only, ridge-only, constrained-factor-ridge, pairwise, auto"
             )
     ridge_candidate_backends = _ridge_candidate_backends(backend, primary_horizon)
     prior_options: tuple[tuple[str, Mapping[str, Mapping[str, float]]], ...] = (
@@ -7929,6 +8113,12 @@ def train_ml_ranker(
                 ),
             )
             for seed in _six_month_sample_seeds()
+        ]
+    if not strict_outer_gate and candidate_model_kinds == (
+        "constrained_factor_ridge",
+    ):
+        candidate_training_variants = [
+            (0, _monthly_rebalance_snapshots(train_snapshots)),
         ]
     sample_candidates: list[dict] = []
     best_sample: Optional[dict] = None
@@ -8023,13 +8213,26 @@ def train_ml_ranker(
             feature_names=candidate["feature_names"],
             random_seed=int(candidate.get("sample_seed", 0)),
         )
+        fit_frequency = (
+            "monthly"
+            if _fit_model_kind_for_candidate(str(candidate["model_kind"]))
+            == "constrained_factor_ridge"
+            else snapshot_frequency
+        )
+        fit_source_rows = (
+            len(_monthly_rebalance_snapshots(train_snapshots))
+            if fit_frequency == "monthly"
+            else len(train_snapshots)
+        )
+        fitted_rows = min(fit_source_rows, refit_rows)
         refit = dict(candidate)
         refit.update(
             {
                 "backend": used_backend,
                 "priors": priors,
                 "prefer_row_priors": prefer_row_priors,
-                "full_fit_rows": int(refit_rows),
+                "full_fit_rows": int(fitted_rows),
+                "fit_frequency": fit_frequency,
                 "full_fit_refit": True,
             }
         )
@@ -8055,7 +8258,7 @@ def train_ml_ranker(
             candidate["model_kind"],
             candidate["feature_set"],
             candidate["prior_strategy"],
-            refit_rows,
+            fitted_rows,
         )
         return refit
 
@@ -8448,7 +8651,14 @@ def train_ml_ranker(
                     prefer_row_priors=prefer_row_priors,
                     feature_names=feature_names,
                 )
-                X_scaled, clip_low, clip_high, mean, scale = _standardize_features(X)
+                if candidate_model_kinds == ("constrained_factor_ridge",):
+                    X_scaled = X
+                    clip_low = np.full(X.shape[1], -1.0, dtype="float64")
+                    clip_high = np.full(X.shape[1], 1.0, dtype="float64")
+                    mean = np.zeros(X.shape[1], dtype="float64")
+                    scale = np.ones(X.shape[1], dtype="float64")
+                else:
+                    X_scaled, clip_low, clip_high, mean, scale = _standardize_features(X)
                 for target_name in candidate_targets:
                     target = _target_values(candidate_training_snapshots, target_name)
                     valid = np.isfinite(target)
@@ -8489,6 +8699,24 @@ def train_ml_ranker(
                                             )
                                             continue
                                         raise
+                                    candidate_models = None
+                                elif fit_candidate_model_kind == "constrained_factor_ridge":
+                                    coef_with_intercept, used_backend = (
+                                        _fit_constrained_factor_ridge(
+                                            X_scaled[valid],
+                                            target[valid],
+                                            ridge_lambda=candidate_lambda,
+                                            backend=candidate_backend,
+                                            directions=_stable_factor_directions(
+                                                feature_names
+                                            ),
+                                            sample_weight=(
+                                                sample_weight[valid]
+                                                if sample_weight is not None
+                                                else None
+                                            ),
+                                        )
+                                    )
                                     candidate_models = None
                                 elif fit_candidate_model_kind == "market_ridge":
                                     try:
@@ -8750,7 +8978,9 @@ def train_ml_ranker(
                 prior_strategy=candidate["prior_strategy"],
                 model_kind=candidate["model_kind"],
                 feature_names=candidate["feature_names"],
-                incumbent_payload=incumbent_eval_payload,
+                incumbent_payload=(
+                    None if strict_outer_gate else incumbent_eval_payload
+                ),
                 min_6m_delta=walk_forward_min_6m_delta,
                 max_horizon_degradation=walk_forward_max_horizon_degradation,
                 primary_horizon=primary_horizon,
@@ -8763,6 +8993,9 @@ def train_ml_ranker(
                 require_primary_top20_excess_non_degradation=(gate_config.require_6m_top20_excess_non_degradation),
                 sample_seed=int(candidate.get("sample_seed", 0)),
             )
+        walk_forward["reference"] = (
+            "hand_scorer" if strict_outer_gate else incumbent_type
+        )
         candidate["walk_forward"] = walk_forward
         if not walk_forward.get("accepted"):
             logger.info(
@@ -9109,7 +9342,13 @@ def train_ml_ranker(
                     "start_date": start_date.isoformat(),
                     "end_date": resolved_end_date.isoformat(),
                     "n_rows": int(len(snapshots)),
-                    "n_training_rows": int(len(training_snapshots)),
+                    "n_training_rows": int(
+                        full_candidate.get("full_fit_rows")
+                        or len(training_snapshots)
+                    ),
+                    "fit_frequency": str(
+                        full_candidate.get("fit_frequency", snapshot_frequency)
+                    ),
                     "max_training_rows": int(max_training_rows or 0),
                     "n_snapshots": int(train_snapshots["snapshot_date"].nunique()),
                     "n_features": 0,
@@ -9192,7 +9431,13 @@ def train_ml_ranker(
                     "start_date": start_date.isoformat(),
                     "end_date": resolved_end_date.isoformat(),
                     "n_rows": int(len(snapshots)),
-                    "n_training_rows": int(len(training_snapshots)),
+                    "n_training_rows": int(
+                        full_candidate.get("full_fit_rows")
+                        or len(training_snapshots)
+                    ),
+                    "fit_frequency": str(
+                        full_candidate.get("fit_frequency", snapshot_frequency)
+                    ),
                     "max_training_rows": int(max_training_rows or 0),
                     "n_snapshots": int(train_snapshots["snapshot_date"].nunique()),
                     "n_features": 0,
@@ -9253,7 +9498,13 @@ def train_ml_ranker(
                 "start_date": start_date.isoformat(),
                 "end_date": resolved_end_date.isoformat(),
                 "n_rows": int(len(snapshots)),
-                "n_training_rows": int(len(training_snapshots)),
+                "n_training_rows": int(
+                    full_candidate.get("full_fit_rows")
+                    or len(training_snapshots)
+                ),
+                "fit_frequency": str(
+                    full_candidate.get("fit_frequency", snapshot_frequency)
+                ),
                 "max_training_rows": int(max_training_rows or 0),
                 "n_snapshots": int(train_snapshots["snapshot_date"].nunique()),
                 "n_features": len(full_candidate["feature_names"]),
