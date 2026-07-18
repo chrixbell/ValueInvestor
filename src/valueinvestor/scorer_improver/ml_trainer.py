@@ -210,6 +210,9 @@ SIX_MONTH_APPLICATION_RESIDUAL_SIGNALS = (
 SIX_MONTH_APPLICATION_FACTOR_SIGNALS = (
     "model",
     "quality_de_crowding",
+    "gross_profitability_de_crowding",
+    "roe_de_crowding",
+    "roa_de_crowding",
     "book_yield",
     "sales_yield",
     "liability_yield",
@@ -217,11 +220,32 @@ SIX_MONTH_APPLICATION_FACTOR_SIGNALS = (
     "low_current_ratio",
 )
 SIX_MONTH_APPLICATION_FACTOR_TEMPLATES = (
-    ("equal", (0.10, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15)),
-    ("balanced", (0.10, 0.18, 0.135, 0.09, 0.135, 0.225, 0.135)),
-    ("value_momentum", (0.10, 0.135, 0.18, 0.045, 0.135, 0.27, 0.135)),
+    ("equal", (0.10, 0.15, 0.0, 0.0, 0.0, 0.15, 0.15, 0.15, 0.15, 0.15)),
+    ("balanced", (0.10, 0.18, 0.0, 0.0, 0.0, 0.135, 0.09, 0.135, 0.225, 0.135)),
+    ("value_momentum", (0.10, 0.135, 0.0, 0.0, 0.0, 0.18, 0.045, 0.135, 0.27, 0.135)),
+    ("quality_de_crowding", (0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
+    (
+        "gross_profitability_de_crowding",
+        (0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+    ),
+    ("roe_de_crowding", (0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
+    ("roa_de_crowding", (0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
+    ("roe_roa_de_crowding", (0.0, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0)),
+    (
+        "profitability_de_crowding",
+        (0.0, 1 / 3, 1 / 3, 1 / 3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+    ),
+    (
+        "profitability_de_crowding_roa",
+        (0.0, 0.25, 0.25, 0.25, 0.25, 0.0, 0.0, 0.0, 0.0, 0.0),
+    ),
+    (
+        "model_profitability_de_crowding",
+        (0.25, 0.25, 0.25, 0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+    ),
 )
 SIX_MONTH_APPLICATION_FACTOR_MIN_RHO_TOLERANCE = 0.01
+SIX_MONTH_APPLICATION_FACTOR_MIN_MEAN_RHO_IMPROVEMENT = 0.005
 SIX_MONTH_GATE_BLEND_LIMIT = 4
 SIX_MONTH_GATE_MARKET_BLEND_LIMIT = 6
 SIX_MONTH_GATE_MARKET_PROBE_TOTALS = (
@@ -1086,6 +1110,13 @@ def _prediction_rank_by_snapshot(df: pd.DataFrame, predictions: np.ndarray) -> n
 def _application_factor_signal_values(df: pd.DataFrame, signal: str) -> np.ndarray:
     if signal == "quality_de_crowding":
         return -_numeric_column(df, "quality_score")
+    if signal == "gross_profitability_de_crowding":
+        gross_profit = _numeric_column(df, "revenue") * _numeric_column(df, "gross_margin")
+        return -_safe_divide(gross_profit, _numeric_column(df, "total_assets"))
+    if signal == "roe_de_crowding":
+        return -_numeric_column(df, "roe")
+    if signal == "roa_de_crowding":
+        return -_numeric_column(df, "roa")
     if signal == "book_yield":
         return -_numeric_column(df, "pb_ratio")
     if signal == "sales_yield":
@@ -3601,6 +3632,75 @@ def _walk_forward_validate_candidate(
 
     best_result = max(selection_pool, key=selection_key)
     best_result["blend_candidates_evaluated"] = len(blend_results)
+    base_blend_weight = float(best_result["blend_weight"])
+    application_results: list[tuple[dict[str, object], float, float]] = []
+
+    if best_result.get("accepted"):
+        base_primary_rhos = []
+        for validation, candidate_predictions, incumbent_predictions in fold_predictions:
+            base_predictions = (
+                base_blend_weight * candidate_predictions
+                + (1.0 - base_blend_weight) * incumbent_predictions
+            )
+            base_metrics = _evaluate_predictions(validation, base_predictions)
+            base_primary_rhos.append(float(base_metrics[primary_horizon]["spearman_rho"]))
+        application_results.append(
+            (
+                best_result,
+                float(np.min(base_primary_rhos)),
+                float(np.mean(base_primary_rhos)),
+            )
+        )
+
+    def add_application_result(
+        result: Optional[dict[str, object]],
+        *,
+        min_rhos_key: str,
+        mean_rhos_key: str,
+    ) -> None:
+        if not result or not result.get("accepted"):
+            return
+        min_rhos = result.get(min_rhos_key)
+        mean_rhos = result.get(mean_rhos_key)
+        if isinstance(min_rhos, Mapping) and isinstance(mean_rhos, Mapping):
+            min_rho = float(min_rhos.get(primary_horizon, float("-inf")))
+            mean_rho = float(mean_rhos.get(primary_horizon, float("-inf")))
+        else:
+            mean_deltas = result.get("mean_deltas")
+            mean_rho = (
+                float(mean_deltas.get(primary_horizon, float("-inf")))
+                if isinstance(mean_deltas, Mapping)
+                else float("-inf")
+            )
+            min_rho = mean_rho
+        application_results.append((result, min_rho, mean_rho))
+
+    if primary_horizon == "6m":
+        factor_result = _select_practical_factor_blend(
+            fold_predictions,
+            base_blend_weight=base_blend_weight,
+            factor_templates=SIX_MONTH_APPLICATION_FACTOR_TEMPLATES,
+            min_6m_delta=min_6m_delta,
+            max_horizon_degradation=max_horizon_degradation,
+            primary_horizon=primary_horizon,
+            blend_candidates_evaluated=len(blend_results),
+            require_primary_top20_excess_non_degradation=(
+                require_primary_top20_excess_non_degradation
+            ),
+        )
+        add_application_result(
+            factor_result,
+            min_rhos_key="application_factor_min_rhos",
+            mean_rhos_key="application_factor_mean_rhos",
+        )
+        if factor_result:
+            logger.info(
+                "ML walk-forward practical factor candidate template=%s min_rhos=%s mean_rhos=%s accepted=%s",
+                factor_result.get("application_factor_template"),
+                factor_result.get("application_factor_min_rhos"),
+                factor_result.get("application_factor_mean_rhos"),
+                factor_result.get("accepted"),
+            )
     if (
         primary_horizon == "6m"
         and any(column in snapshots.columns for _name, column, _direction in SIX_MONTH_APPLICATION_RESIDUAL_SIGNALS)
@@ -3608,7 +3708,7 @@ def _walk_forward_validate_candidate(
     ):
         residual_result = _select_application_residual_blend(
             fold_predictions,
-            base_blend_weight=float(best_result["blend_weight"]),
+            base_blend_weight=base_blend_weight,
             residual_weights=quality_residual_weights,
             residual_signals=SIX_MONTH_APPLICATION_RESIDUAL_SIGNALS,
             min_6m_delta=min_6m_delta,
@@ -3617,8 +3717,57 @@ def _walk_forward_validate_candidate(
             blend_candidates_evaluated=len(blend_results),
             require_primary_top20_excess_non_degradation=(require_primary_top20_excess_non_degradation),
         )
-        if residual_result.get("accepted"):
-            best_result = residual_result
+        add_application_result(
+            residual_result,
+            min_rhos_key="application_residual_min_rhos",
+            mean_rhos_key="application_residual_mean_rhos",
+        )
+    if application_results:
+        non_factor_results = [
+            item
+            for item in application_results
+            if not item[0].get("application_factor_components")
+        ]
+        if non_factor_results:
+            residual_results = [
+                item
+                for item in non_factor_results
+                if item[0].get("application_residual_signal")
+            ]
+            reference_result = max(
+                residual_results or non_factor_results,
+                key=lambda item: (item[2], item[1]),
+            )
+            reference_mean_rho = reference_result[2]
+            factor_results = [
+                item
+                for item in application_results
+                if item[0].get("application_factor_components")
+                and item[2]
+                >= reference_mean_rho
+                + SIX_MONTH_APPLICATION_FACTOR_MIN_MEAN_RHO_IMPROVEMENT
+            ]
+            application_results = [reference_result, *factor_results]
+        best_min_rho = max(min_rho for _result, min_rho, _mean_rho in application_results)
+        robust_results = [
+            item
+            for item in application_results
+            if item[1] >= best_min_rho - SIX_MONTH_APPLICATION_FACTOR_MIN_RHO_TOLERANCE
+        ]
+        best_result = max(
+            robust_results,
+            key=lambda item: (
+                item[2],
+                item[1],
+                selection_key(item[0]),
+            ),
+        )[0]
+        logger.info(
+            "ML walk-forward application selection factor=%s residual=%s weight=%s",
+            best_result.get("application_factor_template"),
+            best_result.get("application_residual_signal"),
+            best_result.get("application_residual_candidate_weight"),
+        )
     return best_result or {
         "accepted": False,
         "reason": "no walk-forward folds",
@@ -3640,6 +3789,11 @@ def _select_practical_factor_blend(
     """Select a diversified, live-available factor overlay on purged folds."""
     required_columns = {
         "quality_score",
+        "revenue",
+        "gross_margin",
+        "total_assets",
+        "roe",
+        "roa",
         "pb_ratio",
         "ps_ratio",
         "total_liabilities",

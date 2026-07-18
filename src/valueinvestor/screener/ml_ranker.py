@@ -116,6 +116,9 @@ SHORT_HORIZON_FEATURES = (
 APPLICATION_FACTOR_SIGNALS = (
     "model",
     "quality_de_crowding",
+    "gross_profitability_de_crowding",
+    "roe_de_crowding",
+    "roa_de_crowding",
     "book_yield",
     "sales_yield",
     "liability_yield",
@@ -654,6 +657,15 @@ def _application_factor_config(
 def _application_factor_value(values: Mapping[str, object], signal: str) -> float:
     if signal == "quality_de_crowding":
         return -_to_float(values.get("quality_score"))
+    if signal == "gross_profitability_de_crowding":
+        revenue = _to_float(values.get("revenue"))
+        gross_margin = _to_float(values.get("gross_margin"))
+        gross_profit = revenue * gross_margin
+        return -_safe_div(gross_profit, _to_float(values.get("total_assets")))
+    if signal == "roe_de_crowding":
+        return -_to_float(values.get("roe"))
+    if signal == "roa_de_crowding":
+        return -_to_float(values.get("roa"))
     if signal == "book_yield":
         return -_to_float(values.get("pb_ratio"))
     if signal == "sales_yield":

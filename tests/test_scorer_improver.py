@@ -1253,6 +1253,9 @@ class TestAgentHelpers:
         components = [
             {"signal": "model", "weight": 0.10},
             {"signal": "quality_de_crowding", "weight": 0.135},
+            {"signal": "gross_profitability_de_crowding", "weight": 0.12},
+            {"signal": "roe_de_crowding", "weight": 0.08},
+            {"signal": "roa_de_crowding", "weight": 0.07},
             {"signal": "book_yield", "weight": 0.18},
             {"signal": "sales_yield", "weight": 0.045},
             {"signal": "liability_yield", "weight": 0.135},
@@ -1281,6 +1284,11 @@ class TestAgentHelpers:
                 "snapshot_date": ["2025-01-02"] * 5,
                 "value_score": [10.0, 20.0, 30.0, 40.0, 50.0],
                 "quality_score": [50.0, 40.0, 30.0, 20.0, 10.0],
+                "revenue": [100.0, 200.0, 150.0, 250.0, 300.0],
+                "gross_margin": [0.10, 0.25, 0.20, 0.30, 0.15],
+                "total_assets": [200.0, 250.0, 300.0, 350.0, 400.0],
+                "roe": [0.20, 0.15, 0.10, 0.05, -0.05],
+                "roa": [0.08, 0.06, 0.04, 0.02, -0.01],
                 "pb_ratio": [5.0, 4.0, 3.0, 2.0, 1.0],
                 "ps_ratio": [5.0, 1.0, 4.0, 2.0, 3.0],
                 "total_liabilities": [10.0, 20.0, 30.0, 40.0, 50.0],
@@ -1301,7 +1309,12 @@ class TestAgentHelpers:
                 financials=Financials(
                     ticker=row.ticker,
                     period="snapshot",
+                    revenue=row.revenue,
+                    gross_margin=row.gross_margin,
+                    total_assets=row.total_assets,
                     total_liabilities=row.total_liabilities,
+                    roe=row.roe,
+                    roa=row.roa,
                     current_ratio=row.current_ratio,
                 ),
                 valuation=ValuationMetrics(
@@ -1411,6 +1424,25 @@ class TestAgentHelpers:
         assert [result._ml_ranker_raw_score for result in results] == pytest.approx(offline)
         assert results[3].composite_score > results[4].composite_score
         assert results[4].composite_score > results[1].composite_score
+
+        frame["roe"] = [0.20, 0.15, 0.10, 0.05, -0.05]
+        payload["metadata"] = {
+            "application_residual_candidate_weight": 0.5,
+            "application_residual_signal": "roe_de_crowding",
+            "application_residual_column": "roe",
+            "application_residual_direction": -1.0,
+            "application_residual_scale": "snapshot_rank",
+        }
+        roe_offline = predict_ml_ranker_payload(frame, payload)
+        roe_model_path = tmp_path / "roe_residual.json"
+        roe_model_path.write_text(json.dumps(payload), encoding="utf-8")
+        for result, roe in zip(results, frame["roe"]):
+            result.financials.roe = roe
+        clear_model_cache()
+        assert score_results_with_ml_ranker(results, model_path=roe_model_path)
+        clear_model_cache()
+
+        assert [result._ml_ranker_raw_score for result in results] == pytest.approx(roe_offline)
 
     def test_ml_ranker_gross_profitability_de_crowding_matches_runtime(
         self,
@@ -3170,6 +3202,123 @@ class TestAgentHelpers:
         assert result["blend_scale"] == "snapshot_rank"
         assert result["blend_candidates_evaluated"] == 2
 
+    def test_walk_forward_selects_practical_factor_candidate(
+        self,
+        monkeypatch,
+    ) -> None:
+        from valueinvestor.scorer_improver import ml_trainer
+
+        snapshots = pd.DataFrame(
+            {
+                "ticker": [f"T{index:02d}" for index in range(20)],
+                "snapshot_date": ["2020-01-02"] * 10 + ["2021-01-04"] * 10,
+                "composite_score": list(reversed(range(10))) * 2,
+                "forward_return_1w": list(range(10)) * 2,
+                "forward_return_1m": list(range(10)) * 2,
+                "forward_return_3m": list(range(10)) * 2,
+                "forward_return_6m": list(range(10)) * 2,
+                "target_rank_1w": list(range(10)) * 2,
+                "target_rank_1m": list(range(10)) * 2,
+                "target_rank_3m": list(range(10)) * 2,
+                "target_rank_6m": list(range(10)) * 2,
+            }
+        )
+        monkeypatch.setattr(
+            ml_trainer,
+            "_fit_candidate_model",
+            lambda *args, **kwargs: ({}, {}, "numpy", False),
+        )
+        monkeypatch.setattr(
+            ml_trainer,
+            "_predict_from_linear_model",
+            lambda frame, *args, **kwargs: np.arange(len(frame), dtype="float64"),
+        )
+        factor_calls = []
+
+        def select_factor(*args, **kwargs):
+            factor_calls.append(kwargs)
+            rhos = {horizon: 2.0 for horizon in ml_trainer.EVAL_HORIZONS}
+            return {
+                "accepted": True,
+                "blend_weight": 1.0,
+                "mean_deltas": rhos,
+                "median_deltas": rhos,
+                "min_deltas": rhos,
+                "application_factor_template": "test_factor",
+                "application_factor_components": [{"signal": "roe_de_crowding", "weight": 1.0}],
+                "application_factor_min_rhos": rhos,
+                "application_factor_mean_rhos": rhos,
+            }
+
+        monkeypatch.setattr(ml_trainer, "_select_practical_factor_blend", select_factor)
+
+        result = ml_trainer._walk_forward_validate_candidate(
+            snapshots,
+            [
+                {
+                    "index": 1,
+                    "train_end_exclusive": "2020-07-01",
+                    "validation_start": "2021-01-01",
+                    "validation_end": "2021-01-31",
+                }
+            ],
+            target_name="target_rank_6m",
+            ridge_lambda=1.0,
+            backend="numpy",
+            max_rows=None,
+            prior_strategy="no_ticker_priors",
+            model_kind="ridge",
+            feature_names=[],
+            incumbent_payload=None,
+            min_6m_delta=0.001,
+            max_horizon_degradation=2.0,
+            blend_weights=(1.0,),
+        )
+
+        assert len(factor_calls) == 1
+        assert factor_calls[0]["base_blend_weight"] == pytest.approx(1.0)
+        assert result["application_factor_template"] == "test_factor"
+
+        def select_weak_factor(*args, **kwargs):
+            rhos = {horizon: 1.001 for horizon in ml_trainer.EVAL_HORIZONS}
+            return {
+                "accepted": True,
+                "blend_weight": 1.0,
+                "mean_deltas": rhos,
+                "median_deltas": rhos,
+                "min_deltas": rhos,
+                "application_factor_template": "weak_factor",
+                "application_factor_components": [{"signal": "roe_de_crowding", "weight": 1.0}],
+                "application_factor_min_rhos": rhos,
+                "application_factor_mean_rhos": rhos,
+            }
+
+        monkeypatch.setattr(ml_trainer, "_select_practical_factor_blend", select_weak_factor)
+        fallback = ml_trainer._walk_forward_validate_candidate(
+            snapshots,
+            [
+                {
+                    "index": 1,
+                    "train_end_exclusive": "2020-07-01",
+                    "validation_start": "2021-01-01",
+                    "validation_end": "2021-01-31",
+                }
+            ],
+            target_name="target_rank_6m",
+            ridge_lambda=1.0,
+            backend="numpy",
+            max_rows=None,
+            prior_strategy="no_ticker_priors",
+            model_kind="ridge",
+            feature_names=[],
+            incumbent_payload=None,
+            min_6m_delta=0.001,
+            max_horizon_degradation=2.0,
+            blend_weights=(1.0,),
+        )
+
+        assert "application_factor_template" not in fallback
+
     def test_walk_forward_selects_stronger_residual_candidate(
         self,
         monkeypatch,
@@ -3365,9 +3514,12 @@ class TestAgentHelpers:
         assert selected["application_residual_fold_practical_passes"] == [True, True]
 
     def test_application_factor_selection_uses_purged_fold_templates(self) -> None:
-        from valueinvestor.scorer_improver.ml_trainer import (
-            SIX_MONTH_APPLICATION_FACTOR_TEMPLATES,
-            _select_practical_factor_blend,
+        from valueinvestor.scorer_improver.ml_trainer import _select_practical_factor_blend
+
+        factor_templates = (
+            ("equal", (0.10, 0.15, 0.0, 0.0, 0.0, 0.15, 0.15, 0.15, 0.15, 0.15)),
+            ("balanced", (0.10, 0.18, 0.0, 0.0, 0.0, 0.135, 0.09, 0.135, 0.225, 0.135)),
+            ("value_momentum", (0.10, 0.135, 0.0, 0.0, 0.0, 0.18, 0.045, 0.135, 0.27, 0.135)),
         )
 
         fold_predictions = []
@@ -3379,6 +3531,11 @@ class TestAgentHelpers:
                     "ticker": [f"T{index:02d}" for index in range(30)],
                     "snapshot_date": [snapshot_date] * 30,
                     "quality_score": reverse_rank,
+                    "revenue": rank + 100.0,
+                    "gross_margin": np.full(30, 0.25),
+                    "total_assets": rank + 200.0,
+                    "roe": reverse_rank / 100.0,
+                    "roa": reverse_rank / 200.0,
                     "pb_ratio": reverse_rank + 1.0,
                     "ps_ratio": reverse_rank + 1.0,
                     "total_liabilities": rank + 1.0,
@@ -3398,7 +3555,7 @@ class TestAgentHelpers:
         selected = _select_practical_factor_blend(
             fold_predictions,
             base_blend_weight=1.0,
-            factor_templates=SIX_MONTH_APPLICATION_FACTOR_TEMPLATES,
+            factor_templates=factor_templates,
             min_6m_delta=0.001,
             max_horizon_degradation=2.0,
             primary_horizon="6m",
