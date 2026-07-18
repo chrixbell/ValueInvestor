@@ -1,0 +1,362 @@
+active 6m ML ranker: data/trainer/ml_ranker_model.strict_constrained_goal50.json
+(backend=mlx-constrained, target=target_rank_6m,
+trained_at=2026-07-18T12:50:34.754354)
+progress: fetching universe and screening candidates started
+progress: screening: step 1/6 fetching stock universe
+progress: screening: a_share stock list loaded from cache (5528 companies)
+progress: screening: hk_share stock list loaded from cache (50 companies)
+progress: screening: step 1/6 complete: 5578 companies
+progress: screening: step 2/6 fetching valuation data
+progress: screening: A-share valuations: checking 5528 tickers
+progress: screening: HK valuations: fetching 50 tickers
+progress: screening: HK valuations 1/50 processed; 5528 total valuations
+available
+progress: screening: HK valuations 25/50 processed; 5551 total valuations
+available
+progress: screening: HK valuations 50/50 processed; 5576 total valuations
+available
+progress: screening: step 2/6 complete: 5576 valuations
+progress: screening: step 3/6 applying valuation pre-filter
+progress: screening: step 3/6 complete: 1072 / 5578 remain
+progress: screening: step 4/6 fetching financials for 1072 candidates
+progress: screening: financials 1/1072 processed; 1 financial records available
+progress: screening: financials 25/1072 processed; 25 financial records
+available
+progress: screening: financials 50/1072 processed; 50 financial records
+available
+progress: screening: financials 75/1072 processed; 75 financial records
+available
+progress: screening: financials 100/1072 processed; 100 financial records
+available
+progress: screening: financials 125/1072 processed; 125 financial records
+available
+progress: screening: financials 150/1072 processed; 150 financial records
+available
+progress: screening: financials 175/1072 processed; 175 financial records
+available
+progress: screening: financials 200/1072 processed; 200 financial records
+available
+progress: screening: financials 225/1072 processed; 225 financial records
+available
+progress: screening: financials 250/1072 processed; 250 financial records
+available
+progress: screening: financials 275/1072 processed; 275 financial records
+available
+progress: screening: financials 300/1072 processed; 300 financial records
+available
+progress: screening: financials 325/1072 processed; 325 financial records
+available
+progress: screening: financials 350/1072 processed; 350 financial records
+available
+progress: screening: financials 375/1072 processed; 375 financial records
+available
+progress: screening: financials 400/1072 processed; 400 financial records
+available
+progress: screening: financials 425/1072 processed; 425 financial records
+available
+progress: screening: financials 450/1072 processed; 450 financial records
+available
+progress: screening: financials 475/1072 processed; 475 financial records
+available
+progress: screening: financials 500/1072 processed; 500 financial records
+available
+progress: screening: financials 525/1072 processed; 525 financial records
+available
+progress: screening: financials 550/1072 processed; 550 financial records
+available
+progress: screening: financials 575/1072 processed; 575 financial records
+available
+progress: screening: financials 600/1072 processed; 600 financial records
+available
+progress: screening: financials 625/1072 processed; 625 financial records
+available
+progress: screening: financials 650/1072 processed; 650 financial records
+available
+progress: screening: financials 675/1072 processed; 675 financial records
+available
+progress: screening: financials 700/1072 processed; 700 financial records
+available
+progress: screening: financials 725/1072 processed; 725 financial records
+available
+progress: screening: financials 750/1072 processed; 750 financial records
+available
+progress: screening: financials 775/1072 processed; 775 financial records
+available
+progress: screening: financials 800/1072 processed; 800 financial records
+available
+progress: screening: financials 825/1072 processed; 825 financial records
+available
+progress: screening: financials 850/1072 processed; 850 financial records
+available
+progress: screening: financials 875/1072 processed; 875 financial records
+available
+progress: screening: financials 900/1072 processed; 900 financial records
+available
+progress: screening: financials 925/1072 processed; 925 financial records
+available
+progress: screening: financials 950/1072 processed; 950 financial records
+available
+progress: screening: financials 975/1072 processed; 975 financial records
+available
+progress: screening: financials 1000/1072 processed; 1000 financial records
+available
+still running: screening: financials 1001/1072: 688128 中国电研 (15s elapsed)
+progress: screening: financials 1025/1072 processed; 1025 financial records
+available
+progress: screening: financials 1050/1072 processed; 1050 financial records
+available
+progress: screening: financials 1072/1072 processed; 1072 financial records
+available
+progress: screening: step 4/6 complete: 1072 financials
+progress: screening: step 5/6 applying full quantitative filters
+progress: screening: step 5/6 complete: 652 candidates
+progress: screening: step 6/6 scoring and ranking 652 candidates
+progress: screening: screening complete: returning top 50 of 652 candidates
+
+progress: fetching universe and screening candidates finished (28.7s elapsed)
+
+✓ Screening complete — 50 candidates
+
+                           Screening Results
+┏━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━┳━━━━━━┳━━━━━┳━━━━━━━┓
+┃ Rank ┃ Ticker  ┃ Name       ┃ Market   ┃ Score ┃   PE ┃  PB ┃   ROE ┃
+┡━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━╇━━━━━━╇━━━━━╇━━━━━━━┩
+│    1 │ 000758  │ 中色股份   │ a_share  │  99.8 │ 23.0 │ 1.8 │  8.2% │
+│    2 │ 000088  │ 盐 田 港   │ a_share  │  99.7 │ 15.4 │ 1.2 │  8.0% │
+│    3 │ 000157  │ 中联重科   │ a_share  │  99.5 │ 12.8 │ 1.1 │  8.3% │
+│    4 │ 601199  │ 江南水务   │ a_share  │  99.4 │ 15.0 │ 1.2 │  8.2% │
+│    5 │ 688425  │ 铁建重工   │ a_share  │  99.2 │ 14.6 │ 1.2 │  8.2% │
+│    6 │ 300259  │ 新天科技   │ a_share  │  99.1 │ 22.7 │ 1.9 │  8.3% │
+│    7 │ 002327  │ 富安娜     │ a_share  │  98.9 │ 16.1 │ 1.4 │  8.3% │
+│    8 │ 000755  │ 山西高速   │ a_share  │  98.8 │ 14.6 │ 1.2 │  8.6% │
+│    9 │ 600300  │ 维维股份   │ a_share  │  98.6 │ 14.8 │ 1.4 │  9.5% │
+│   10 │ 002349  │ 精华制药   │ a_share  │  98.5 │ 25.2 │ 2.0 │  8.2% │
+│   11 │ 601096  │ 宏盛华源   │ a_share  │  98.3 │ 29.7 │ 2.3 │  8.2% │
+│   12 │ 002478  │ 常宝股份   │ a_share  │  98.2 │ 10.5 │ 0.8 │  8.3% │
+│   13 │ 601326  │ 秦港股份   │ a_share  │  98.0 │ 11.9 │ 0.9 │  8.1% │
+│   14 │ 601890  │ 亚星锚链   │ a_share  │  97.9 │ 24.0 │ 2.0 │  8.5% │
+│   15 │ 601857  │ 中国石油   │ a_share  │  97.7 │ 12.0 │ 1.2 │ 10.1% │
+│   16 │ 600166  │ 福田汽车   │ a_share  │  97.5 │ 17.0 │ 1.4 │  9.1% │
+│   17 │ 002752  │ 昇兴股份   │ a_share  │  97.4 │ 18.8 │ 1.5 │  8.8% │
+│   18 │ 300039  │ 上海凯宝   │ a_share  │  97.2 │ 19.2 │ 1.1 │  8.7% │
+│   19 │ 601518  │ 吉林高速   │ a_share  │  97.1 │ 10.7 │ 0.9 │  8.9% │
+│   20 │ 003816  │ 中国广核   │ a_share  │  96.9 │ 20.4 │ 1.6 │  9.1% │
+│   21 │ 600179  │ 安通控股   │ a_share  │  96.8 │ 16.6 │ 1.5 │  9.6% │
+│   22 │ 0857.HK │ PETROCHINA │ hk_share │  96.6 │  9.6 │ 0.9 │  9.9% │
+│   23 │ 603809  │ 豪能股份   │ a_share  │  96.5 │ 26.8 │ 2.1 │  8.6% │
+│   24 │ 600956  │ 新天绿能   │ a_share  │  96.3 │ 16.4 │ 1.3 │  8.1% │
+│   25 │ 000690  │ 宝新能源   │ a_share  │  96.2 │  9.9 │ 0.8 │  8.2% │
+│   26 │ 000888  │ 峨眉山Ａ   │ a_share  │  96.0 │ 22.8 │ 1.8 │  8.2% │
+│   27 │ 600780  │ 通宝能源   │ a_share  │  95.9 │ 10.6 │ 0.8 │  8.1% │
+│   28 │ 301339  │ 通行宝     │ a_share  │  95.7 │ 26.5 │ 2.1 │  8.0% │
+│   29 │ 601107  │ 四川成渝   │ a_share  │  95.6 │ 11.8 │ 1.0 │  8.5% │
+│   30 │ 600018  │ 上港集团   │ a_share  │  95.4 │  8.9 │ 0.8 │  9.9% │
+│   31 │ 000030  │ 富奥股份   │ a_share  │  95.3 │ 10.2 │ 0.8 │  8.6% │
+│   32 │ 603707  │ 健友股份   │ a_share  │  95.1 │ 21.9 │ 1.8 │  8.7% │
+│   33 │ 601985  │ XD中国核   │ a_share  │  94.9 │ 19.4 │ 1.5 │  8.2% │
+│   34 │ 601139  │ 深圳燃气   │ a_share  │  94.8 │ 12.7 │ 1.1 │  8.8% │
+│   35 │ 002324  │ 普利特     │ a_share  │  94.6 │ 26.8 │ 2.1 │  8.2% │
+│   36 │ 600874  │ 创业环保   │ a_share  │  94.5 │  9.9 │ 0.8 │  8.7% │
+│   37 │ 300986  │ 志特新材   │ a_share  │  94.3 │ 23.4 │ 2.6 │  8.9% │
+│   38 │ 600998  │ 九州通     │ a_share  │  94.2 │ 11.6 │ 0.9 │  8.3% │
+│   39 │ 002266  │ 浙富控股   │ a_share  │  94.0 │ 20.4 │ 1.9 │  9.6% │
+│   40 │ 002697  │ 红旗连锁   │ a_share  │  93.9 │ 13.2 │ 1.3 │ 10.4% │
+│   41 │ 002461  │ 珠江啤酒   │ a_share  │  93.7 │ 20.4 │ 1.6 │  8.4% │
+│   42 │ 601369  │ 陕鼓动力   │ a_share  │  93.6 │ 21.7 │ 1.8 │  8.3% │
+│   43 │ 601619  │ 嘉泽新能   │ a_share  │  93.4 │ 14.6 │ 1.5 │ 10.0% │
+│   44 │ 601686  │ 友发集团   │ a_share  │  93.3 │ 10.9 │ 1.1 │  9.9% │
+│   45 │ 002489  │ 浙江永强   │ a_share  │  93.1 │ 12.7 │ 1.3 │ 10.9% │
+│   46 │ 601311  │ 骆驼股份   │ a_share  │  93.0 │ 10.9 │ 0.9 │  8.5% │
+│   47 │ 002091  │ 江苏国泰   │ a_share  │  92.8 │  9.3 │ 0.7 │  8.1% │
+│   48 │ 002267  │ 陕天然气   │ a_share  │  92.6 │ 13.6 │ 1.1 │  9.0% │
+│   49 │ 603227  │ 雪峰科技   │ a_share  │  92.5 │ 15.1 │ 1.5 │ 10.0% │
+│   50 │ 600507  │ 方大特钢   │ a_share  │  92.3 │ 10.6 │ 1.0 │  9.7% │
+└──────┴─────────┴────────────┴──────────┴───────┴──────┴─────┴───────┘
+progress: analysis 1/50 000758 中色股份 started
+progress: analysis 1/50 000758 中色股份: cache hit
+progress: analysis 1/50 000758 中色股份 finished (0.0s elapsed)
+progress: analysis 2/50 000088 盐 田 港 started
+progress: analysis 2/50 000088 盐 田 港: cache hit
+progress: analysis 2/50 000088 盐 田 港 finished (0.0s elapsed)
+progress: analysis 3/50 000157 中联重科 started
+progress: analysis 3/50 000157 中联重科: cache hit
+progress: analysis 3/50 000157 中联重科 finished (0.0s elapsed)
+progress: analysis 4/50 601199 江南水务 started
+progress: analysis 4/50 601199 江南水务: cache hit
+progress: analysis 4/50 601199 江南水务 finished (0.0s elapsed)
+progress: analysis 5/50 688425 铁建重工 started
+progress: analysis 5/50 688425 铁建重工: analysis started
+progress: analysis 5/50 688425 铁建重工: business_nature started
+progress: analysis 5/50 688425 铁建重工: business_nature finished
+progress: analysis 5/50 688425 铁建重工: management started
+still running: analysis 5/50 688425 铁建重工: management started (15s elapsed)
+progress: analysis 5/50 688425 铁建重工: management finished
+progress: analysis 5/50 688425 铁建重工: moat started
+still running: analysis 5/50 688425 铁建重工: moat started (30s elapsed)
+progress: analysis 5/50 688425 铁建重工: moat finished
+progress: analysis 5/50 688425 铁建重工: market_narrative started
+still running: analysis 5/50 688425 铁建重工: market_narrative started (45s
+elapsed)
+progress: analysis 5/50 688425 铁建重工: market_narrative finished
+progress: analysis 5/50 688425 铁建重工: recommendation started
+still running: analysis 5/50 688425 铁建重工: recommendation started (60s
+elapsed)
+progress: analysis 5/50 688425 铁建重工: recommendation finished
+progress: analysis 5/50 688425 铁建重工: analysis finished
+progress: analysis 5/50 688425 铁建重工 finished (66.3s elapsed)
+progress: analysis 6/50 300259 新天科技 started
+progress: analysis 6/50 300259 新天科技: cache hit
+progress: analysis 6/50 300259 新天科技 finished (0.0s elapsed)
+progress: analysis 7/50 002327 富安娜 started
+progress: analysis 7/50 002327 富安娜: cache hit
+progress: analysis 7/50 002327 富安娜 finished (0.0s elapsed)
+progress: analysis 8/50 000755 山西高速 started
+progress: analysis 8/50 000755 山西高速: cache hit
+progress: analysis 8/50 000755 山西高速 finished (0.0s elapsed)
+progress: analysis 9/50 600300 维维股份 started
+progress: analysis 9/50 600300 维维股份: cache hit
+progress: analysis 9/50 600300 维维股份 finished (0.0s elapsed)
+progress: analysis 10/50 002349 精华制药 started
+progress: analysis 10/50 002349 精华制药: cache hit
+progress: analysis 10/50 002349 精华制药 finished (0.0s elapsed)
+progress: analysis 11/50 601096 宏盛华源 started
+progress: analysis 11/50 601096 宏盛华源: cache hit
+progress: analysis 11/50 601096 宏盛华源 finished (0.0s elapsed)
+progress: analysis 12/50 002478 常宝股份 started
+progress: analysis 12/50 002478 常宝股份: cache hit
+progress: analysis 12/50 002478 常宝股份 finished (0.0s elapsed)
+progress: analysis 13/50 601326 秦港股份 started
+progress: analysis 13/50 601326 秦港股份: cache hit
+progress: analysis 13/50 601326 秦港股份 finished (0.0s elapsed)
+progress: analysis 14/50 601890 亚星锚链 started
+progress: analysis 14/50 601890 亚星锚链: cache hit
+progress: analysis 14/50 601890 亚星锚链 finished (0.0s elapsed)
+progress: analysis 15/50 601857 中国石油 started
+progress: analysis 15/50 601857 中国石油: cache hit
+progress: analysis 15/50 601857 中国石油 finished (0.0s elapsed)
+progress: analysis 16/50 600166 福田汽车 started
+progress: analysis 16/50 600166 福田汽车: cache hit
+progress: analysis 16/50 600166 福田汽车 finished (0.0s elapsed)
+progress: analysis 17/50 002752 昇兴股份 started
+progress: analysis 17/50 002752 昇兴股份: cache hit
+progress: analysis 17/50 002752 昇兴股份 finished (0.0s elapsed)
+progress: analysis 18/50 300039 上海凯宝 started
+progress: analysis 18/50 300039 上海凯宝: cache hit
+progress: analysis 18/50 300039 上海凯宝 finished (0.0s elapsed)
+progress: analysis 19/50 601518 吉林高速 started
+progress: analysis 19/50 601518 吉林高速: cache hit
+progress: analysis 19/50 601518 吉林高速 finished (0.0s elapsed)
+progress: analysis 20/50 003816 中国广核 started
+progress: analysis 20/50 003816 中国广核: cache hit
+progress: analysis 20/50 003816 中国广核 finished (0.0s elapsed)
+progress: analysis 21/50 600179 安通控股 started
+progress: analysis 21/50 600179 安通控股: cache hit
+progress: analysis 21/50 600179 安通控股 finished (0.0s elapsed)
+progress: analysis 22/50 0857.HK PETROCHINA started
+progress: analysis 22/50 0857.HK PETROCHINA: cache hit
+progress: analysis 22/50 0857.HK PETROCHINA finished (0.0s elapsed)
+progress: analysis 23/50 603809 豪能股份 started
+progress: analysis 23/50 603809 豪能股份: cache hit
+progress: analysis 23/50 603809 豪能股份 finished (0.0s elapsed)
+progress: analysis 24/50 600956 新天绿能 started
+progress: analysis 24/50 600956 新天绿能: cache hit
+progress: analysis 24/50 600956 新天绿能 finished (0.0s elapsed)
+progress: analysis 25/50 000690 宝新能源 started
+progress: analysis 25/50 000690 宝新能源: cache hit
+progress: analysis 25/50 000690 宝新能源 finished (0.0s elapsed)
+progress: analysis 26/50 000888 峨眉山Ａ started
+progress: analysis 26/50 000888 峨眉山Ａ: cache hit
+progress: analysis 26/50 000888 峨眉山Ａ finished (0.0s elapsed)
+progress: analysis 27/50 600780 通宝能源 started
+progress: analysis 27/50 600780 通宝能源: cache hit
+progress: analysis 27/50 600780 通宝能源 finished (0.0s elapsed)
+progress: analysis 28/50 301339 通行宝 started
+progress: analysis 28/50 301339 通行宝: cache hit
+progress: analysis 28/50 301339 通行宝 finished (0.0s elapsed)
+progress: analysis 29/50 601107 四川成渝 started
+progress: analysis 29/50 601107 四川成渝: cache hit
+progress: analysis 29/50 601107 四川成渝 finished (0.0s elapsed)
+progress: analysis 30/50 600018 上港集团 started
+progress: analysis 30/50 600018 上港集团: cache hit
+progress: analysis 30/50 600018 上港集团 finished (0.0s elapsed)
+progress: analysis 31/50 000030 富奥股份 started
+progress: analysis 31/50 000030 富奥股份: cache hit
+progress: analysis 31/50 000030 富奥股份 finished (0.0s elapsed)
+progress: analysis 32/50 603707 健友股份 started
+progress: analysis 32/50 603707 健友股份: cache hit
+progress: analysis 32/50 603707 健友股份 finished (0.0s elapsed)
+progress: analysis 33/50 601985 XD中国核 started
+progress: analysis 33/50 601985 XD中国核: cache hit
+progress: analysis 33/50 601985 XD中国核 finished (0.0s elapsed)
+progress: analysis 34/50 601139 深圳燃气 started
+progress: analysis 34/50 601139 深圳燃气: cache hit
+progress: analysis 34/50 601139 深圳燃气 finished (0.0s elapsed)
+progress: analysis 35/50 002324 普利特 started
+progress: analysis 35/50 002324 普利特: cache hit
+progress: analysis 35/50 002324 普利特 finished (0.0s elapsed)
+progress: analysis 36/50 600874 创业环保 started
+progress: analysis 36/50 600874 创业环保: cache hit
+progress: analysis 36/50 600874 创业环保 finished (0.0s elapsed)
+progress: analysis 37/50 300986 志特新材 started
+progress: analysis 37/50 300986 志特新材: cache hit
+progress: analysis 37/50 300986 志特新材 finished (0.0s elapsed)
+progress: analysis 38/50 600998 九州通 started
+progress: analysis 38/50 600998 九州通: cache hit
+progress: analysis 38/50 600998 九州通 finished (0.0s elapsed)
+progress: analysis 39/50 002266 浙富控股 started
+progress: analysis 39/50 002266 浙富控股: cache hit
+progress: analysis 39/50 002266 浙富控股 finished (0.0s elapsed)
+progress: analysis 40/50 002697 红旗连锁 started
+progress: analysis 40/50 002697 红旗连锁: cache hit
+progress: analysis 40/50 002697 红旗连锁 finished (0.0s elapsed)
+progress: analysis 41/50 002461 珠江啤酒 started
+progress: analysis 41/50 002461 珠江啤酒: cache hit
+progress: analysis 41/50 002461 珠江啤酒 finished (0.0s elapsed)
+progress: analysis 42/50 601369 陕鼓动力 started
+progress: analysis 42/50 601369 陕鼓动力: cache hit
+progress: analysis 42/50 601369 陕鼓动力 finished (0.0s elapsed)
+progress: analysis 43/50 601619 嘉泽新能 started
+progress: analysis 43/50 601619 嘉泽新能: cache hit
+progress: analysis 43/50 601619 嘉泽新能 finished (0.0s elapsed)
+progress: analysis 44/50 601686 友发集团 started
+progress: analysis 44/50 601686 友发集团: cache hit
+progress: analysis 44/50 601686 友发集团 finished (0.0s elapsed)
+progress: analysis 45/50 002489 浙江永强 started
+progress: analysis 45/50 002489 浙江永强: cache hit
+progress: analysis 45/50 002489 浙江永强 finished (0.0s elapsed)
+progress: analysis 46/50 601311 骆驼股份 started
+progress: analysis 46/50 601311 骆驼股份: cache hit
+progress: analysis 46/50 601311 骆驼股份 finished (0.0s elapsed)
+progress: analysis 47/50 002091 江苏国泰 started
+progress: analysis 47/50 002091 江苏国泰: cache hit
+progress: analysis 47/50 002091 江苏国泰 finished (0.0s elapsed)
+progress: analysis 48/50 002267 陕天然气 started
+progress: analysis 48/50 002267 陕天然气: cache hit
+progress: analysis 48/50 002267 陕天然气 finished (0.0s elapsed)
+progress: analysis 49/50 603227 雪峰科技 started
+progress: analysis 49/50 603227 雪峰科技: cache hit
+progress: analysis 49/50 603227 雪峰科技 finished (0.0s elapsed)
+progress: analysis 50/50 600507 方大特钢 started
+progress: analysis 50/50 600507 方大特钢: cache hit
+progress: analysis 50/50 600507 方大特钢 finished (0.0s elapsed)
+
+✓ LLM analysis complete — 50/50 succeeded
+progress: report generation started
+
+progress: report generation finished (3.7s elapsed)
+✓ Reports generated — 2 file(s)
+
+╭──────────────────────────────── Scan Summary ────────────────────────────────╮
+│ Candidates screened: 50                                                      │
+│ Analyses completed:  50                                                      │
+│                                                                              │
+│ Report files:                                                                │
+│   •                                                                          │
+│ reports/full_scan_6m_strict_best_top50_20260718T062534Z/2026-07-18_china_val │
+│ ue_report.md                                                                 │
+│   •                                                                          │
+│ reports/full_scan_6m_strict_best_top50_20260718T062534Z/2026-07-18_china_val │
+│ ue_report.pdf                                                                │
+│                                                                              │
+│ LLM usage: 7,079 tokens · $0.0529 USD                                        │
+╰──────────────────────────────────────────────────────────────────────────────╯

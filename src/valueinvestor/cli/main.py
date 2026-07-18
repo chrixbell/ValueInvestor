@@ -1675,7 +1675,10 @@ def train_ml_scorer(
     candidate_feature_sets: str = typer.Option(
         "auto",
         "--candidate-feature-sets",
-        help="Candidate feature sets: auto, core, short-horizon, expanded, poly, or comma-separated list.",
+        help=(
+            "Candidate feature sets: auto, practical-factor, stable-factor, core, "
+            "short-horizon, expanded, poly, or comma-separated list."
+        ),
     ),
     candidate_prior_strategies: str = typer.Option(
         "auto",

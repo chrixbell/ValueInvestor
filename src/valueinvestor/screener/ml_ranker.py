@@ -180,6 +180,19 @@ CROSS_SECTIONAL_FEATURES = (
     "price_return_63d",
 )
 
+PRACTICAL_FACTOR_SOURCES = (
+    "value_score",
+    "roe",
+    "price_volatility_63d",
+    "ocf_yield",
+    "gross_profit_market_cap",
+    "ps_ratio",
+)
+
+CROSS_SECTIONAL_SOURCE_FEATURES = tuple(
+    dict.fromkeys((*CROSS_SECTIONAL_FEATURES, *PRACTICAL_FACTOR_SOURCES))
+)
+
 CROSS_SECTIONAL_INTERACTION_FEATURES = (
     ("csx_value_ticker_rankmean_6m", "cs_rank_value_score", "cs_rank_ticker_rankmean_6m"),
     ("csx_quality_ticker_rankmean_6m", "cs_rank_quality_score", "cs_rank_ticker_rankmean_6m"),
@@ -233,6 +246,11 @@ def stable_factor_feature_names() -> List[str]:
         "cs_rank_roa",
         "cs_rank_pb_ratio",
     ]
+
+
+def practical_factor_feature_names() -> List[str]:
+    """Return the live factor set selected on purged 6m walk-forward folds."""
+    return [f"cs_rank_{source}" for source in PRACTICAL_FACTOR_SOURCES]
 
 
 def expected_feature_names(
@@ -578,6 +596,7 @@ def _parse_temporal_date(value: object) -> Optional[date]:
 def _valid_feature_schemas() -> tuple[List[str], ...]:
     return (
         stable_factor_feature_names(),
+        practical_factor_feature_names(),
         expected_feature_names(),
         expected_feature_names(include_short_horizon=True),
         expected_feature_names(
@@ -837,7 +856,7 @@ def _cross_sectional_feature_matrix(
 
     markets = np.asarray([_market_bucket(ticker) for ticker in tickers], dtype=object)
     output: dict[str, np.ndarray] = {}
-    for source in CROSS_SECTIONAL_FEATURES:
+    for source in CROSS_SECTIONAL_SOURCE_FEATURES:
         values = rows_by_feature.get(source)
         if values is None:
             continue
@@ -1164,7 +1183,7 @@ def _needs_short_horizon_features(feature_names: Sequence[str]) -> bool:
 
 def _price_feature_paths() -> tuple[Path, ...]:
     return (
-        Path("data/trainer/ashare_prices.parquet"),
+        Path("data/trainer/ashare_adjusted_prices.parquet"),
         Path("data/trainer/hkshare_prices.parquet"),
     )
 
@@ -1203,7 +1222,16 @@ def _recent_price_features_for_results(
             if not path.exists():
                 continue
             try:
-                frame = pd.read_parquet(str(path), columns=["ticker", "date", "close"])
+                price_column = (
+                    "adjusted_close"
+                    if path.name == "ashare_adjusted_prices.parquet"
+                    else "close"
+                )
+                frame = pd.read_parquet(
+                    str(path),
+                    columns=["ticker", "date", price_column],
+                )
+                frame = frame.rename(columns={price_column: "close"})
             except Exception:
                 continue
             if frame.empty:
@@ -1302,7 +1330,7 @@ def feature_matrix_from_values(
                 ],
                 dtype="float64",
             )
-            for source in CROSS_SECTIONAL_FEATURES
+            for source in CROSS_SECTIONAL_SOURCE_FEATURES
         }
         cross_sectional_features = _cross_sectional_feature_matrix(
             source_features,

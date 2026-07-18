@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 GROUND_TRUTH_FILE = TRAINER_DIR / "ground_truth.parquet"
 LEGACY_GROUND_TRUTH_FILE = TRAINER_DIR / "ground_truth_legacy.parquet"
 CURRENT_GROUND_TRUTH_FILE = TRAINER_DIR / "ground_truth_current.parquet"
+ASHARE_ADJUSTED_PRICES_FILE = TRAINER_DIR / "ashare_adjusted_prices.parquet"
 
 # Rolling snapshot interval in days (~quarterly)
 SNAPSHOT_INTERVAL_DAYS = 90
@@ -112,6 +113,51 @@ FINANCIAL_ASOF_LAG_DAYS = 0
 _GT_CACHE: dict[str, pd.DataFrame] = {}
 
 
+def load_training_price_history(*, require_adjusted_ashare: bool = True) -> pd.DataFrame:
+    """Load raw point-in-time closes plus adjusted closes used for returns."""
+    ashare_path = TRAINER_DIR / "ashare_prices.parquet"
+    hkshare_path = TRAINER_DIR / "hkshare_prices.parquet"
+    frames: list[pd.DataFrame] = []
+
+    if ashare_path.exists():
+        ashare = pd.read_parquet(str(ashare_path))
+        if not ASHARE_ADJUSTED_PRICES_FILE.exists():
+            if require_adjusted_ashare:
+                raise FileNotFoundError(
+                    "Adjusted A-share price data is missing at "
+                    "data/trainer/ashare_adjusted_prices.parquet. Run "
+                    "`valueinvestor improve-scorer --fetch-only` before training."
+                )
+            ashare["adjusted_close"] = np.nan
+        else:
+            adjusted = pd.read_parquet(
+                str(ASHARE_ADJUSTED_PRICES_FILE),
+                columns=["ticker", "date", "adjusted_close"],
+            )
+            adjusted = adjusted.drop_duplicates(["ticker", "date"], keep="last")
+            ashare = ashare.merge(adjusted, on=["ticker", "date"], how="left")
+            coverage = float(ashare["adjusted_close"].notna().mean()) if len(ashare) else 0.0
+            if require_adjusted_ashare and coverage < 0.90:
+                raise RuntimeError(
+                    "Adjusted A-share price coverage is too low for valid return labels: "
+                    f"{coverage:.1%}. Re-run `valueinvestor improve-scorer --fetch-only`."
+                )
+            if coverage < 1.0:
+                logger.warning("Adjusted A-share price coverage is %.1f%%", coverage * 100.0)
+        frames.append(ashare)
+
+    if hkshare_path.exists():
+        hkshare = pd.read_parquet(str(hkshare_path))
+        hkshare["adjusted_close"] = pd.to_numeric(hkshare["close"], errors="coerce")
+        frames.append(hkshare)
+
+    if not frames:
+        raise FileNotFoundError(
+            "No price data found. Run `valueinvestor improve-scorer --fetch-only` first."
+        )
+    return pd.concat(frames, ignore_index=True)
+
+
 def load_ground_truth_cached(path: Path) -> pd.DataFrame:
     """Load a ground-truth parquet with in-memory caching.
 
@@ -137,6 +183,8 @@ def _compute_forward_returns(
     prices_df: pd.DataFrame,
     horizon_days: int = FORWARD_HORIZON_DAYS,
     column_name: str = "forward_return_6m",
+    *,
+    price_column: str = "close",
 ) -> pd.DataFrame:
     """For each (ticker, date), compute the forward return over *horizon_days*.
 
@@ -146,7 +194,10 @@ def _compute_forward_returns(
     if prices_df.empty:
         return pd.DataFrame()
 
-    prices = prices_df.loc[:, ["ticker", "date", "close"]].copy()
+    if price_column not in prices_df.columns:
+        raise ValueError(f"price column is missing: {price_column}")
+    prices = prices_df.loc[:, ["ticker", "date", price_column]].copy()
+    prices = prices.rename(columns={price_column: "close"})
     prices["date"] = pd.to_datetime(prices["date"])
     prices["close"] = pd.to_numeric(prices["close"], errors="coerce")
     prices = prices.dropna(subset=["ticker", "date", "close"])
@@ -603,22 +654,7 @@ def build_ground_truth(force: bool = False, output_path: Path = GROUND_TRUTH_FIL
             len(missing),
         )
 
-    # Load price data
-    ashare_path = TRAINER_DIR / "ashare_prices.parquet"
-    hkshare_path = TRAINER_DIR / "hkshare_prices.parquet"
-
-    frames = []
-    if ashare_path.exists():
-        frames.append(pd.read_parquet(str(ashare_path)))
-    if hkshare_path.exists():
-        frames.append(pd.read_parquet(str(hkshare_path)))
-
-    if not frames:
-        raise FileNotFoundError(
-            "No price data found. Run `valueinvestor improve-scorer --fetch-only` first."
-        )
-
-    all_prices = pd.concat(frames, ignore_index=True)
+    all_prices = load_training_price_history()
     all_prices["date_dt"] = pd.to_datetime(all_prices["date"])
     logger.info("Loaded %d price rows for %d tickers", len(all_prices), all_prices["ticker"].nunique())
 
@@ -639,7 +675,12 @@ def build_ground_truth(force: bool = False, output_path: Path = GROUND_TRUTH_FIL
     all_returns: dict = {}
     for horizon_days, col_name in horizons:
         logger.info("Computing forward returns (horizon=%d days, col=%s) …", horizon_days, col_name)
-        returns_df = _compute_forward_returns(all_prices, horizon_days=horizon_days, column_name=col_name)
+        returns_df = _compute_forward_returns(
+            all_prices,
+            horizon_days=horizon_days,
+            column_name=col_name,
+            price_column="adjusted_close",
+        )
         if returns_df.empty:
             logger.warning("No forward returns for horizon %d", horizon_days)
             continue
@@ -812,23 +853,20 @@ def augment_ground_truth_with_horizons(force: bool = False, path: Path = GROUND_
         logger.info("Ground truth already has short-horizon columns — nothing to do.")
         return path
 
-    # Load price data
-    ashare_path = TRAINER_DIR / "ashare_prices.parquet"
-    hkshare_path = TRAINER_DIR / "hkshare_prices.parquet"
-    frames = []
-    if ashare_path.exists():
-        frames.append(pd.read_parquet(str(ashare_path)))
-    if hkshare_path.exists():
-        frames.append(pd.read_parquet(str(hkshare_path)))
-    if not frames:
+    try:
+        all_prices = load_training_price_history()
+    except FileNotFoundError:
         logger.error("No price data found; cannot augment ground truth.")
         return path
 
-    all_prices = pd.concat(frames, ignore_index=True)
-
     for col_name, horizon_days in horizons_needed:
         logger.info("Computing %s (horizon=%d days) for augmentation …", col_name, horizon_days)
-        returns_df = _compute_forward_returns(all_prices, horizon_days=horizon_days, column_name=col_name)
+        returns_df = _compute_forward_returns(
+            all_prices,
+            horizon_days=horizon_days,
+            column_name=col_name,
+            price_column="adjusted_close",
+        )
         if returns_df.empty:
             logger.warning("No forward returns for %s", col_name)
             continue

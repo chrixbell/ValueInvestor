@@ -1,0 +1,88 @@
+2026-07-18 15:02:34,691 INFO root Starting adjusted A-share backfill for 5542 companies
+2026-07-18 15:02:34,691 INFO valueinvestor.scorer_improver.data_prep A-share adjusted differential fetch: 5542 tasks across 5542 stocks (workers=8) ...
+2026-07-18 15:07:44,572 INFO root Restarting Sina-first adjusted A-share backfill for 5542 companies
+2026-07-18 15:07:44,573 INFO valueinvestor.scorer_improver.data_prep A-share adjusted differential fetch: 5542 tasks across 5542 stocks (workers=12) ...
+2026-07-18 15:07:55,366 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 100/5542 tasks (ok=100, fail=0)
+2026-07-18 15:08:01,987 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 200/5542 tasks (ok=200, fail=0)
+2026-07-18 15:08:02,135 INFO valueinvestor.scorer_improver.data_prep   Saved adjusted checkpoint: 480103 rows
+2026-07-18 15:08:09,494 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 300/5542 tasks (ok=300, fail=0)
+2026-07-18 15:08:16,128 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 400/5542 tasks (ok=400, fail=0)
+2026-07-18 15:08:16,284 INFO valueinvestor.scorer_improver.data_prep   Saved adjusted checkpoint: 964029 rows
+2026-07-18 15:08:21,606 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 500/5542 tasks (ok=500, fail=0)
+2026-07-18 15:08:27,985 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 600/5542 tasks (ok=600, fail=0)
+2026-07-18 15:08:28,185 INFO valueinvestor.scorer_improver.data_prep   Saved adjusted checkpoint: 1259500 rows
+2026-07-18 15:08:34,608 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 700/5542 tasks (ok=700, fail=0)
+2026-07-18 15:08:40,356 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 800/5542 tasks (ok=800, fail=0)
+2026-07-18 15:08:40,683 INFO valueinvestor.scorer_improver.data_prep   Saved adjusted checkpoint: 1743173 rows
+2026-07-18 15:08:47,262 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 900/5542 tasks (ok=900, fail=0)
+2026-07-18 15:08:53,443 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 1000/5542 tasks (ok=1000, fail=0)
+2026-07-18 15:08:53,836 INFO valueinvestor.scorer_improver.data_prep   Saved adjusted checkpoint: 2227686 rows
+2026-07-18 15:08:59,771 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 1100/5542 tasks (ok=1100, fail=0)
+2026-07-18 15:09:06,216 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 1200/5542 tasks (ok=1200, fail=0)
+2026-07-18 15:09:06,644 INFO valueinvestor.scorer_improver.data_prep   Saved adjusted checkpoint: 2709853 rows
+2026-07-18 15:09:12,753 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 1300/5542 tasks (ok=1300, fail=0)
+2026-07-18 15:09:20,205 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 1400/5542 tasks (ok=1400, fail=0)
+2026-07-18 15:09:20,673 INFO valueinvestor.scorer_improver.data_prep   Saved adjusted checkpoint: 3165373 rows
+2026-07-18 15:09:26,715 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 1500/5542 tasks (ok=1500, fail=0)
+2026-07-18 15:09:34,354 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 1600/5542 tasks (ok=1600, fail=0)
+2026-07-18 15:09:34,951 INFO valueinvestor.scorer_improver.data_prep   Saved adjusted checkpoint: 3560923 rows
+2026-07-18 15:09:41,334 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 1700/5542 tasks (ok=1700, fail=0)
+2026-07-18 15:09:47,634 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 1800/5542 tasks (ok=1800, fail=0)
+2026-07-18 15:09:48,272 INFO valueinvestor.scorer_improver.data_prep   Saved adjusted checkpoint: 4043239 rows
+2026-07-18 15:09:55,410 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 1900/5542 tasks (ok=1900, fail=0)
+2026-07-18 15:10:02,592 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 2000/5542 tasks (ok=2000, fail=0)
+2026-07-18 15:10:03,273 INFO valueinvestor.scorer_improver.data_prep   Saved adjusted checkpoint: 4524710 rows
+2026-07-18 15:10:10,343 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 2100/5542 tasks (ok=2100, fail=0)
+2026-07-18 15:10:16,758 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 2200/5542 tasks (ok=2200, fail=0)
+2026-07-18 15:10:17,476 INFO valueinvestor.scorer_improver.data_prep   Saved adjusted checkpoint: 4961679 rows
+2026-07-18 15:10:23,615 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 2300/5542 tasks (ok=2300, fail=0)
+2026-07-18 15:10:30,429 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 2400/5542 tasks (ok=2400, fail=0)
+2026-07-18 15:10:31,192 INFO valueinvestor.scorer_improver.data_prep   Saved adjusted checkpoint: 5254641 rows
+2026-07-18 15:10:37,430 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 2500/5542 tasks (ok=2500, fail=0)
+2026-07-18 15:10:43,729 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 2600/5542 tasks (ok=2600, fail=0)
+2026-07-18 15:10:44,601 INFO valueinvestor.scorer_improver.data_prep   Saved adjusted checkpoint: 5482823 rows
+2026-07-18 15:10:51,179 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 2700/5542 tasks (ok=2700, fail=0)
+2026-07-18 15:10:58,228 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 2800/5542 tasks (ok=2800, fail=0)
+2026-07-18 15:10:59,026 INFO valueinvestor.scorer_improver.data_prep   Saved adjusted checkpoint: 5655039 rows
+2026-07-18 15:11:06,081 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 2900/5542 tasks (ok=2900, fail=0)
+2026-07-18 15:11:14,156 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 3000/5542 tasks (ok=3000, fail=0)
+2026-07-18 15:11:15,062 INFO valueinvestor.scorer_improver.data_prep   Saved adjusted checkpoint: 5946873 rows
+2026-07-18 15:11:23,876 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 3100/5542 tasks (ok=3100, fail=0)
+2026-07-18 15:11:33,206 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 3200/5542 tasks (ok=3200, fail=0)
+2026-07-18 15:11:34,466 INFO valueinvestor.scorer_improver.data_prep   Saved adjusted checkpoint: 6431396 rows
+2026-07-18 15:11:43,365 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 3300/5542 tasks (ok=3300, fail=0)
+2026-07-18 15:11:54,149 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 3400/5542 tasks (ok=3400, fail=0)
+2026-07-18 15:11:55,947 INFO valueinvestor.scorer_improver.data_prep   Saved adjusted checkpoint: 6916819 rows
+2026-07-18 15:12:04,756 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 3500/5542 tasks (ok=3500, fail=0)
+2026-07-18 15:12:11,461 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 3600/5542 tasks (ok=3600, fail=0)
+2026-07-18 15:12:12,597 INFO valueinvestor.scorer_improver.data_prep   Saved adjusted checkpoint: 7395749 rows
+2026-07-18 15:12:18,234 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 3700/5542 tasks (ok=3700, fail=0)
+2026-07-18 15:12:25,050 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 3800/5542 tasks (ok=3800, fail=0)
+2026-07-18 15:12:26,298 INFO valueinvestor.scorer_improver.data_prep   Saved adjusted checkpoint: 7823563 rows
+2026-07-18 15:12:32,381 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 3900/5542 tasks (ok=3900, fail=0)
+2026-07-18 15:12:38,843 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 4000/5542 tasks (ok=4000, fail=0)
+2026-07-18 15:12:40,086 INFO valueinvestor.scorer_improver.data_prep   Saved adjusted checkpoint: 8221408 rows
+2026-07-18 15:12:45,864 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 4100/5542 tasks (ok=4100, fail=0)
+2026-07-18 15:12:51,775 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 4200/5542 tasks (ok=4200, fail=0)
+2026-07-18 15:12:53,051 INFO valueinvestor.scorer_improver.data_prep   Saved adjusted checkpoint: 8555086 rows
+2026-07-18 15:12:58,775 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 4300/5542 tasks (ok=4300, fail=0)
+2026-07-18 15:13:04,384 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 4400/5542 tasks (ok=4400, fail=0)
+2026-07-18 15:13:05,722 INFO valueinvestor.scorer_improver.data_prep   Saved adjusted checkpoint: 8973240 rows
+2026-07-18 15:13:11,783 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 4500/5542 tasks (ok=4500, fail=0)
+2026-07-18 15:13:17,960 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 4600/5542 tasks (ok=4600, fail=0)
+2026-07-18 15:13:19,358 INFO valueinvestor.scorer_improver.data_prep   Saved adjusted checkpoint: 9317025 rows
+2026-07-18 15:13:24,597 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 4700/5542 tasks (ok=4700, fail=0)
+2026-07-18 15:13:30,501 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 4800/5542 tasks (ok=4800, fail=0)
+2026-07-18 15:13:31,917 INFO valueinvestor.scorer_improver.data_prep   Saved adjusted checkpoint: 9584258 rows
+2026-07-18 15:13:38,026 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 4900/5542 tasks (ok=4900, fail=0)
+2026-07-18 15:13:44,229 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 5000/5542 tasks (ok=5000, fail=0)
+2026-07-18 15:13:45,691 INFO valueinvestor.scorer_improver.data_prep   Saved adjusted checkpoint: 9814456 rows
+2026-07-18 15:13:51,406 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 5100/5542 tasks (ok=5100, fail=0)
+2026-07-18 15:13:56,982 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 5200/5542 tasks (ok=5200, fail=0)
+2026-07-18 15:13:58,467 INFO valueinvestor.scorer_improver.data_prep   Saved adjusted checkpoint: 10016323 rows
+2026-07-18 15:14:05,562 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 5300/5542 tasks (ok=5300, fail=0)
+2026-07-18 15:14:12,582 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 5400/5542 tasks (ok=5400, fail=0)
+2026-07-18 15:14:14,072 INFO valueinvestor.scorer_improver.data_prep   Saved adjusted checkpoint: 10154213 rows
+2026-07-18 15:14:21,171 INFO valueinvestor.scorer_improver.data_prep   A-share adjusted: 5500/5542 tasks (ok=5500, fail=0)
+2026-07-18 15:14:26,397 INFO valueinvestor.scorer_improver.data_prep A-share adjusted prices: 10297994 rows for 5542 stocks
+2026-07-18 15:14:27,866 INFO root Adjusted backfill complete path=data/trainer/ashare_adjusted_prices.parquet rows=10297994 tickers=5542 min=2016-05-25 max=2026-07-17

@@ -31,6 +31,7 @@ from valueinvestor.scorer_improver.ground_truth import (
     annualize_financial_feature_frame,
     asof_feature_frame,
     ensure_current_ground_truth_ready,
+    load_training_price_history,
 )
 from valueinvestor.scorer_improver.promotion_gate import (
     HoldoutGateConfig,
@@ -42,7 +43,7 @@ from valueinvestor.scorer_improver.data_prep import TRAINER_DIR
 from valueinvestor.screener.ml_ranker import (
     BASE_FIELDS,
     CROSS_SECTIONAL_INTERACTION_FEATURES,
-    CROSS_SECTIONAL_FEATURES,
+    CROSS_SECTIONAL_SOURCE_FEATURES,
     DEFAULT_MODEL_PATH,
     ONE_WEEK_MODEL_PATH,
     HORIZONS as FEATURE_HORIZONS,
@@ -57,6 +58,7 @@ from valueinvestor.screener.ml_ranker import (
     _model_from_payload,
     expected_feature_names,
     feature_matrix_from_values,
+    practical_factor_feature_names,
     predict_lightgbm_model,
     stable_factor_feature_names,
 )
@@ -305,6 +307,8 @@ SIX_MONTH_ANCHOR_BLEND_WEIGHTS = (
 SIX_MONTH_GATE_ANCHOR_BLEND_LIMIT = 3
 SIX_MONTH_GATE_ANCHOR_MODEL_LIMIT = 3
 FEATURE_SET_ALIASES = {
+    "practical_factor": "practical_factor",
+    "practical_factors": "practical_factor",
     "stable_factor": "stable_factor",
     "stable_factors": "stable_factor",
     "core": "core",
@@ -316,12 +320,16 @@ FEATURE_SET_ALIASES = {
     "cs_interactions": "cross_sectional_interactions",
     "cs": "cross_sectional",
 }
-SIX_MONTH_STABLE_FACTOR_DIRECTIONS = {
+SIX_MONTH_CONSTRAINED_FACTOR_DIRECTIONS = {
     "cs_rank_value_score": 1.0,
     "cs_rank_quality_score": -1.0,
     "cs_rank_roe": -1.0,
     "cs_rank_roa": -1.0,
     "cs_rank_pb_ratio": -1.0,
+    "cs_rank_price_volatility_63d": -1.0,
+    "cs_rank_ocf_yield": 1.0,
+    "cs_rank_gross_profit_market_cap": 1.0,
+    "cs_rank_ps_ratio": -1.0,
 }
 PRIOR_STRATEGY_ALIASES = {
     "no_ticker_priors": "no_ticker_priors",
@@ -370,7 +378,7 @@ TARGET_ALIASES = {
     "mean": "target_rank_mean",
 }
 SNAPSHOT_MANIFEST_SCHEMA_VERSION = "ml-snapshot-manifest-v1"
-FEATURE_POLICY_VERSION = "pit-application-universe-v6-annual-financials"
+FEATURE_POLICY_VERSION = "pit-application-universe-v7-adjusted-returns"
 PRIOR_COLUMN_PREFIX = "_prior_"
 SCORER_SOURCE_PATH = Path("src/valueinvestor/screener/scorer.py")
 GROUND_TRUTH_SOURCE_PATH = Path("src/valueinvestor/scorer_improver/ground_truth.py")
@@ -788,6 +796,7 @@ def _snapshot_source_fingerprints(
     if snapshot_frequency == "daily":
         paths = {
             "ashare_prices": TRAINER_DIR / "ashare_prices.parquet",
+            "ashare_adjusted_prices": TRAINER_DIR / "ashare_adjusted_prices.parquet",
             "hkshare_prices": TRAINER_DIR / "hkshare_prices.parquet",
             "valuations": TRAINER_DIR / "valuations.parquet",
             "financials": TRAINER_DIR / "financials.parquet",
@@ -1686,40 +1695,27 @@ def prepare_ml_training_snapshots(
 
 
 def _load_training_prices(*, require_ashare: bool = True) -> pd.DataFrame:
-    price_files = [
-        ("ashare", TRAINER_DIR / "ashare_prices.parquet"),
-        ("hkshare", TRAINER_DIR / "hkshare_prices.parquet"),
-    ]
-    frames = []
-    missing = []
-    for label, path in price_files:
-        if not path.exists():
-            missing.append(label)
-            continue
-        frame = pd.read_parquet(str(path))
-        if frame.empty:
-            continue
-        frame = frame.loc[:, [col for col in ("ticker", "date", "close") if col in frame.columns]]
-        frame["date"] = pd.to_datetime(frame["date"]).dt.date
-        frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
-        frame = frame.dropna(subset=["ticker", "date", "close"])
-        frame = frame[frame["close"] > 0]
-        frames.append(frame)
-
-    if require_ashare and "ashare" in missing:
+    ashare_path = TRAINER_DIR / "ashare_prices.parquet"
+    if require_ashare and not ashare_path.exists():
         raise FileNotFoundError(
             "Daily A-share price data is missing at data/trainer/ashare_prices.parquet. "
             "Run `valueinvestor improve-scorer --fetch-only` to populate it before "
             "daily ML training."
         )
-    if not frames:
-        raise FileNotFoundError("No daily price parquet files found in data/trainer")
-
-    return pd.concat(frames, ignore_index=True).drop_duplicates(["ticker", "date"])
+    prices = load_training_price_history(require_adjusted_ashare=require_ashare)
+    prices = prices.loc[:, ["ticker", "date", "close", "adjusted_close"]].copy()
+    prices["date"] = pd.to_datetime(prices["date"]).dt.date
+    for column in ("close", "adjusted_close"):
+        prices[column] = pd.to_numeric(prices[column], errors="coerce")
+    prices = prices.dropna(subset=["ticker", "date", "close", "adjusted_close"])
+    prices = prices[(prices["close"] > 0) & (prices["adjusted_close"] > 0)]
+    return prices.drop_duplicates(["ticker", "date"])
 
 
 def _short_horizon_price_feature_frame(prices: pd.DataFrame) -> pd.DataFrame:
-    history = prices.loc[:, ["ticker", "date", "close"]].copy()
+    price_column = "adjusted_close" if "adjusted_close" in prices.columns else "close"
+    history = prices.loc[:, ["ticker", "date", price_column]].copy()
+    history = history.rename(columns={price_column: "close"})
     history["ticker"] = history["ticker"].astype(str)
     history["date"] = pd.to_datetime(history["date"], errors="coerce")
     history["close"] = pd.to_numeric(history["close"], errors="coerce")
@@ -1859,6 +1855,7 @@ def build_daily_ml_training_snapshots(
             prices,
             horizon_days=horizon_days,
             column_name=col_name,
+            price_column="adjusted_close",
         )
         if returns.empty:
             raise RuntimeError(f"No forward returns computed for {col_name}")
@@ -2245,7 +2242,7 @@ def build_feature_matrix(
         if name.startswith("market_cs_rank_")
     )
     cross_sectional_groups = None
-    for source in CROSS_SECTIONAL_FEATURES:
+    for source in CROSS_SECTIONAL_SOURCE_FEATURES:
         if source not in needed_cross_sectional_sources:
             continue
         if cross_sectional_groups is None:
@@ -2567,14 +2564,18 @@ def _fit_ridge(
     return _fit_ridge_numpy(X, y, ridge_lambda, sample_weight=sample_weight)
 
 
-def _stable_factor_directions(feature_names: Sequence[str]) -> np.ndarray:
-    expected = stable_factor_feature_names()
-    if list(feature_names) != expected:
+def _constrained_factor_directions(feature_names: Sequence[str]) -> np.ndarray:
+    selected = list(feature_names)
+    supported = (
+        stable_factor_feature_names(),
+        practical_factor_feature_names(),
+    )
+    if selected not in supported:
         raise ValueError(
-            "constrained factor ridge requires the stable_factor feature set"
+            "constrained factor ridge requires a supported constrained factor feature set"
         )
     return np.asarray(
-        [SIX_MONTH_STABLE_FACTOR_DIRECTIONS[name] for name in expected],
+        [SIX_MONTH_CONSTRAINED_FACTOR_DIRECTIONS[name] for name in selected],
         dtype="float64",
     )
 
@@ -3560,7 +3561,7 @@ def _fit_candidate_model(
             target[valid],
             ridge_lambda=ridge_lambda,
             backend=backend,
-            directions=_stable_factor_directions(feature_names),
+            directions=_constrained_factor_directions(feature_names),
             sample_weight=(
                 sample_weight[valid] if sample_weight is not None else None
             ),
@@ -7985,6 +7986,7 @@ def train_ml_ranker(
             raise ValueError("constrained-factor-ridge is only supported for 6m training")
         candidate_feature_sets = (
             ("stable_factor", stable_factor_feature_names()),
+            ("practical_factor", practical_factor_feature_names()),
         )
     if candidate_lambda_filter is not None:
         candidate_lambdas = candidate_lambda_filter
@@ -8707,7 +8709,7 @@ def train_ml_ranker(
                                             target[valid],
                                             ridge_lambda=candidate_lambda,
                                             backend=candidate_backend,
-                                            directions=_stable_factor_directions(
+                                            directions=_constrained_factor_directions(
                                                 feature_names
                                             ),
                                             sample_weight=(

@@ -1,0 +1,8 @@
+2026-07-18 15:16:35,166 WARNING valueinvestor.scorer_improver.ground_truth Adjusted A-share price coverage is 99.7%
+2026-07-18 15:18:40,941 INFO valueinvestor.scorer_improver.ml_trainer Saved daily ML training snapshots -> data/trainer/ml_training_daily_snapshots.parquet (1214912 rows, 1979 snapshot dates)
+2026-07-18 15:18:41,236 INFO root Adjusted daily snapshot rebuild complete rows=1214912 snapshots=1979 min=2016-09-30 max=2025-07-07
+2026-07-18 15:19:06,877 WARNING valueinvestor.scorer_improver.ground_truth Adjusted A-share price coverage is 99.7%
+2026-07-18 15:19:16,077 INFO valueinvestor.scorer_improver.ml_trainer Resolved auto daily ML training end date -> 2026-01-09
+2026-07-18 15:19:18,235 WARNING valueinvestor.scorer_improver.ground_truth Adjusted A-share price coverage is 99.7%
+2026-07-18 15:21:29,695 INFO valueinvestor.scorer_improver.ml_trainer Saved daily ML training snapshots -> data/trainer/ml_training_daily_snapshots.parquet (1294372 rows, 2109 snapshot dates)
+2026-07-18 15:21:29,998 INFO root Latest adjusted snapshot rebuild complete rows=1294372 snapshots=2109 min=2016-09-30 max=2026-01-09

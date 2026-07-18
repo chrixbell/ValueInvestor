@@ -1,7 +1,7 @@
 {
-  "created_at": "2026-07-15T00:55:43.837825",
+  "created_at": "2026-07-18T15:21:29.604616",
   "end_date": "2026-01-09",
-  "feature_policy_version": "pit-application-universe-v6-annual-financials",
+  "feature_policy_version": "pit-application-universe-v7-adjusted-returns",
   "feature_source_profile": {
     "financials": {
       "date_columns": {
@@ -39,9 +39,10 @@
   "snapshot_count": 2109,
   "snapshot_frequency": "daily",
   "source_fingerprints": {
+    "ashare_adjusted_prices": "ashare_adjusted_prices.parquet:28777207:1784358867113617473",
     "ashare_prices": "ashare_prices.parquet:140093505:1783850796586565318",
     "financials": "financials.parquet:29690681:1783952815977159111",
-    "ground_truth_code": "ground_truth.py:30628:1784047924932200360",
+    "ground_truth_code": "ground_truth.py:32413:1784357921606755466",
     "hkshare_prices": "hkshare_prices.parquet:70581771:1783851331751039293",
     "scorer": "scorer.py:25675:1779011070403751436",
     "valuations": "valuations.parquet:17846957:1783952912035123227"

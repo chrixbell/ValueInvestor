@@ -35,6 +35,7 @@ TRAINER_DIR = Path("data/trainer")
 TRAINER_DB = Path("data/trainer.db")
 
 _ASHARE_PRICES_FILE = TRAINER_DIR / "ashare_prices.parquet"
+_ASHARE_ADJUSTED_PRICES_FILE = TRAINER_DIR / "ashare_adjusted_prices.parquet"
 _HKSHARE_PRICES_FILE = TRAINER_DIR / "hkshare_prices.parquet"
 _VALUATIONS_FILE = TRAINER_DIR / "valuations.parquet"
 _FINANCIALS_FILE = TRAINER_DIR / "financials.parquet"
@@ -422,6 +423,188 @@ def _fetch_ashare_prices(
     return result
 
 
+def _fetch_ashare_adjusted_prices(
+    companies: List[Company],
+    start_date: str,
+    end_date: str,
+) -> pd.DataFrame:
+    """Fetch forward-adjusted A-share closes used by return-based features.
+
+    QFQ history is re-anchored when a corporate action occurs.  A ticker that
+    needs either end of its cached range refreshed is therefore fetched over
+    the complete requested period and replaces its prior cache rows.
+    """
+    import akshare as ak
+
+    total = len(companies) if _MAX_STOCKS == 0 else min(_MAX_STOCKS, len(companies))
+    companies = companies[:total]
+
+    existing_df = pd.DataFrame()
+    ticker_ranges: Dict[str, Tuple[str, str]] = {}
+    if _ASHARE_ADJUSTED_PRICES_FILE.exists():
+        try:
+            existing_df = pd.read_parquet(str(_ASHARE_ADJUSTED_PRICES_FILE))
+            ticker_ranges = _get_ticker_date_ranges(existing_df)
+            logger.info(
+                "A-share adjusted existing data: %d tickers, %d rows",
+                len(ticker_ranges),
+                len(existing_df),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not read existing A-share adjusted prices: %s; starting fresh",
+                exc,
+            )
+
+    req_start = _parse_yyyymmdd(start_date)
+    req_end = _parse_yyyymmdd(end_date)
+    fetch_tasks: List[Tuple[Company, str, str]] = []
+    for company in companies:
+        ticker = company.ticker
+        if ticker not in ticker_ranges:
+            fetch_tasks.append((company, start_date, end_date))
+            continue
+        ex_min = _parse_yyyymmdd(ticker_ranges[ticker][0])
+        ex_max = _parse_yyyymmdd(ticker_ranges[ticker][1])
+        if (ex_min - req_start).days > 30 or (req_end - ex_max).days > 7:
+            fetch_tasks.append((company, start_date, end_date))
+
+    if not fetch_tasks:
+        logger.info(
+            "A-share adjusted prices fully up to date (%d tickers). No fetch needed.",
+            len(ticker_ranges),
+        )
+        return existing_df
+
+    logger.info(
+        "A-share adjusted differential fetch: %d tasks across %d stocks (workers=%d) ...",
+        len(fetch_tasks),
+        total,
+        _TENCENT_WORKERS,
+    )
+    counter: Dict[str, int] = {"done": 0, "ok": 0, "fail": 0}
+    new_frames: list[pd.DataFrame] = []
+    frames_lock = threading.Lock()
+
+    def _combine_frames() -> pd.DataFrame:
+        refreshed_tickers = {
+            str(frame["ticker"].iloc[0])
+            for frame in new_frames
+            if not frame.empty
+        }
+        frames: list[pd.DataFrame] = []
+        if not existing_df.empty:
+            frames.append(
+                existing_df[
+                    ~existing_df["ticker"].astype(str).isin(refreshed_tickers)
+                ]
+            )
+        frames.extend(new_frames)
+        combined = pd.concat(frames, ignore_index=True)
+        return combined.drop_duplicates(["ticker", "date"], keep="last")
+
+    def _fetch_one(task: Tuple[Company, str, str]) -> Optional[pd.DataFrame]:
+        company, t_start, t_end = task
+        ticker = company.ticker
+        symbol = f"{_exchange_prefix(ticker)}{ticker}"
+        frame = pd.DataFrame()
+        for attempt in range(_FINANCIAL_FETCH_RETRIES):
+            try:
+                time.sleep(_TENCENT_DELAY)
+                frame = ak.stock_zh_a_daily(
+                    symbol=symbol,
+                    start_date=t_start,
+                    end_date=t_end,
+                    adjust="qfq",
+                )
+                if frame is not None and not frame.empty:
+                    frame = frame.rename(columns={"close": "adjusted_close"})
+                    break
+            except Exception:
+                if attempt + 1 < _FINANCIAL_FETCH_RETRIES:
+                    time.sleep(0.2 * (attempt + 1))
+        if (frame is None or frame.empty) and symbol.startswith("bj"):
+            try:
+                frame = ak.stock_zh_a_hist(
+                    symbol=ticker,
+                    period="daily",
+                    start_date=t_start,
+                    end_date=t_end,
+                    adjust="qfq",
+                    timeout=20,
+                )
+                frame = frame.rename(
+                    columns={"日期": "date", "收盘": "adjusted_close"}
+                )
+            except Exception:
+                frame = pd.DataFrame()
+        try:
+            if frame is None or frame.empty:
+                time.sleep(_TENCENT_DELAY)
+                frame = ak.stock_zh_a_hist_tx(
+                    symbol=symbol,
+                    start_date=t_start,
+                    end_date=t_end,
+                    adjust="qfq",
+                )
+                frame = frame.rename(columns={"close": "adjusted_close"})
+            if frame is None or frame.empty:
+                return None
+            frame["ticker"] = ticker
+            return frame[["ticker", "date", "adjusted_close"]]
+        except Exception:
+            logger.debug(
+                "Failed adjusted A-share history for %s (%s->%s)",
+                ticker,
+                t_start,
+                t_end,
+                exc_info=True,
+            )
+            return None
+
+    def _worker(task: Tuple[Company, str, str]) -> None:
+        result = _fetch_one(task)
+        with frames_lock:
+            if result is None:
+                counter["fail"] += 1
+            else:
+                new_frames.append(result)
+                counter["ok"] += 1
+            counter["done"] += 1
+            done = counter["done"]
+        if done % 100 == 0:
+            logger.info(
+                "  A-share adjusted: %d/%d tasks (ok=%d, fail=%d)",
+                done,
+                len(fetch_tasks),
+                counter["ok"],
+                counter["fail"],
+            )
+        if done % _SAVE_INTERVAL == 0 and new_frames:
+            with frames_lock:
+                combined = _combine_frames()
+                _write_parquet_atomic(combined, _ASHARE_ADJUSTED_PRICES_FILE)
+                logger.info("  Saved adjusted checkpoint: %d rows", len(combined))
+
+    # The Sina endpoint initializes an embedded JS runtime on first use. Do that
+    # once before entering the thread pool to avoid concurrent initialization.
+    _worker(fetch_tasks[0])
+    with concurrent.futures.ThreadPoolExecutor(max_workers=_TENCENT_WORKERS) as executor:
+        list(executor.map(_worker, fetch_tasks[1:]))
+
+    if existing_df.empty and not new_frames:
+        logger.warning("No adjusted A-share price data fetched")
+        return pd.DataFrame()
+    result = _combine_frames()
+    result = result.sort_values(["ticker", "date"], kind="mergesort").reset_index(drop=True)
+    logger.info(
+        "A-share adjusted prices: %d rows for %d stocks",
+        len(result),
+        result["ticker"].nunique(),
+    )
+    return result
+
+
 # -----------------------------------------------------------------------
 # HK-share price history (yfinance — globally accessible)
 # -----------------------------------------------------------------------
@@ -522,7 +705,12 @@ def _fetch_hkshare_prices(
     def _fetch_one(task: Tuple[str, str, str]) -> None:
         ticker, t_start, t_end = task
         try:
-            hist = yf.Ticker(ticker).history(start=t_start, end=t_end)
+            hist = yf.Ticker(ticker).history(
+                start=t_start,
+                end=t_end,
+                auto_adjust=True,
+                actions=False,
+            )
             if hist is not None and not hist.empty:
                 df = hist.reset_index()
                 df = df.rename(columns={
@@ -2000,7 +2188,11 @@ def fetch_training_data(force: bool = False) -> Dict[str, Path]:
         stored_start=stored_start,
         required_start=start_date,          # covers the full 10-year window
         required_fetch_date=today.isoformat(),
-        required_files=(_ASHARE_PRICES_FILE, _HKSHARE_PRICES_FILE),
+        required_files=(
+            _ASHARE_PRICES_FILE,
+            _ASHARE_ADJUSTED_PRICES_FILE,
+            _HKSHARE_PRICES_FILE,
+        ),
     )
     if data_complete:
         logger.info(
@@ -2009,6 +2201,7 @@ def fetch_training_data(force: bool = False) -> Dict[str, Path]:
             stored_start, last_fetch, today.isoformat(),
         )
         files["ashare_prices"] = _ASHARE_PRICES_FILE
+        files["ashare_adjusted_prices"] = _ASHARE_ADJUSTED_PRICES_FILE
         files["hkshare_prices"] = _HKSHARE_PRICES_FILE
         feature_cutoff = ten_years_ago + timedelta(days=2 * 365)
         if _point_in_time_features_ready(feature_cutoff):
@@ -2042,6 +2235,25 @@ def fetch_training_data(force: bool = False) -> Dict[str, Path]:
         a_prices.to_parquet(str(_ASHARE_PRICES_FILE), index=False)
         logger.info("Saved A-share prices → %s (%d rows)", _ASHARE_PRICES_FILE, len(a_prices))
     files["ashare_prices"] = _ASHARE_PRICES_FILE
+
+    logger.info(
+        "Fetching forward-adjusted A-share closes (%s -> %s, differential) ...",
+        start_date,
+        end_date,
+    )
+    a_adjusted_prices = _fetch_ashare_adjusted_prices(
+        a_companies,
+        start_date,
+        end_date,
+    )
+    if not a_adjusted_prices.empty:
+        _write_parquet_atomic(a_adjusted_prices, _ASHARE_ADJUSTED_PRICES_FILE)
+        logger.info(
+            "Saved adjusted A-share prices -> %s (%d rows)",
+            _ASHARE_ADJUSTED_PRICES_FILE,
+            len(a_adjusted_prices),
+        )
+    files["ashare_adjusted_prices"] = _ASHARE_ADJUSTED_PRICES_FILE
 
     # Fetch HK-share prices (differential)
     logger.info("Fetching HK-share price history (%s → %s, differential) …", start_date, end_date)

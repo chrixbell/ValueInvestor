@@ -181,8 +181,17 @@ def test_hk_price_refresh_keeps_tickers_from_existing_history(
         def __init__(self, ticker: str) -> None:
             self.ticker = ticker
 
-        def history(self, *, start: str, end: str) -> pd.DataFrame:
+        def history(
+            self,
+            *,
+            start: str,
+            end: str,
+            auto_adjust: bool,
+            actions: bool,
+        ) -> pd.DataFrame:
             del start, end
+            assert auto_adjust is True
+            assert actions is False
             calls.append(self.ticker)
             return pd.DataFrame(
                 {
@@ -257,6 +266,130 @@ def test_six_month_target_is_182_calendar_days() -> None:
     ).set_index("date")
 
     assert result.loc[pd.Timestamp("2024-01-01").date(), "forward_return_6m"] == pytest.approx(2.0)
+
+
+def test_forward_returns_can_use_adjusted_close() -> None:
+    from valueinvestor.scorer_improver.ground_truth import _compute_forward_returns
+
+    prices = pd.DataFrame({
+        "ticker": ["AAA", "AAA"],
+        "date": ["2024-01-01", "2024-07-01"],
+        "close": [100.0, 50.0],
+        "adjusted_close": [50.0, 50.0],
+    })
+
+    result = _compute_forward_returns(
+        prices,
+        horizon_days=182,
+        price_column="adjusted_close",
+    )
+
+    assert result["forward_return_6m"].iloc[0] == pytest.approx(0.0)
+
+
+def test_short_horizon_features_use_adjusted_close() -> None:
+    from valueinvestor.scorer_improver.ml_trainer import (
+        _short_horizon_price_feature_frame,
+    )
+
+    dates = pd.bdate_range("2024-01-01", periods=70)
+    raw_close = np.full(len(dates), 100.0)
+    raw_close[35:] = 50.0
+    prices = pd.DataFrame({
+        "ticker": "AAA",
+        "date": dates,
+        "close": raw_close,
+        "adjusted_close": 50.0,
+    })
+
+    features = _short_horizon_price_feature_frame(prices)
+
+    assert features["price_return_63d"].iloc[-1] == pytest.approx(0.0)
+    assert features["price_volatility_63d"].iloc[-1] == pytest.approx(0.0)
+
+
+def test_fetch_ashare_adjusted_prices_requests_qfq(monkeypatch, tmp_path: Path) -> None:
+    from valueinvestor.data.models import Company, Market
+    from valueinvestor.scorer_improver import data_prep
+
+    calls: list[dict[str, object]] = []
+
+    def stock_zh_a_hist_tx(**kwargs):
+        calls.append(kwargs)
+        return pd.DataFrame({
+            "date": ["2024-01-02"],
+            "close": [12.5],
+        })
+
+    monkeypatch.setattr(
+        data_prep,
+        "_ASHARE_ADJUSTED_PRICES_FILE",
+        tmp_path / "adjusted.parquet",
+    )
+    monkeypatch.setattr(data_prep, "_TENCENT_WORKERS", 1)
+    monkeypatch.setattr(data_prep, "_TENCENT_DELAY", 0.0)
+    with patch.dict("sys.modules", {"akshare": SimpleNamespace(stock_zh_a_hist_tx=stock_zh_a_hist_tx)}):
+        result = data_prep._fetch_ashare_adjusted_prices(
+            [Company(ticker="430001", name="Test", market=Market.A_SHARE)],
+            "20240101",
+            "20240131",
+        )
+
+    assert calls == [{
+        "symbol": "bj430001",
+        "start_date": "20240101",
+        "end_date": "20240131",
+        "adjust": "qfq",
+    }]
+    assert result.to_dict("records") == [{
+        "ticker": "430001",
+        "date": "2024-01-02",
+        "adjusted_close": 12.5,
+    }]
+
+
+def test_fetch_ashare_adjusted_prices_replaces_stale_qfq_history(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from valueinvestor.data.models import Company, Market
+    from valueinvestor.scorer_improver import data_prep
+
+    prices_path = tmp_path / "adjusted.parquet"
+    pd.DataFrame({
+        "ticker": ["000001", "000001"],
+        "date": ["2024-01-01", "2024-01-02"],
+        "adjusted_close": [10.0, 11.0],
+    }).to_parquet(prices_path, index=False)
+    calls: list[dict[str, object]] = []
+
+    def stock_zh_a_daily(**kwargs):
+        calls.append(kwargs)
+        return pd.DataFrame({
+            "date": ["2024-01-01", "2024-01-20"],
+            "close": [5.0, 10.0],
+        })
+
+    monkeypatch.setattr(data_prep, "_ASHARE_ADJUSTED_PRICES_FILE", prices_path)
+    monkeypatch.setattr(data_prep, "_TENCENT_WORKERS", 1)
+    monkeypatch.setattr(data_prep, "_TENCENT_DELAY", 0.0)
+    with patch.dict("sys.modules", {"akshare": SimpleNamespace(stock_zh_a_daily=stock_zh_a_daily)}):
+        result = data_prep._fetch_ashare_adjusted_prices(
+            [Company(ticker="000001", name="Test", market=Market.A_SHARE)],
+            "20240101",
+            "20240120",
+        )
+
+    assert calls == [{
+        "symbol": "sz000001",
+        "start_date": "20240101",
+        "end_date": "20240120",
+        "adjust": "qfq",
+    }]
+    assert result.to_dict("records") == [
+        {"ticker": "000001", "date": "2024-01-01", "adjusted_close": 5.0},
+        {"ticker": "000001", "date": "2024-01-20", "adjusted_close": 10.0},
+    ]
 
 
 def test_application_universe_mask_matches_production_filters() -> None:
@@ -1014,11 +1147,13 @@ class TestAgentHelpers:
             clear_model_cache,
             expected_feature_names,
             load_model,
+            practical_factor_feature_names,
             stable_factor_feature_names,
         )
 
         schemas = (
             stable_factor_feature_names(),
+            practical_factor_feature_names(),
             expected_feature_names(
                 include_short_horizon=True,
                 include_interactions=True,
@@ -1189,6 +1324,48 @@ class TestAgentHelpers:
 
         assert original.tolist() == pytest.approx([-0.25, -0.25, 0.5])
         assert [shuffled_by_ticker[ticker] for ticker in frame["ticker"]] == pytest.approx(original)
+
+    def test_practical_factor_features_match_trainer_and_runtime(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import _runtime_feature_parity
+        from valueinvestor.screener.ml_ranker import (
+            MODEL_SCHEMA_VERSION,
+            practical_factor_feature_names,
+        )
+
+        snapshots = pd.DataFrame(
+            {
+                "ticker": ["AAA", "BBB", "CCC"],
+                "snapshot_date": [pd.Timestamp("2025-01-31").date()] * 3,
+                "market_cap_rmb": [100.0, 200.0, 300.0],
+                "revenue": [50.0, 80.0, 150.0],
+                "operating_cash_flow": [5.0, 30.0, 15.0],
+                "gross_margin": [0.20, 0.40, 0.30],
+                "value_score": [30.0, 10.0, 20.0],
+                "roe": [0.10, 0.30, 0.20],
+                "ps_ratio": [1.0, 3.0, 2.0],
+                "price_volatility_63d": [0.30, 0.10, 0.20],
+            }
+        )
+        feature_names = practical_factor_feature_names()
+        payload = {
+            "schema_version": MODEL_SCHEMA_VERSION,
+            "feature_names": feature_names,
+            "clip_low": [-1.0] * len(feature_names),
+            "clip_high": [1.0] * len(feature_names),
+            "mean": [0.0] * len(feature_names),
+            "scale": [1.0] * len(feature_names),
+            "coef": [1.0] * len(feature_names),
+            "intercept": 0.0,
+            "ticker_priors": {},
+            "metadata": {"target_horizon": "6m"},
+        }
+
+        parity = _runtime_feature_parity(snapshots, payload)
+
+        assert parity["matched"] is True
+        assert parity["features"] == 6
+        assert parity["max_abs_error"] == pytest.approx(0.0)
+        assert parity["prediction_max_abs_error"] == pytest.approx(0.0)
 
     def test_ml_ranker_application_blend_matches_offline_and_runtime(
         self,
@@ -5480,6 +5657,16 @@ class TestAgentHelpers:
         assert coef[2] <= 0.0
         assert coef[-1] == 0.0
         assert stats.spearmanr(X @ coef[:-1], target).statistic > 0.99
+
+    def test_practical_factor_schema_has_expected_constraints(self) -> None:
+        from valueinvestor.scorer_improver.ml_trainer import (
+            _constrained_factor_directions,
+        )
+        from valueinvestor.screener.ml_ranker import practical_factor_feature_names
+
+        directions = _constrained_factor_directions(practical_factor_feature_names())
+
+        assert directions.tolist() == [1.0, -1.0, -1.0, 1.0, 1.0, -1.0]
 
     def test_mlx_constrained_factor_ridge_matches_numpy_when_available(self) -> None:
         pytest.importorskip("mlx.core")
