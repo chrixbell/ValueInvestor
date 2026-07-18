@@ -4043,17 +4043,69 @@ def _payload_temporal_member_payloads(
     return output
 
 
+def _payload_child_payloads(payload: Mapping[str, object]) -> list[Mapping[str, object]]:
+    children: list[Mapping[str, object]] = []
+    for member_key in (
+        "payload_members",
+        "rank_payload_members",
+        "market_payload_members",
+        "temporal_payload_members",
+    ):
+        members = payload.get(member_key)
+        if not isinstance(members, list):
+            continue
+        children.extend(
+            member_payload
+            for member in members
+            if isinstance(member, Mapping)
+            and isinstance((member_payload := member.get("payload")), Mapping)
+        )
+    conditional_blend = payload.get("conditional_blend")
+    if isinstance(conditional_blend, Mapping):
+        children.extend(
+            child
+            for key in ("base_payload", "candidate_payload")
+            if isinstance((child := conditional_blend.get(key)), Mapping)
+        )
+    return children
+
+
+def _payload_runtime_includes_evaluation_labels(payload: Mapping[str, object]) -> bool:
+    """Return whether a runtime payload was refit using its evaluation period."""
+    metadata = payload.get("metadata")
+    provenance_sources = (payload, metadata) if isinstance(metadata, Mapping) else (payload,)
+    for provenance in provenance_sources:
+        if provenance.get("application_refit") is True:
+            return True
+        deployment_refit = provenance.get("deployment_refit")
+        if deployment_refit is True or isinstance(deployment_refit, Mapping):
+            return True
+        evaluation_protocol = str(provenance.get("evaluation_protocol", "")).lower()
+        promotion_status = str(provenance.get("promotion_status", "")).lower()
+        if "full_refit" in evaluation_protocol:
+            return True
+        if "full_data_refit" in promotion_status or "full_refit" in promotion_status:
+            return True
+    return any(
+        _payload_runtime_includes_evaluation_labels(child)
+        for child in _payload_child_payloads(payload)
+    )
+
+
 def _payload_cached_metrics_are_safe(payload: Mapping[str, object]) -> bool:
-    """Return whether top-level cached metrics describe the runtime payload."""
+    """Return whether top-level cached metrics are valid frozen evidence."""
+    if _payload_runtime_includes_evaluation_labels(payload):
+        return False
     members = payload.get("temporal_payload_members")
-    if not isinstance(members, list):
-        return True
-    valid_members = [
-        member
-        for member in members
-        if isinstance(member, Mapping) and isinstance(member.get("payload"), Mapping)
-    ]
-    return len(valid_members) != 1
+    if isinstance(members, list):
+        valid_members = [
+            member
+            for member in members
+            if isinstance(member, Mapping) and isinstance(member.get("payload"), Mapping)
+        ]
+        if len(valid_members) == 1:
+            return False
+    return all(_payload_cached_metrics_are_safe(child) for child in _payload_child_payloads(payload))
 
 
 def _payload_member_payloads(payload: Mapping[str, object]) -> list[tuple[float, Mapping[str, object]]]:
@@ -4845,6 +4897,7 @@ def _payload_has_market_models(payload: Mapping[str, object]) -> bool:
 
 
 RUNTIME_METADATA_KEYS = {
+    "application_refit",
     "application_blend_candidate_weight",
     "application_blend_scale",
     "application_factor_components",
@@ -4872,7 +4925,9 @@ RUNTIME_METADATA_KEYS = {
     "candidate_ridge_lambdas",
     "candidate_targets",
     "conditional_blend_routes",
+    "deployment_refit",
     "ensemble_size",
+    "evaluation_protocol",
     "feature_set",
     "final_rho_improvement",
     "full_eval_candidate_limit",
@@ -4888,8 +4943,12 @@ RUNTIME_METADATA_KEYS = {
     "n_snapshots",
     "n_training_rows",
     "prior_strategy",
+    "promotion_gate_manifest",
+    "promotion_incumbent_type",
+    "promotion_status",
     "ridge_lambda",
     "runtime_feature_parity",
+    "strict_outer_gate",
     "target",
     "target_horizon",
     "temporal_anchor_backend",
@@ -7466,6 +7525,12 @@ def train_ml_ranker(
     incumbent_type = "hand_scorer"
     if output_model_path.exists():
         incumbent_payload = json.loads(output_model_path.read_text(encoding="utf-8"))
+        if _payload_runtime_includes_evaluation_labels(incumbent_payload):
+            raise RuntimeError(
+                "Existing output model was refit using evaluation-period labels and "
+                "cannot be a promotion-gate incumbent. Use a fresh output_model_path "
+                f"instead of {output_model_path}."
+            )
         incumbent_eval_payload = _payload_with_ticker_priors(incumbent_payload, base_priors)
         incumbent_type = "ml_ranker"
     anchor_payloads = _load_anchor_payloads(
@@ -8698,7 +8763,7 @@ def train_ml_ranker(
         if not _payload_cached_metrics_are_safe(incumbent_eval_payload):
             logger.info(
                 "ML promotion-gate ignoring cached incumbent metrics because "
-                "the runtime payload has a single temporal member"
+                "the runtime payload lacks frozen metric provenance"
             )
             return None
         metadata = incumbent_eval_payload.get("metadata")

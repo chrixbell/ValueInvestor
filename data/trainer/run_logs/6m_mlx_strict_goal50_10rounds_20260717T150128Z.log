@@ -1,0 +1,152 @@
+[2026-07-17T23:01:28+0800] starting 10-round 6m ML scorer training loop
+cwd=/Users/chrixbell/Projects/ValueInvestor
+run_offset=0
+output_model_path=data/trainer/ml_ranker_model.strict_goal50_diagnostic.json
+goal_train_rho=none goal_gate_rho=0.2607015
+current_best_before=
+{'backend': None, 'model_kind': None, 'feature_set': None, 'target': None, 'prior_strategy': None, 'cached_metrics_safe': True, 'train_rho_6m': None, 'gate_rho_6m': None}
+
+[2026-07-17T23:01:30+0800] run=1 rows=0 refit_cap=0 limit=1 model=market-ridge-recent-1095 features=cross_sectional priors=rolling-ticker-priors targets=target-rank-weighted-901 lambdas=1000 folds=4 seeds=0 backend=mlx holdout_months=24 embargo_days=197 gate_min_delta=0.00002 gate_max_degradation=0.001 gate_min_utility=0.0 promotion_min_train_rho=none promotion_min_gate_rho=none top20_excess_guard=1 anchors=none force_snapshots=no
+23:01:39 INFO     valueinvestor.scorer_improver.ml_trainer — Resolved auto daily ML training end date -> 2026-01-09
+23:01:43 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward filter: 4 folds, 6 validation months/fold
+23:01:53 INFO     valueinvestor.scorer_improver.ml_trainer — ML candidate search target=6m targets=target_rank_weighted_901 models=market_ridge_recent_1095 features=cross_sectional priors=rolling_ticker_priors lambdas=1000 full_eval_limit=1
+23:01:53 INFO     valueinvestor.scorer_improver.ml_trainer — ML strict walk-forward panel target=6m selected=1 configuration_space=1
+23:01:53 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward shortlist target=6m selected=1 sample_candidates=1 floor_candidates=1 full_eval_limit=1
+23:02:00 INFO     valueinvestor.scorer_improver.ml_trainer — MLX ridge conjugate-gradient solve using device=Device(gpu, 0) rows=425661 features=244 steps=256 elapsed=0.34s, active_memory=419.4MB, peak_memory=427.2MB
+23:02:40 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward accepted target=target_rank_weighted_901 lambda=1000 model=market_ridge_recent_1095 features=cross_sectional priors=rolling_ticker_priors mean_deltas={'1w': 0.011311, '1m': 0.073377, '3m': 0.079459, '6m': 0.115703} median_deltas={'1w': 0.011742, '1m': 0.083907, '3m': 0.087456, '6m': 0.144561} min_deltas={'1w': -0.022365, '1m': 0.004749, '3m': -0.015346, '6m': -0.009681}
+23:02:55 INFO     valueinvestor.scorer_improver.ml_trainer — ML full-eval refit target=target_rank_weighted_901 lambda=1000 backend=mlx model=market_ridge_recent_1095 features=cross_sectional priors=rolling_ticker_priors rows=838979
+23:03:09 INFO     valueinvestor.scorer_improver.ml_trainer — ML full-eval target=target_rank_weighted_901 lambda=1000 backend=mlx model=market_ridge_recent_1095 features=cross_sectional priors=rolling_ticker_priors 6m_rho=0.212047 improvement=252.74%
+23:03:09 INFO     valueinvestor.scorer_improver.ml_trainer — ML promotion-gate shortlist target=6m selected=1 full_eval_candidates=1
+23:03:11 INFO     valueinvestor.scorer_improver.ml_trainer — ML promotion-gate attempt=1 target=target_rank_weighted_901 lambda=1000 backend=mlx model=market_ridge_recent_1095 features=cross_sectional blend=1 market_blend=none recent_start=none recent_market=none recent_segment=none priors=rolling_ticker_priors train_6m_rho=0.212047 anchor=none gate_6m_rho=0.075563 delta=+0.083019 utility=+0.060165 accepted=True reason=accepted
+23:03:11 INFO     valueinvestor.scorer_improver.ml_trainer — Saved ML ranker model -> data/trainer/ml_ranker_model.strict_goal50_diagnostic.json (selected gate attempt 1)
+✓ ML scorer trained with backend: mlx
+  snapshots: data/trainer/ml_training_daily_snapshots.parquet
+  model:     data/trainer/ml_ranker_model.strict_goal50_diagnostic.json
+  gate:      accepted (Δ6m=+0.083019, utility=+0.060165)
+  ρ 1w:    0.046753
+  ρ 1m:    0.024121
+  ρ 3m:    0.064117
+  ρ 6m:    0.075563
+[2026-07-17T23:03:11+0800] run=1 exit=0
+{'train_rho_6m': 0.21204714525320406, 'gate_rho_6m': 0.07556300943021553, 'cached_metrics_safe': True, 'goal_train_rho': None, 'goal_gate_rho': '0.2607015', 'goal_met': False}
+
+[2026-07-17T23:03:12+0800] run=2 rows=0 refit_cap=0 limit=1 model=market-ridge-recent-730 features=cross_sectional priors=rolling-ticker-priors targets=target-rank-weighted-901 lambdas=3000 folds=4 seeds=1 backend=mlx holdout_months=24 embargo_days=197 gate_min_delta=0.00002 gate_max_degradation=0.001 gate_min_utility=0.0 promotion_min_train_rho=none promotion_min_gate_rho=none top20_excess_guard=1 anchors=none force_snapshots=no
+23:03:22 INFO     valueinvestor.scorer_improver.ml_trainer — Resolved auto daily ML training end date -> 2026-01-09
+23:03:26 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward filter: 4 folds, 6 validation months/fold
+23:03:36 INFO     valueinvestor.scorer_improver.ml_trainer — ML candidate search target=6m targets=target_rank_weighted_901 models=market_ridge_recent_730 features=cross_sectional priors=rolling_ticker_priors lambdas=3000 full_eval_limit=1
+23:03:36 INFO     valueinvestor.scorer_improver.ml_trainer — ML strict walk-forward panel target=6m selected=1 configuration_space=1
+23:03:36 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward shortlist target=6m selected=1 sample_candidates=1 floor_candidates=1 full_eval_limit=1
+23:03:43 INFO     valueinvestor.scorer_improver.ml_trainer — MLX ridge conjugate-gradient solve using device=Device(gpu, 0) rows=425661 features=244 steps=256 elapsed=0.29s, active_memory=419.4MB, peak_memory=427.2MB
+23:04:15 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward rejected target=target_rank_weighted_901 lambda=3000 model=market_ridge_recent_730 features=cross_sectional priors=rolling_ticker_priors mean_deltas={'1w': -0.021257, '1m': -0.042074, '3m': -0.091275, '6m': -0.109789} min_deltas={'1w': -0.044684, '1m': -0.067347, '3m': -0.132776, '6m': -0.159511}: mean 6m delta below walk-forward gate
+ML scorer training failed: No ML ranker candidates passed walk-forward
+validation
+[2026-07-17T23:04:16+0800] run=2 exit=1
+{'train_rho_6m': 0.21204714525320406, 'gate_rho_6m': 0.07556300943021553, 'cached_metrics_safe': True, 'goal_train_rho': None, 'goal_gate_rho': '0.2607015', 'goal_met': False}
+
+[2026-07-17T23:04:17+0800] run=3 rows=0 refit_cap=0 limit=1 model=segment-ridge-recent-730 features=cross_sectional_interactions priors=rolling-ticker-priors targets=target-rank-weighted-802 lambdas=0.25 folds=4 seeds=2 backend=mlx holdout_months=24 embargo_days=197 gate_min_delta=0.00002 gate_max_degradation=0.001 gate_min_utility=0.0 promotion_min_train_rho=none promotion_min_gate_rho=none top20_excess_guard=1 anchors=none force_snapshots=no
+23:04:26 INFO     valueinvestor.scorer_improver.ml_trainer — Resolved auto daily ML training end date -> 2026-01-09
+23:04:30 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward filter: 4 folds, 6 validation months/fold
+23:04:40 INFO     valueinvestor.scorer_improver.ml_trainer — ML candidate search target=6m targets=target_rank_weighted_802 models=segment_ridge_recent_730 features=cross_sectional_interactions priors=rolling_ticker_priors lambdas=0.25 full_eval_limit=1
+23:04:40 INFO     valueinvestor.scorer_improver.ml_trainer — ML strict walk-forward panel target=6m selected=1 configuration_space=1
+23:04:40 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward shortlist target=6m selected=1 sample_candidates=1 floor_candidates=1 full_eval_limit=1
+23:04:48 INFO     valueinvestor.scorer_improver.ml_trainer — MLX ridge conjugate-gradient solve using device=Device(gpu, 0) rows=1164 features=252 steps=256 elapsed=0.06s, active_memory=1.7MB, peak_memory=2.5MB
+23:05:27 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward rejected target=target_rank_weighted_802 lambda=0.25 model=segment_ridge_recent_730 features=cross_sectional_interactions priors=rolling_ticker_priors mean_deltas={'1w': -0.054732, '1m': -0.096893, '3m': -0.185105, '6m': -0.241291} min_deltas={'1w': -0.092347, '1m': -0.137178, '3m': -0.275687, '6m': -0.316959}: mean 6m delta below walk-forward gate
+ML scorer training failed: No ML ranker candidates passed walk-forward
+validation
+[2026-07-17T23:05:27+0800] run=3 exit=1
+{'train_rho_6m': 0.21204714525320406, 'gate_rho_6m': 0.07556300943021553, 'cached_metrics_safe': True, 'goal_train_rho': None, 'goal_gate_rho': '0.2607015', 'goal_met': False}
+
+[2026-07-17T23:05:28+0800] run=4 rows=0 refit_cap=0 limit=1 model=segment-ridge-recent-730 features=cross_sectional_interactions priors=rolling-ticker-priors targets=target-rank-weighted-8515-market lambdas=0.3 folds=4 seeds=3 backend=mlx holdout_months=24 embargo_days=197 gate_min_delta=0.00002 gate_max_degradation=0.001 gate_min_utility=0.0 promotion_min_train_rho=none promotion_min_gate_rho=none top20_excess_guard=1 anchors=none force_snapshots=no
+23:05:38 INFO     valueinvestor.scorer_improver.ml_trainer — Resolved auto daily ML training end date -> 2026-01-09
+23:05:42 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward filter: 4 folds, 6 validation months/fold
+23:05:51 INFO     valueinvestor.scorer_improver.ml_trainer — ML candidate search target=6m targets=target_rank_weighted_8515_market models=segment_ridge_recent_730 features=cross_sectional_interactions priors=rolling_ticker_priors lambdas=0.3 full_eval_limit=1
+23:05:51 INFO     valueinvestor.scorer_improver.ml_trainer — ML strict walk-forward panel target=6m selected=1 configuration_space=1
+23:05:51 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward shortlist target=6m selected=1 sample_candidates=1 floor_candidates=1 full_eval_limit=1
+23:06:00 INFO     valueinvestor.scorer_improver.ml_trainer — MLX ridge conjugate-gradient solve using device=Device(gpu, 0) rows=1164 features=252 steps=256 elapsed=0.06s, active_memory=1.7MB, peak_memory=2.5MB
+23:06:40 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward rejected target=target_rank_weighted_8515_market lambda=0.3 model=segment_ridge_recent_730 features=cross_sectional_interactions priors=rolling_ticker_priors mean_deltas={'1w': -0.054417, '1m': -0.096717, '3m': -0.185585, '6m': -0.241805} min_deltas={'1w': -0.091672, '1m': -0.137007, '3m': -0.275174, '6m': -0.315305}: mean 6m delta below walk-forward gate
+ML scorer training failed: No ML ranker candidates passed walk-forward
+validation
+[2026-07-17T23:06:40+0800] run=4 exit=1
+{'train_rho_6m': 0.21204714525320406, 'gate_rho_6m': 0.07556300943021553, 'cached_metrics_safe': True, 'goal_train_rho': None, 'goal_gate_rho': '0.2607015', 'goal_met': False}
+
+[2026-07-17T23:06:42+0800] run=5 rows=0 refit_cap=0 limit=1 model=market-ridge-recent-1460 features=cross_sectional priors=rolling-ticker-priors targets=target-rank-weighted-901 lambdas=1000 folds=4 seeds=4 backend=mlx holdout_months=24 embargo_days=197 gate_min_delta=0.00002 gate_max_degradation=0.001 gate_min_utility=0.0 promotion_min_train_rho=none promotion_min_gate_rho=none top20_excess_guard=1 anchors=none force_snapshots=no
+23:06:51 INFO     valueinvestor.scorer_improver.ml_trainer — Resolved auto daily ML training end date -> 2026-01-09
+23:06:55 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward filter: 4 folds, 6 validation months/fold
+23:07:05 INFO     valueinvestor.scorer_improver.ml_trainer — ML candidate search target=6m targets=target_rank_weighted_901 models=market_ridge_recent_1460 features=cross_sectional priors=rolling_ticker_priors lambdas=1000 full_eval_limit=1
+23:07:05 INFO     valueinvestor.scorer_improver.ml_trainer — ML strict walk-forward panel target=6m selected=1 configuration_space=1
+23:07:05 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward shortlist target=6m selected=1 sample_candidates=1 floor_candidates=1 full_eval_limit=1
+23:07:12 INFO     valueinvestor.scorer_improver.ml_trainer — MLX ridge conjugate-gradient solve using device=Device(gpu, 0) rows=425661 features=244 steps=256 elapsed=0.30s, active_memory=419.4MB, peak_memory=427.2MB
+23:07:44 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward rejected target=target_rank_weighted_901 lambda=1000 model=market_ridge_recent_1460 features=cross_sectional priors=rolling_ticker_priors mean_deltas={'1w': -0.021927, '1m': -0.047142, '3m': -0.093779, '6m': -0.116239} min_deltas={'1w': -0.039683, '1m': -0.073818, '3m': -0.133962, '6m': -0.159564}: mean 6m delta below walk-forward gate
+ML scorer training failed: No ML ranker candidates passed walk-forward
+validation
+[2026-07-17T23:07:45+0800] run=5 exit=1
+{'train_rho_6m': 0.21204714525320406, 'gate_rho_6m': 0.07556300943021553, 'cached_metrics_safe': True, 'goal_train_rho': None, 'goal_gate_rho': '0.2607015', 'goal_met': False}
+
+[2026-07-17T23:07:46+0800] run=6 rows=0 refit_cap=0 limit=1 model=market-ridge-recent-1825 features=cross_sectional priors=rolling-ticker-priors targets=target-rank-weighted-901 lambdas=1000 folds=4 seeds=5 backend=mlx holdout_months=24 embargo_days=197 gate_min_delta=0.00002 gate_max_degradation=0.001 gate_min_utility=0.0 promotion_min_train_rho=none promotion_min_gate_rho=none top20_excess_guard=1 anchors=none force_snapshots=no
+23:07:56 INFO     valueinvestor.scorer_improver.ml_trainer — Resolved auto daily ML training end date -> 2026-01-09
+23:07:59 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward filter: 4 folds, 6 validation months/fold
+23:08:09 INFO     valueinvestor.scorer_improver.ml_trainer — ML candidate search target=6m targets=target_rank_weighted_901 models=market_ridge_recent_1825 features=cross_sectional priors=rolling_ticker_priors lambdas=1000 full_eval_limit=1
+23:08:09 INFO     valueinvestor.scorer_improver.ml_trainer — ML strict walk-forward panel target=6m selected=1 configuration_space=1
+23:08:09 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward shortlist target=6m selected=1 sample_candidates=1 floor_candidates=1 full_eval_limit=1
+23:08:17 INFO     valueinvestor.scorer_improver.ml_trainer — MLX ridge conjugate-gradient solve using device=Device(gpu, 0) rows=425661 features=244 steps=256 elapsed=0.29s, active_memory=419.4MB, peak_memory=427.2MB
+23:08:49 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward rejected target=target_rank_weighted_901 lambda=1000 model=market_ridge_recent_1825 features=cross_sectional priors=rolling_ticker_priors mean_deltas={'1w': -0.0219, '1m': -0.047579, '3m': -0.093933, '6m': -0.116882} min_deltas={'1w': -0.038732, '1m': -0.074265, '3m': -0.133676, '6m': -0.159329}: mean 6m delta below walk-forward gate
+ML scorer training failed: No ML ranker candidates passed walk-forward
+validation
+[2026-07-17T23:08:49+0800] run=6 exit=1
+{'train_rho_6m': 0.21204714525320406, 'gate_rho_6m': 0.07556300943021553, 'cached_metrics_safe': True, 'goal_train_rho': None, 'goal_gate_rho': '0.2607015', 'goal_met': False}
+
+[2026-07-17T23:08:50+0800] run=7 rows=0 refit_cap=0 limit=1 model=ridge-only features=core priors=rolling-ticker-priors targets=target-rank-6m lambdas=100 folds=4 seeds=6 backend=mlx holdout_months=24 embargo_days=197 gate_min_delta=0.00002 gate_max_degradation=0.001 gate_min_utility=0.0 promotion_min_train_rho=none promotion_min_gate_rho=none top20_excess_guard=1 anchors=none force_snapshots=no
+23:09:00 INFO     valueinvestor.scorer_improver.ml_trainer — Resolved auto daily ML training end date -> 2026-01-09
+23:09:04 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward filter: 4 folds, 6 validation months/fold
+23:09:14 INFO     valueinvestor.scorer_improver.ml_trainer — ML candidate search target=6m targets=target_rank_6m models=ridge features=core priors=rolling_ticker_priors lambdas=100 full_eval_limit=1
+23:09:14 INFO     valueinvestor.scorer_improver.ml_trainer — ML strict walk-forward panel target=6m selected=1 configuration_space=1
+23:09:14 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward shortlist target=6m selected=1 sample_candidates=1 floor_candidates=1 full_eval_limit=1
+23:09:17 INFO     valueinvestor.scorer_improver.ml_trainer — MLX ridge conjugate-gradient solve using device=Device(gpu, 0) rows=426999 features=133 steps=256 elapsed=0.16s, active_memory=230.8MB, peak_memory=233.2MB
+23:09:33 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward rejected target=target_rank_6m lambda=100 model=ridge features=core priors=rolling_ticker_priors mean_deltas={'1w': -0.04037, '1m': -0.071747, '3m': -0.135905, '6m': -0.171456} min_deltas={'1w': -0.080391, '1m': -0.116502, '3m': -0.195577, '6m': -0.249163}: mean 6m delta below walk-forward gate
+ML scorer training failed: No ML ranker candidates passed walk-forward
+validation
+[2026-07-17T23:09:33+0800] run=7 exit=1
+{'train_rho_6m': 0.21204714525320406, 'gate_rho_6m': 0.07556300943021553, 'cached_metrics_safe': True, 'goal_train_rho': None, 'goal_gate_rho': '0.2607015', 'goal_met': False}
+
+[2026-07-17T23:09:34+0800] run=8 rows=0 refit_cap=0 limit=1 model=market-ridge-recent-730 features=cross_sectional_interactions priors=rolling-ticker-priors targets=target-rank-6m-soft lambdas=1000 folds=4 seeds=7 backend=mlx holdout_months=24 embargo_days=197 gate_min_delta=0.00002 gate_max_degradation=0.001 gate_min_utility=0.0 promotion_min_train_rho=none promotion_min_gate_rho=none top20_excess_guard=1 anchors=none force_snapshots=no
+23:09:44 INFO     valueinvestor.scorer_improver.ml_trainer — Resolved auto daily ML training end date -> 2026-01-09
+23:09:47 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward filter: 4 folds, 6 validation months/fold
+23:09:57 INFO     valueinvestor.scorer_improver.ml_trainer — ML candidate search target=6m targets=target_rank_6m_soft models=market_ridge_recent_730 features=cross_sectional_interactions priors=rolling_ticker_priors lambdas=1000 full_eval_limit=1
+23:09:57 INFO     valueinvestor.scorer_improver.ml_trainer — ML strict walk-forward panel target=6m selected=1 configuration_space=1
+23:09:57 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward shortlist target=6m selected=1 sample_candidates=1 floor_candidates=1 full_eval_limit=1
+23:10:05 INFO     valueinvestor.scorer_improver.ml_trainer — MLX ridge conjugate-gradient solve using device=Device(gpu, 0) rows=426999 features=252 steps=256 elapsed=0.30s, active_memory=434.4MB, peak_memory=442.8MB
+23:10:38 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward rejected target=target_rank_6m_soft lambda=1000 model=market_ridge_recent_730 features=cross_sectional_interactions priors=rolling_ticker_priors mean_deltas={'1w': -0.022381, '1m': -0.045413, '3m': -0.095162, '6m': -0.115075} min_deltas={'1w': -0.046175, '1m': -0.06963, '3m': -0.136363, '6m': -0.16024}: mean 6m delta below walk-forward gate
+ML scorer training failed: No ML ranker candidates passed walk-forward
+validation
+[2026-07-17T23:10:38+0800] run=8 exit=1
+{'train_rho_6m': 0.21204714525320406, 'gate_rho_6m': 0.07556300943021553, 'cached_metrics_safe': True, 'goal_train_rho': None, 'goal_gate_rho': '0.2607015', 'goal_met': False}
+
+[2026-07-17T23:10:39+0800] run=9 rows=0 refit_cap=0 limit=1 model=market-ridge-recent-1095 features=cross_sectional priors=rolling-ticker-priors targets=target-rank-weighted-703 lambdas=1000 folds=4 seeds=8 backend=mlx holdout_months=24 embargo_days=197 gate_min_delta=0.00002 gate_max_degradation=0.001 gate_min_utility=0.0 promotion_min_train_rho=none promotion_min_gate_rho=none top20_excess_guard=1 anchors=none force_snapshots=no
+23:10:49 INFO     valueinvestor.scorer_improver.ml_trainer — Resolved auto daily ML training end date -> 2026-01-09
+23:10:53 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward filter: 4 folds, 6 validation months/fold
+23:11:02 INFO     valueinvestor.scorer_improver.ml_trainer — ML candidate search target=6m targets=target_rank_weighted_703 models=market_ridge_recent_1095 features=cross_sectional priors=rolling_ticker_priors lambdas=1000 full_eval_limit=1
+23:11:02 INFO     valueinvestor.scorer_improver.ml_trainer — ML strict walk-forward panel target=6m selected=1 configuration_space=1
+23:11:02 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward shortlist target=6m selected=1 sample_candidates=1 floor_candidates=1 full_eval_limit=1
+23:11:10 INFO     valueinvestor.scorer_improver.ml_trainer — MLX ridge conjugate-gradient solve using device=Device(gpu, 0) rows=425439 features=244 steps=256 elapsed=0.29s, active_memory=419.2MB, peak_memory=427.0MB
+23:11:42 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward rejected target=target_rank_weighted_703 lambda=1000 model=market_ridge_recent_1095 features=cross_sectional priors=rolling_ticker_priors mean_deltas={'1w': -0.023193, '1m': -0.044579, '3m': -0.089862, '6m': -0.113548} min_deltas={'1w': -0.039797, '1m': -0.068955, '3m': -0.123709, '6m': -0.15387}: mean 6m delta below walk-forward gate
+ML scorer training failed: No ML ranker candidates passed walk-forward
+validation
+[2026-07-17T23:11:42+0800] run=9 exit=1
+{'train_rho_6m': 0.21204714525320406, 'gate_rho_6m': 0.07556300943021553, 'cached_metrics_safe': True, 'goal_train_rho': None, 'goal_gate_rho': '0.2607015', 'goal_met': False}
+
+[2026-07-17T23:11:44+0800] run=10 rows=0 refit_cap=0 limit=1 model=market-ridge-recent-1095 features=cross_sectional_interactions priors=rolling-ticker-priors targets=target-rank-weighted-901 lambdas=1000 folds=4 seeds=9 backend=mlx holdout_months=24 embargo_days=197 gate_min_delta=0.00002 gate_max_degradation=0.001 gate_min_utility=0.0 promotion_min_train_rho=none promotion_min_gate_rho=none top20_excess_guard=1 anchors=none force_snapshots=no
+23:11:53 INFO     valueinvestor.scorer_improver.ml_trainer — Resolved auto daily ML training end date -> 2026-01-09
+23:11:57 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward filter: 4 folds, 6 validation months/fold
+23:12:07 INFO     valueinvestor.scorer_improver.ml_trainer — ML candidate search target=6m targets=target_rank_weighted_901 models=market_ridge_recent_1095 features=cross_sectional_interactions priors=rolling_ticker_priors lambdas=1000 full_eval_limit=1
+23:12:07 INFO     valueinvestor.scorer_improver.ml_trainer — ML strict walk-forward panel target=6m selected=1 configuration_space=1
+23:12:07 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward shortlist target=6m selected=1 sample_candidates=1 floor_candidates=1 full_eval_limit=1
+23:12:15 INFO     valueinvestor.scorer_improver.ml_trainer — MLX ridge conjugate-gradient solve using device=Device(gpu, 0) rows=425661 features=252 steps=256 elapsed=0.30s, active_memory=433.0MB, peak_memory=441.4MB
+23:12:47 INFO     valueinvestor.scorer_improver.ml_trainer — ML walk-forward rejected target=target_rank_weighted_901 lambda=1000 model=market_ridge_recent_1095 features=cross_sectional_interactions priors=rolling_ticker_priors mean_deltas={'1w': -0.021849, '1m': -0.04487, '3m': -0.092267, '6m': -0.114096} min_deltas={'1w': -0.040896, '1m': -0.069731, '3m': -0.13172, '6m': -0.155644}: mean 6m delta below walk-forward gate
+ML scorer training failed: No ML ranker candidates passed walk-forward
+validation
+[2026-07-17T23:12:48+0800] run=10 exit=1
+{'train_rho_6m': 0.21204714525320406, 'gate_rho_6m': 0.07556300943021553, 'cached_metrics_safe': True, 'goal_train_rho': None, 'goal_gate_rho': '0.2607015', 'goal_met': False}
+
+[2026-07-17T23:12:49+0800] finished 10-round 6m ML scorer training loop
+current_best_after=
+{'backend': 'mlx', 'model_kind': 'market_ridge_recent_1095', 'feature_set': 'cross_sectional', 'target': 'target_rank_weighted_901', 'prior_strategy': 'rolling_ticker_priors', 'cached_metrics_safe': True, 'train_rho_1w': 0.043580518388542704, 'train_rho_1m': 0.09620874559652869, 'train_rho_3m': 0.1639936745306967, 'train_rho_6m': 0.21204714525320406, 'gate_rho_6m': 0.07556300943021553}

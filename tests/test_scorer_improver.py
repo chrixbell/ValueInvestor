@@ -3499,6 +3499,7 @@ class TestAgentHelpers:
     def test_single_temporal_member_payload_rejects_cached_metrics(self) -> None:
         from valueinvestor.scorer_improver.ml_trainer import (
             _payload_cached_metrics_are_safe,
+            _payload_runtime_includes_evaluation_labels,
         )
 
         child_payload = {
@@ -3525,6 +3526,38 @@ class TestAgentHelpers:
 
         assert not _payload_cached_metrics_are_safe(bounded_single_member)
         assert _payload_cached_metrics_are_safe(two_member_payload)
+
+        ordinary_refit = {
+            **child_payload,
+            "metadata": {"full_fit_refit": True},
+        }
+        application_refit = {
+            **child_payload,
+            "metadata": {"application_refit": True},
+        }
+        deployment_refit = {
+            **child_payload,
+            "metadata": {"deployment_refit": {"frozen_after_outer_evaluation": True}},
+        }
+        full_refit_protocol = {
+            **child_payload,
+            "metadata": {"evaluation_protocol": "full_refit_current_24m_monthly_gate"},
+        }
+        nested_application_refit = {
+            **child_payload,
+            "rank_payload_members": [{"weight": 1.0, "payload": application_refit}],
+        }
+
+        assert _payload_cached_metrics_are_safe(ordinary_refit)
+        assert not _payload_runtime_includes_evaluation_labels(ordinary_refit)
+        for unsafe_payload in (
+            application_refit,
+            deployment_refit,
+            full_refit_protocol,
+            nested_application_refit,
+        ):
+            assert _payload_runtime_includes_evaluation_labels(unsafe_payload)
+            assert not _payload_cached_metrics_are_safe(unsafe_payload)
 
     def test_ml_ranker_payload_uses_row_priors_when_marked_rolling(self) -> None:
         from valueinvestor.scorer_improver.ml_trainer import predict_ml_ranker_payload
@@ -3826,6 +3859,8 @@ class TestAgentHelpers:
             "metadata": {
                 "backend": "temporal_payload_blend",
                 "metrics": {"6m": {"spearman_rho": 0.3}},
+                "strict_outer_gate": True,
+                "promotion_gate_manifest": {"gate_start": "2023-07-07"},
                 "promotion_gate_attempts": [{"large": "diagnostic"}],
                 "promotion_gate": {"regime_diagnostics": [{"large": "diagnostic"}]},
             },
@@ -3840,6 +3875,8 @@ class TestAgentHelpers:
         assert compacted["metadata"] == {
             "backend": "temporal_payload_blend",
             "metrics": {"6m": {"spearman_rho": 0.3}},
+            "strict_outer_gate": True,
+            "promotion_gate_manifest": {"gate_start": "2023-07-07"},
         }
         nested_metadata = compacted["temporal_payload_members"][0]["payload"]["metadata"]
         assert nested_metadata == {
